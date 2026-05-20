@@ -9,9 +9,13 @@ description = "Trading research and execution workbench for US equities and opti
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.14,<2.0",
   "fastapi>=0.115,<1.0",
   "httpx>=0.28,<1.0",
+  "longbridge>=4.0.5,<5.0",
   "pydantic-settings>=2.6,<3.0",
+  "psycopg[binary]>=3.2,<4.0",
+  "sqlalchemy>=2.0.36,<3.0",
   "uvicorn[standard]>=0.32,<1.0",
 ]
 
@@ -20,7 +24,22 @@ dev = [
   "pytest>=8.3,<9.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/stocks_tool"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/alembic",
+  "/docs",
+  "/tests",
+  "/README.md",
+  "/pyproject.toml",
+  "/alembic.ini",
+  "/compose.yaml",
+  "/.env.example",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-

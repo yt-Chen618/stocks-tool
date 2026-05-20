@@ -1,0 +1,262 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.core.config import Settings
+from stocks_tool.domain.enums import AssetType, BrokerName, ExecutionMode
+from stocks_tool.domain.models import (
+    BrokerOrderSnapshot,
+    CreateOrderRequest,
+    Order,
+    OrderSyncResult,
+    ReplaceOrderRequest,
+)
+from stocks_tool.ports.repository import (
+    BrokerAccountRepository,
+    OrderRepository,
+    TradePlanRepository,
+)
+
+
+class OrderService:
+    def __init__(
+        self,
+        settings: Settings,
+        broker_accounts: BrokerAccountRepository,
+        trade_plans: TradePlanRepository,
+        orders: OrderRepository,
+        longbridge_adapter: LongbridgeBrokerAdapter,
+    ) -> None:
+        self.settings = settings
+        self.broker_accounts = broker_accounts
+        self.trade_plans = trade_plans
+        self.orders = orders
+        self.longbridge_adapter = longbridge_adapter
+
+    def list_orders(
+        self,
+        external_account_id: str | None = None,
+    ) -> list[Order]:
+        return self.orders.list_orders(external_account_id=external_account_id)
+
+    def get_order(self, order_id: str) -> Order | None:
+        return self.orders.get_order(order_id)
+
+    def submit_order(self, request: CreateOrderRequest) -> Order:
+        if request.mode == ExecutionMode.LIVE and not self.settings.allow_live_trading:
+            raise PermissionError("Live trading is disabled. Set `ALLOW_LIVE_TRADING=true` to enable it.")
+
+        broker_account = self.broker_accounts.get_by_external_account_id(request.external_account_id)
+        if broker_account is None:
+            raise LookupError(
+                f"No broker account was found for '{request.external_account_id}'."
+            )
+        if not broker_account.is_active:
+            raise ValueError(f"Broker account '{request.external_account_id}' is inactive.")
+        if broker_account.broker != request.broker:
+            raise ValueError(
+                f"Broker account '{request.external_account_id}' is not a {request.broker.value} account."
+            )
+        if request.trade_plan_id is not None and self.trade_plans.get_plan(request.trade_plan_id) is None:
+            raise LookupError(f"Trade plan '{request.trade_plan_id}' was not found.")
+
+        if request.broker != BrokerName.LONGBRIDGE:
+            raise NotImplementedError(f"Broker '{request.broker.value}' is not supported yet.")
+
+        remote_snapshot = self.longbridge_adapter.submit_order(request)
+        now = datetime.now(timezone.utc)
+        order = Order(
+            id=str(uuid4()),
+            broker=request.broker,
+            external_account_id=request.external_account_id,
+            trade_plan_id=request.trade_plan_id,
+            external_order_id=remote_snapshot.external_order_id,
+            client_order_id=f"local-{uuid4().hex[:24]}",
+            symbol=remote_snapshot.symbol,
+            asset_type=request.asset_type,
+            side=remote_snapshot.side,
+            quantity=remote_snapshot.quantity,
+            order_type=remote_snapshot.order_type,
+            time_in_force=remote_snapshot.time_in_force,
+            mode=request.mode,
+            status=remote_snapshot.status,
+            limit_price=remote_snapshot.limit_price,
+            stop_price=remote_snapshot.stop_price,
+            option_contract=request.option_contract,
+            raw_payload={
+                "submission_request": request.model_dump(mode="json"),
+                "remote_order": remote_snapshot.raw_payload,
+            },
+            submitted_at=remote_snapshot.submitted_at,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.orders.create_order(order)
+
+    def refresh_order(self, order_id: str) -> Order:
+        order = self._get_order_or_raise(order_id)
+        if order.external_order_id is None:
+            raise ValueError(f"Order '{order_id}' has no broker order id to refresh.")
+        if order.broker != BrokerName.LONGBRIDGE:
+            raise NotImplementedError(f"Broker '{order.broker.value}' is not supported yet.")
+
+        remote_snapshot = self.longbridge_adapter.get_order(
+            external_order_id=order.external_order_id,
+            mode=order.mode,
+        )
+        return self._merge_remote_snapshot(order, remote_snapshot)
+
+    def cancel_order(self, order_id: str) -> Order:
+        order = self._get_order_or_raise(order_id)
+        if order.external_order_id is None:
+            raise ValueError(f"Order '{order_id}' has no broker order id to cancel.")
+        if order.broker != BrokerName.LONGBRIDGE:
+            raise NotImplementedError(f"Broker '{order.broker.value}' is not supported yet.")
+
+        remote_snapshot = self.longbridge_adapter.cancel_order(
+            external_order_id=order.external_order_id,
+            mode=order.mode,
+        )
+        return self._merge_remote_snapshot(order, remote_snapshot)
+
+    def replace_order(self, order_id: str, request: ReplaceOrderRequest) -> Order:
+        order = self._get_order_or_raise(order_id)
+        if order.external_order_id is None:
+            raise ValueError(f"Order '{order_id}' has no broker order id to replace.")
+        if order.broker != BrokerName.LONGBRIDGE:
+            raise NotImplementedError(f"Broker '{order.broker.value}' is not supported yet.")
+
+        remote_snapshot = self.longbridge_adapter.replace_order(
+            external_order_id=order.external_order_id,
+            quantity=request.quantity,
+            limit_price=request.limit_price,
+            stop_price=request.stop_price,
+            remark=request.remark,
+            mode=order.mode,
+        )
+        replaced = order.model_copy(
+            update={
+                "quantity": request.quantity,
+                "limit_price": request.limit_price,
+                "stop_price": request.stop_price,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        return self._merge_remote_snapshot(replaced, remote_snapshot)
+
+    def sync_today_orders(
+        self,
+        external_account_id: str,
+        mode: ExecutionMode,
+        symbol: str | None = None,
+    ) -> OrderSyncResult:
+        broker_account = self.broker_accounts.get_by_external_account_id(external_account_id)
+        if broker_account is None:
+            raise LookupError(
+                f"No broker account was found for '{external_account_id}'."
+            )
+        if broker_account.broker != BrokerName.LONGBRIDGE:
+            raise NotImplementedError(
+                f"Broker '{broker_account.broker.value}' is not supported yet."
+            )
+
+        remote_orders = self.longbridge_adapter.list_today_orders(
+            mode=mode,
+            symbol=symbol,
+        )
+        created_orders = 0
+        updated_orders = 0
+        persisted_orders: list[Order] = []
+        for remote_snapshot in remote_orders:
+            existing = self.orders.get_by_external_order_id(remote_snapshot.external_order_id)
+            if existing is None:
+                created_orders += 1
+                persisted_orders.append(
+                    self.orders.create_order(
+                        self._build_local_order(
+                            external_account_id=external_account_id,
+                            remote_snapshot=remote_snapshot,
+                            mode=mode,
+                        )
+                    )
+                )
+            else:
+                updated_orders += 1
+                persisted_orders.append(self._merge_remote_snapshot(existing, remote_snapshot))
+
+        return OrderSyncResult(
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id=external_account_id,
+            mode=mode,
+            synced_orders=len(remote_orders),
+            created_orders=created_orders,
+            updated_orders=updated_orders,
+            orders=persisted_orders,
+        )
+
+    def _get_order_or_raise(self, order_id: str) -> Order:
+        order = self.orders.get_order(order_id)
+        if order is None:
+            raise LookupError(f"Order '{order_id}' was not found.")
+        return order
+
+    def _merge_remote_snapshot(
+        self,
+        local_order: Order,
+        remote_snapshot: BrokerOrderSnapshot,
+    ) -> Order:
+        raw_payload = dict(local_order.raw_payload or {})
+        raw_payload["remote_order"] = remote_snapshot.raw_payload
+        raw_payload["refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        refreshed_order = local_order.model_copy(
+            update={
+                "external_order_id": remote_snapshot.external_order_id,
+                "symbol": remote_snapshot.symbol,
+                "side": remote_snapshot.side,
+                "quantity": remote_snapshot.quantity,
+                "order_type": remote_snapshot.order_type,
+                "time_in_force": remote_snapshot.time_in_force,
+                "status": remote_snapshot.status,
+                "limit_price": remote_snapshot.limit_price,
+                "stop_price": remote_snapshot.stop_price,
+                "submitted_at": remote_snapshot.submitted_at,
+                "raw_payload": raw_payload,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+        return self.orders.update_order(refreshed_order)
+
+    def _build_local_order(
+        self,
+        *,
+        external_account_id: str,
+        remote_snapshot: BrokerOrderSnapshot,
+        mode: ExecutionMode,
+    ) -> Order:
+        now = datetime.now(timezone.utc)
+        return Order(
+            id=str(uuid4()),
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id=external_account_id,
+            trade_plan_id=None,
+            external_order_id=remote_snapshot.external_order_id,
+            client_order_id=f"import-{remote_snapshot.external_order_id}",
+            symbol=remote_snapshot.symbol,
+            asset_type=AssetType.STOCK,
+            side=remote_snapshot.side,
+            quantity=remote_snapshot.quantity,
+            order_type=remote_snapshot.order_type,
+            time_in_force=remote_snapshot.time_in_force,
+            mode=mode,
+            status=remote_snapshot.status,
+            limit_price=remote_snapshot.limit_price,
+            stop_price=remote_snapshot.stop_price,
+            option_contract=None,
+            raw_payload={
+                "remote_order": remote_snapshot.raw_payload,
+                "imported": True,
+            },
+            submitted_at=remote_snapshot.submitted_at,
+            created_at=remote_snapshot.submitted_at or now,
+            updated_at=now,
+        )

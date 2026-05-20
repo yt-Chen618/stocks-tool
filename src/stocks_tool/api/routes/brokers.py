@@ -1,8 +1,25 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
-from stocks_tool.api.dependencies import get_longbridge_adapter
-from stocks_tool.domain.models import BrokerConfigurationStatus, BrokerProfile
+from stocks_tool.adapters.brokers.longbridge import (
+    LongbridgeBrokerAdapter,
+    LongbridgeConfigurationError,
+    LongbridgeDependencyError,
+    LongbridgeIntegrationError,
+)
+from stocks_tool.api.dependencies import (
+    get_longbridge_adapter,
+    get_longbridge_integration_service,
+)
+from stocks_tool.application.services.longbridge_integration import (
+    LongbridgeIntegrationService,
+)
+from stocks_tool.domain.enums import ExecutionMode
+from stocks_tool.domain.models import (
+    BrokerAccountSyncResult,
+    BrokerConfigurationStatus,
+    BrokerProfile,
+    SecurityQuoteSnapshot,
+)
 
 router = APIRouter(prefix="/brokers", tags=["brokers"])
 
@@ -20,3 +37,47 @@ def get_longbridge_configuration(
 ) -> BrokerConfigurationStatus:
     return adapter.get_configuration_status()
 
+
+@router.get("/longbridge/quote", response_model=SecurityQuoteSnapshot)
+def get_longbridge_quote(
+    symbol: str = Query(..., description="Longbridge security symbol, e.g. AAPL.US"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: LongbridgeIntegrationService = Depends(get_longbridge_integration_service),
+) -> SecurityQuoteSnapshot:
+    try:
+        return service.get_quote(symbol=symbol, mode=mode)
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post(
+    "/longbridge/account-sync/{external_account_id}",
+    response_model=BrokerAccountSyncResult,
+)
+def sync_longbridge_account(
+    external_account_id: str,
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    currency: str | None = Query(
+        default=None,
+        description="Optional currency override. Defaults to the local broker account base currency.",
+    ),
+    service: LongbridgeIntegrationService = Depends(get_longbridge_integration_service),
+) -> BrokerAccountSyncResult:
+    try:
+        return service.sync_account(
+            external_account_id=external_account_id,
+            mode=mode,
+            currency=currency,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

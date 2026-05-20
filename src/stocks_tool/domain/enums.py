@@ -46,6 +46,15 @@ class OrderType(str, Enum):
     STOP = "stop"
 
 
+class OrderStatus(str, Enum):
+    CREATED = "created"
+    SUBMITTED = "submitted"
+    PARTIALLY_FILLED = "partially_filled"
+    FILLED = "filled"
+    CANCELED = "canceled"
+    REJECTED = "rejected"
+
+
 class PlanStatus(str, Enum):
     DRAFT = "draft"
     APPROVED = "approved"
@@ -70,4 +79,3 @@ class TradeStructure(str, Enum):
     STOCK = "stock"
     LONG_CALL = "long_call"
     LONG_PUT = "long_put"
-
