@@ -9,4 +9,6 @@ build/
 *.pyo
 *.pyd
 .env
-
+artifacts/
+output/playwright/
+.playwright-cli/

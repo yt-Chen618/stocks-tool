@@ -6,6 +6,7 @@ const state = {
   snapshots: [],
   brokerStatus: null,
   latestSnapshot: null,
+  selectedOrderId: "",
 };
 
 const els = {};
@@ -13,6 +14,8 @@ const els = {};
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
   wireEvents();
+  syncTicketOrderFields();
+  renderSelectedOrder();
   await loadDashboard();
 });
 
@@ -20,6 +23,8 @@ function bindElements() {
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
   els.metricsStrip = document.getElementById("metrics-strip");
+  els.positionsSummaryStrip = document.getElementById("positions-summary-strip");
+  els.holdingsFocus = document.getElementById("holdings-focus");
   els.watchlistsBody = document.getElementById("watchlists-body");
   els.ordersBody = document.getElementById("orders-body");
   els.positionsBody = document.getElementById("positions-body");
@@ -30,6 +35,28 @@ function bindElements() {
   els.refreshDashboard = document.getElementById("refresh-dashboard");
   els.syncAccount = document.getElementById("sync-account");
   els.syncOrders = document.getElementById("sync-orders");
+  els.orderTicketForm = document.getElementById("order-ticket-form");
+  els.orderSymbol = document.getElementById("order-symbol");
+  els.orderSide = document.getElementById("order-side");
+  els.orderQuantity = document.getElementById("order-quantity");
+  els.orderType = document.getElementById("order-type");
+  els.orderTimeInForce = document.getElementById("order-time-in-force");
+  els.orderLimitField = document.getElementById("order-limit-field");
+  els.orderLimitPrice = document.getElementById("order-limit-price");
+  els.orderStopField = document.getElementById("order-stop-field");
+  els.orderStopPrice = document.getElementById("order-stop-price");
+  els.orderRemark = document.getElementById("order-remark");
+  els.orderFormHint = document.getElementById("order-form-hint");
+  els.submitOrder = document.getElementById("submit-order");
+  els.selectedOrderCard = document.getElementById("selected-order-card");
+  els.replaceOrderForm = document.getElementById("replace-order-form");
+  els.replaceQuantity = document.getElementById("replace-quantity");
+  els.replaceLimitField = document.getElementById("replace-limit-field");
+  els.replaceLimitPrice = document.getElementById("replace-limit-price");
+  els.replaceStopField = document.getElementById("replace-stop-field");
+  els.replaceStopPrice = document.getElementById("replace-stop-price");
+  els.replaceRemark = document.getElementById("replace-remark");
+  els.replaceFormHint = document.getElementById("replace-form-hint");
 }
 
 function wireEvents() {
@@ -62,6 +89,68 @@ function wireEvents() {
     event.preventDefault();
     await loadQuote();
   });
+
+  els.orderType.addEventListener("change", () => {
+    syncTicketOrderFields();
+  });
+
+  els.orderTicketForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitOrder();
+  });
+
+  els.ordersBody.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-order-action]");
+    if (!button) {
+      return;
+    }
+
+    const { orderAction, orderId } = button.dataset;
+    if (!orderAction || !orderId) {
+      return;
+    }
+
+    if (orderAction === "manage") {
+      setSelectedOrder(orderId, true);
+      return;
+    }
+
+    if (orderAction === "refresh") {
+      await refreshOrder(orderId);
+      return;
+    }
+
+    if (orderAction === "cancel") {
+      await cancelOrder(orderId);
+    }
+  });
+
+  els.selectedOrderCard.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-selected-action]");
+    if (!button) {
+      return;
+    }
+
+    const action = button.dataset.selectedAction;
+    const order = getSelectedOrder();
+    if (!action || !order) {
+      return;
+    }
+
+    if (action === "refresh") {
+      await refreshOrder(order.id);
+      return;
+    }
+
+    if (action === "cancel") {
+      await cancelOrder(order.id);
+    }
+  });
+
+  els.replaceOrderForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await replaceSelectedOrder();
+  });
 }
 
 async function loadDashboard() {
@@ -86,6 +175,7 @@ async function loadDashboard() {
     renderAccountOptions();
     renderWatchlists();
     renderBrokerStatus();
+    updateOrderTicketAvailability();
     await loadAccountData();
     await loadQuote();
     setStatus("Dashboard updated.", "success");
@@ -100,9 +190,13 @@ async function loadAccountData() {
     state.snapshots = [];
     state.orders = [];
     state.latestSnapshot = null;
+    state.selectedOrderId = "";
     renderMetrics();
+    renderHoldings();
     renderOrders();
     renderPositions();
+    renderSelectedOrder();
+    updateOrderTicketAvailability();
     return;
   }
 
@@ -114,9 +208,17 @@ async function loadAccountData() {
     state.snapshots = snapshots;
     state.orders = orders;
     state.latestSnapshot = snapshots[0] || null;
+
+    if (!orders.some((order) => order.id === state.selectedOrderId)) {
+      state.selectedOrderId = orders[0]?.id || "";
+    }
+
     renderMetrics();
+    renderHoldings();
     renderOrders();
     renderPositions();
+    renderSelectedOrder();
+    updateOrderTicketAvailability();
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load account data.", "error");
@@ -169,6 +271,105 @@ async function syncOrders() {
   }
 }
 
+async function submitOrder() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before submitting an order.", "warning");
+    return;
+  }
+
+  try {
+    const payload = buildCreateOrderPayload();
+    setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
+    const created = await fetchJson("/orders/submit", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.selectedOrderId = created.id;
+    els.orderRemark.value = "";
+    await loadAccountData();
+    setSelectedOrder(created.id);
+    setStatus(`Order submitted for ${created.symbol}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Order submission failed.", "error");
+  }
+}
+
+async function refreshOrder(orderId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  setStatus(`Refreshing order ${order?.symbol || orderId}...`, "warning");
+  try {
+    const refreshed = await fetchJson(`/orders/${encodeURIComponent(orderId)}/refresh`, {
+      method: "POST",
+    });
+    state.selectedOrderId = refreshed.id;
+    await loadAccountData();
+    setSelectedOrder(refreshed.id);
+    setStatus(`Order ${refreshed.symbol} refreshed.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Order refresh failed.", "error");
+  }
+}
+
+async function cancelOrder(orderId) {
+  const order = state.orders.find((item) => item.id === orderId);
+  if (!order) {
+    setStatus("Order not found in the current table.", "error");
+    return;
+  }
+  if (!isCancelableOrder(order)) {
+    setStatus("This order can no longer be canceled.", "warning");
+    return;
+  }
+  if (!window.confirm(`Cancel order ${order.symbol} ${order.side.toUpperCase()} ${order.quantity}?`)) {
+    return;
+  }
+
+  setStatus(`Canceling order ${order.symbol}...`, "warning");
+  try {
+    const canceled = await fetchJson(`/orders/${encodeURIComponent(orderId)}/cancel`, {
+      method: "POST",
+    });
+    state.selectedOrderId = canceled.id;
+    await loadAccountData();
+    setSelectedOrder(canceled.id);
+    setStatus(`Order ${canceled.symbol} canceled.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Order cancel failed.", "error");
+  }
+}
+
+async function replaceSelectedOrder() {
+  const order = getSelectedOrder();
+  if (!order) {
+    setStatus("Select an order before replacing it.", "warning");
+    return;
+  }
+  if (!isReplaceableOrder(order)) {
+    setStatus("Only working orders can be replaced.", "warning");
+    return;
+  }
+
+  try {
+    const payload = buildReplaceOrderPayload(order);
+    setStatus(`Replacing order ${order.symbol}...`, "warning");
+    const updated = await fetchJson(`/orders/${encodeURIComponent(order.id)}/replace`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.selectedOrderId = updated.id;
+    els.replaceRemark.value = "";
+    await loadAccountData();
+    setSelectedOrder(updated.id);
+    setStatus(`Order ${updated.symbol} updated.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Order replace failed.", "error");
+  }
+}
+
 function renderAccountOptions() {
   els.accountSelect.innerHTML = "";
   if (state.accounts.length === 0) {
@@ -183,7 +384,7 @@ function renderAccountOptions() {
     const option = document.createElement("option");
     option.value = account.external_account_id;
     option.selected = account.external_account_id === state.selectedAccountId;
-    option.textContent = `${account.display_name || account.external_account_id} · ${account.base_currency}`;
+    option.textContent = `${account.display_name || account.external_account_id} / ${account.base_currency}`;
     els.accountSelect.append(option);
   }
 }
@@ -201,6 +402,93 @@ function renderMetrics() {
   tiles.forEach((tile, index) => {
     tile.textContent = values[index] || "--";
   });
+}
+
+function renderHoldings() {
+  const snapshot = state.latestSnapshot;
+  const positions = buildSortedPositions(snapshot?.positions || []);
+  const currency = snapshot?.currency || "USD";
+  const grossMarketValue = positions.reduce((sum, position) => sum + toFiniteNumber(position.market_value), 0);
+  const totalUnrealizedPnl = positions.reduce((sum, position) => sum + toFiniteNumber(position.unrealized_pnl), 0);
+  const largestHolding = positions[0] || null;
+  const profitableCount = positions.filter((position) => toNumber(position.unrealized_pnl) > 0).length;
+  const losingCount = positions.filter((position) => toNumber(position.unrealized_pnl) < 0).length;
+  const summaryValues = [
+    {
+      label: "Open Positions",
+      value: String(positions.length),
+      tone: "",
+      detail: positions.length ? `${profitableCount} profitable / ${losingCount} losing` : "No active holdings",
+    },
+    {
+      label: "Gross Market Value",
+      value: positions.length ? formatCurrency(grossMarketValue, currency) : "--",
+      tone: "",
+      detail: positions.length ? `Latest snapshot ${formatDateTime(snapshot?.captured_at)}` : "Sync account to load holdings",
+    },
+    {
+      label: "Unrealized PnL",
+      value: positions.length ? formatSignedCurrency(totalUnrealizedPnl, currency) : "--",
+      tone: pnlTone(totalUnrealizedPnl),
+      detail: positions.length ? `${formatPercent(totalUnrealizedPnl, grossMarketValue)}` : "No open positions",
+    },
+    {
+      label: "Largest Holding",
+      value: largestHolding ? largestHolding.symbol : "--",
+      tone: "",
+      detail: largestHolding ? `${formatCurrency(largestHolding.market_value, currency)} / ${formatWeight(largestHolding.market_value, grossMarketValue)}` : "No ranked holdings",
+    },
+  ];
+
+  els.positionsSummaryStrip.innerHTML = summaryValues
+    .map(
+      (item) => `
+        <article class="mini-metric-tile">
+          <span class="metric-label">${escapeHtml(item.label)}</span>
+          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
+
+  if (positions.length === 0) {
+    els.holdingsFocus.innerHTML = '<div class="holding-empty">No positions in latest snapshot.</div>';
+    return;
+  }
+
+  els.holdingsFocus.innerHTML = positions
+    .slice(0, 5)
+    .map((position) => {
+      const pnl = toNumber(position.unrealized_pnl);
+      const tone = pnlTone(pnl);
+      return `
+        <article class="holding-card">
+          <div class="holding-head">
+            <div class="symbol-block">
+              <strong>${escapeHtml(position.symbol)}</strong>
+              <span>${escapeHtml(position.asset_type.toUpperCase())} / ${escapeHtml(formatWeight(position.market_value, grossMarketValue))}</span>
+            </div>
+            <span class="pill ${tone}">${escapeHtml(formatSignedCurrency(position.unrealized_pnl, currency))}</span>
+          </div>
+          <div class="holding-stats">
+            <div>
+              <span>Quantity</span>
+              <strong>${escapeHtml(formatPositionQuantity(position.quantity))}</strong>
+            </div>
+            <div>
+              <span>Avg Cost</span>
+              <strong>${escapeHtml(formatCurrency(position.average_cost, currency))}</strong>
+            </div>
+            <div>
+              <span>Market Value</span>
+              <strong>${escapeHtml(formatCurrency(position.market_value, currency))}</strong>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function renderBrokerStatus() {
@@ -269,7 +557,7 @@ function renderWatchlists() {
 
 function renderOrders() {
   if (state.orders.length === 0) {
-    els.ordersBody.innerHTML = '<tr><td colspan="6" class="empty-row">No orders for this account.</td></tr>';
+    els.ordersBody.innerHTML = '<tr><td colspan="7" class="empty-row">No orders for this account.</td></tr>';
     return;
   }
 
@@ -277,14 +565,36 @@ function renderOrders() {
     .slice(0, 10)
     .map((order) => {
       const pillClass = statusClass(order.status);
+      const canCancel = isCancelableOrder(order);
+      const selectedClass = order.id === state.selectedOrderId ? "is-selected" : "";
       return `
-        <tr>
-          <td>${escapeHtml(order.symbol)}</td>
+        <tr class="${selectedClass}">
+          <td>
+            <div class="symbol-cell">
+              <strong>${escapeHtml(order.symbol)}</strong>
+              <span>${escapeHtml(order.order_type.toUpperCase())} / ${escapeHtml(order.time_in_force.toUpperCase())}</span>
+            </div>
+          </td>
           <td>${escapeHtml(order.side.toUpperCase())}</td>
           <td>${escapeHtml(String(order.quantity))}</td>
           <td><span class="pill ${pillClass}">${escapeHtml(order.status)}</span></td>
-          <td>${order.limit_price ? escapeHtml(order.limit_price) : "--"}</td>
+          <td>${escapeHtml(formatOrderPrice(order))}</td>
           <td>${escapeHtml(formatDateTime(order.updated_at))}</td>
+          <td>
+            <div class="table-actions">
+              <button class="table-action primary" type="button" data-order-action="manage" data-order-id="${escapeHtml(order.id)}">
+                Manage
+              </button>
+              <button class="table-action" type="button" data-order-action="refresh" data-order-id="${escapeHtml(order.id)}">
+                Refresh
+              </button>
+              ${
+                canCancel
+                  ? `<button class="table-action danger" type="button" data-order-action="cancel" data-order-id="${escapeHtml(order.id)}">Cancel</button>`
+                  : ""
+              }
+            </div>
+          </td>
         </tr>
       `;
     })
@@ -292,9 +602,12 @@ function renderOrders() {
 }
 
 function renderPositions() {
-  const positions = state.latestSnapshot?.positions || [];
+  const snapshot = state.latestSnapshot;
+  const positions = buildSortedPositions(snapshot?.positions || []);
+  const currency = snapshot?.currency || "USD";
+  const grossMarketValue = positions.reduce((sum, position) => sum + toFiniteNumber(position.market_value), 0);
   if (positions.length === 0) {
-    els.positionsBody.innerHTML = '<tr><td colspan="5" class="empty-row">No positions in latest snapshot.</td></tr>';
+    els.positionsBody.innerHTML = '<tr><td colspan="7" class="empty-row">No positions in latest snapshot.</td></tr>';
     return;
   }
 
@@ -303,10 +616,12 @@ function renderPositions() {
       (position) => `
         <tr>
           <td>${escapeHtml(position.symbol)}</td>
-          <td>${escapeHtml(String(position.quantity))}</td>
-          <td>${escapeHtml(position.average_cost)}</td>
-          <td>${escapeHtml(position.market_value)}</td>
-          <td>${escapeHtml(position.unrealized_pnl)}</td>
+          <td><span class="pill neutral">${escapeHtml(position.asset_type)}</span></td>
+          <td>${escapeHtml(formatPositionQuantity(position.quantity))}</td>
+          <td>${escapeHtml(formatCurrency(position.average_cost, currency))}</td>
+          <td>${escapeHtml(formatCurrency(position.market_value, currency))}</td>
+          <td><span class="pnl-chip ${pnlTone(toNumber(position.unrealized_pnl))}">${escapeHtml(formatSignedCurrency(position.unrealized_pnl, currency))}</span></td>
+          <td>${escapeHtml(formatWeight(position.market_value, grossMarketValue))}</td>
         </tr>
       `
     )
@@ -327,7 +642,7 @@ function renderQuote(quote) {
       <span class="section-kicker">${escapeHtml(quote.symbol)}</span>
       <div class="quote-price">
         <strong>${formatNumber(quote.last_done)}</strong>
-        <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} · ${changePrefix}${pct.toFixed(2)}%</span>
+        <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} / ${changePrefix}${pct.toFixed(2)}%</span>
       </div>
     </div>
     <div class="quote-meta">
@@ -339,6 +654,370 @@ function renderQuote(quote) {
       <div><span>Timestamp</span><strong>${escapeHtml(formatDateTime(quote.timestamp))}</strong></div>
     </div>
   `;
+}
+
+function renderSelectedOrder() {
+  const order = getSelectedOrder();
+  if (!order) {
+    els.selectedOrderCard.className = "selected-order empty";
+    els.selectedOrderCard.textContent = "Select an order from the table to manage it.";
+    hideReplaceForm();
+    return;
+  }
+
+  const canReplace = isReplaceableOrder(order);
+  const canCancel = isCancelableOrder(order);
+  const statusTone = statusClass(order.status);
+
+  els.selectedOrderCard.className = "selected-order";
+  els.selectedOrderCard.innerHTML = `
+    <div class="selected-order-head">
+      <div>
+        <span class="section-kicker">Selected Order</span>
+        <h3 class="selected-order-title">${escapeHtml(order.symbol)} ${escapeHtml(order.side.toUpperCase())} x ${escapeHtml(String(order.quantity))}</h3>
+      </div>
+      <span class="pill ${statusTone}">${escapeHtml(order.status)}</span>
+    </div>
+    <div class="selected-order-meta">
+      <div>
+        <span>External ID</span>
+        <strong>${escapeHtml(order.external_order_id || "--")}</strong>
+      </div>
+      <div>
+        <span>Account</span>
+        <strong>${escapeHtml(order.external_account_id)}</strong>
+      </div>
+      <div>
+        <span>Order Type</span>
+        <strong>${escapeHtml(order.order_type.toUpperCase())}</strong>
+      </div>
+      <div>
+        <span>Time In Force</span>
+        <strong>${escapeHtml(order.time_in_force.toUpperCase())}</strong>
+      </div>
+      <div>
+        <span>Price Logic</span>
+        <strong>${escapeHtml(formatOrderPrice(order))}</strong>
+      </div>
+      <div>
+        <span>Updated</span>
+        <strong>${escapeHtml(formatDateTime(order.updated_at))}</strong>
+      </div>
+    </div>
+    <div class="selected-order-actions">
+      <button class="icon-button" type="button" data-selected-action="refresh">
+        <span class="icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" focusable="false">
+            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+            <path d="M21 3v6h-6"/>
+          </svg>
+        </span>
+        <span>Refresh</span>
+      </button>
+      ${
+        canCancel
+          ? `
+            <button class="icon-button" type="button" data-selected-action="cancel">
+              <span class="icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M18 6 6 18"/>
+                  <path d="m6 6 12 12"/>
+                </svg>
+              </span>
+              <span>Cancel</span>
+            </button>
+          `
+          : ""
+      }
+    </div>
+    ${
+      canReplace
+        ? ""
+        : '<p class="form-hint">Filled, canceled, and rejected orders can be refreshed but not replaced.</p>'
+    }
+  `;
+
+  if (canReplace) {
+    populateReplaceForm(order);
+  } else {
+    hideReplaceForm();
+  }
+}
+
+function setSelectedOrder(orderId, shouldScroll = false) {
+  state.selectedOrderId = orderId;
+  renderOrders();
+  renderSelectedOrder();
+
+  if (shouldScroll) {
+    els.selectedOrderCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function getSelectedOrder() {
+  return state.orders.find((order) => order.id === state.selectedOrderId) || null;
+}
+
+function populateReplaceForm(order) {
+  els.replaceOrderForm.dataset.orderId = order.id;
+  els.replaceQuantity.value = String(order.quantity);
+  els.replaceLimitPrice.value = order.limit_price ?? "";
+  els.replaceStopPrice.value = order.stop_price ?? "";
+  els.replaceRemark.value = "";
+  syncReplaceOrderFields(order.order_type);
+  els.replaceOrderForm.classList.remove("hidden");
+}
+
+function hideReplaceForm() {
+  els.replaceOrderForm.dataset.orderId = "";
+  els.replaceOrderForm.classList.add("hidden");
+}
+
+function updateOrderTicketAvailability() {
+  const hasAccount = Boolean(state.selectedAccountId);
+  els.submitOrder.disabled = !hasAccount;
+  els.submitOrder.title = hasAccount ? "" : "Select a broker account first.";
+}
+
+function syncTicketOrderFields() {
+  syncOrderTypeFields({
+    orderType: els.orderType.value,
+    limitField: els.orderLimitField,
+    stopField: els.orderStopField,
+    limitInput: els.orderLimitPrice,
+    stopInput: els.orderStopPrice,
+    hintEl: els.orderFormHint,
+    marketHint: "Market orders use the selected paper account and do not require a price.",
+    limitHint: "Limit orders require a limit price.",
+    stopHint: "Stop orders require a stop price. Add an optional limit price to send a stop-limit style order.",
+  });
+}
+
+function syncReplaceOrderFields(orderType) {
+  syncOrderTypeFields({
+    orderType,
+    limitField: els.replaceLimitField,
+    stopField: els.replaceStopField,
+    limitInput: els.replaceLimitPrice,
+    stopInput: els.replaceStopPrice,
+    hintEl: els.replaceFormHint,
+    marketHint: "Market order replacements update quantity only.",
+    limitHint: "Limit order replacements require a limit price.",
+    stopHint: "Stop order replacements require a stop price. Limit price remains optional.",
+  });
+}
+
+function syncOrderTypeFields({
+  orderType,
+  limitField,
+  stopField,
+  limitInput,
+  stopInput,
+  hintEl,
+  marketHint,
+  limitHint,
+  stopHint,
+}) {
+  const showLimit = orderType === "limit" || orderType === "stop";
+  const showStop = orderType === "stop";
+
+  setFieldVisibility(limitField, limitInput, showLimit);
+  setFieldVisibility(stopField, stopInput, showStop);
+
+  if (orderType === "market") {
+    limitInput.value = "";
+    stopInput.value = "";
+    hintEl.textContent = marketHint;
+    return;
+  }
+
+  if (orderType === "limit") {
+    stopInput.value = "";
+    hintEl.textContent = limitHint;
+    return;
+  }
+
+  hintEl.textContent = stopHint;
+}
+
+function setFieldVisibility(field, input, visible) {
+  field.classList.toggle("hidden", !visible);
+  input.disabled = !visible;
+}
+
+function buildCreateOrderPayload() {
+  const symbol = els.orderSymbol.value.trim().toUpperCase();
+  if (!symbol) {
+    throw new Error("Order symbol is required.");
+  }
+
+  const payload = {
+    external_account_id: state.selectedAccountId,
+    symbol,
+    side: els.orderSide.value,
+    quantity: parsePositiveInteger(els.orderQuantity.value, "Order quantity"),
+    order_type: els.orderType.value,
+    time_in_force: els.orderTimeInForce.value,
+    mode: "paper",
+    remark: normalizeOptionalText(els.orderRemark.value),
+  };
+  applyOrderTypePrices({
+    orderType: payload.order_type,
+    limitValue: els.orderLimitPrice.value,
+    stopValue: els.orderStopPrice.value,
+    payload,
+    contextLabel: "Order",
+  });
+  return payload;
+}
+
+function buildReplaceOrderPayload(order) {
+  const payload = {
+    quantity: parsePositiveInteger(els.replaceQuantity.value, "Replace quantity"),
+    remark: normalizeOptionalText(els.replaceRemark.value),
+  };
+  applyOrderTypePrices({
+    orderType: order.order_type,
+    limitValue: els.replaceLimitPrice.value,
+    stopValue: els.replaceStopPrice.value,
+    payload,
+    contextLabel: "Replace",
+  });
+  return payload;
+}
+
+function applyOrderTypePrices({ orderType, limitValue, stopValue, payload, contextLabel }) {
+  if (orderType === "market") {
+    payload.limit_price = null;
+    payload.stop_price = null;
+    return;
+  }
+
+  if (orderType === "limit") {
+    payload.limit_price = parsePositiveNumber(limitValue, `${contextLabel} limit price`, true);
+    payload.stop_price = null;
+    return;
+  }
+
+  if (orderType === "stop") {
+    payload.limit_price = parsePositiveNumber(limitValue, `${contextLabel} limit price`, false);
+    payload.stop_price = parsePositiveNumber(stopValue, `${contextLabel} stop price`, true);
+    return;
+  }
+
+  throw new Error(`Unsupported order type: ${orderType}`);
+}
+
+function parsePositiveInteger(value, label) {
+  const number = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(number) || number <= 0) {
+    throw new Error(`${label} must be a positive whole number.`);
+  }
+  return number;
+}
+
+function parsePositiveNumber(value, label, required) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) {
+    if (required) {
+      throw new Error(`${label} is required.`);
+    }
+    return null;
+  }
+
+  const number = Number(trimmed);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new Error(`${label} must be greater than 0.`);
+  }
+  return number;
+}
+
+function normalizeOptionalText(value) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed ? trimmed : null;
+}
+
+function isCancelableOrder(order) {
+  return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
+}
+
+function isReplaceableOrder(order) {
+  return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
+}
+
+function formatOrderPrice(order) {
+  const parts = [];
+  if (order.limit_price !== null && order.limit_price !== undefined) {
+    parts.push(`L ${formatNumber(order.limit_price)}`);
+  }
+  if (order.stop_price !== null && order.stop_price !== undefined) {
+    parts.push(`S ${formatNumber(order.stop_price)}`);
+  }
+  return parts.length > 0 ? parts.join(" / ") : "--";
+}
+
+function buildSortedPositions(positions) {
+  return [...positions].sort((left, right) => toFiniteNumber(right.market_value) - toFiniteNumber(left.market_value));
+}
+
+function pnlTone(value) {
+  if (value > 0) {
+    return "success";
+  }
+  if (value < 0) {
+    return "error";
+  }
+  return "neutral";
+}
+
+function formatSignedCurrency(value, currency = "USD") {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const prefix = number > 0 ? "+" : "";
+  return `${prefix}${formatCurrency(number, currency)}`;
+}
+
+function formatWeight(value, total) {
+  const amount = toNumber(value);
+  const denominator = toNumber(total);
+  if (!Number.isFinite(amount) || !Number.isFinite(denominator) || denominator <= 0) {
+    return "--";
+  }
+  return `${((amount / denominator) * 100).toFixed(1)}%`;
+}
+
+function formatPercent(value, base) {
+  const numerator = toNumber(value);
+  const denominator = toNumber(base);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return "--";
+  }
+  const percent = (numerator / denominator) * 100;
+  const prefix = percent > 0 ? "+" : "";
+  return `${prefix}${percent.toFixed(2)}% of book`;
+}
+
+function formatPositionQuantity(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  return number.toLocaleString("en-US", {
+    minimumFractionDigits: Number.isInteger(number) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function toNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : Number.NaN;
+}
+
+function toFiniteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 async function fetchJson(url, options = {}) {

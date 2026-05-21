@@ -109,6 +109,49 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
+                    <section class="band holdings-band">
+                      <div class="holdings-grid">
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Portfolio</span>
+                              <h2>Holdings Overview</h2>
+                            </div>
+                          </div>
+                          <div id="positions-summary-strip" class="mini-metric-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Open Positions</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Gross Market Value</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Unrealized PnL</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Largest Holding</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Exposure</span>
+                              <h2>Current Holdings</h2>
+                            </div>
+                          </div>
+                          <div id="holdings-focus" class="holdings-focus">
+                            <div class="holding-empty">No positions in latest snapshot.</div>
+                          </div>
+                        </section>
+                      </div>
+                    </section>
+
                     <section class="band insights-band">
                       <div class="panel-grid">
                         <section class="panel">
@@ -148,6 +191,128 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
+                    <section class="band trade-band">
+                      <div class="trade-grid">
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Execution</span>
+                              <h2>Order Ticket</h2>
+                            </div>
+                          </div>
+                          <form id="order-ticket-form" class="ticket-form">
+                            <div class="ticket-grid">
+                              <label class="field">
+                                <span>Symbol</span>
+                                <input id="order-symbol" type="text" value="UNH.US" autocomplete="off" />
+                              </label>
+                              <label class="field">
+                                <span>Side</span>
+                                <select id="order-side">
+                                  <option value="buy">Buy</option>
+                                  <option value="sell">Sell</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Quantity</span>
+                                <input id="order-quantity" type="number" min="1" step="1" value="1" />
+                              </label>
+                              <label class="field">
+                                <span>Order Type</span>
+                                <select id="order-type">
+                                  <option value="market">Market</option>
+                                  <option value="limit">Limit</option>
+                                  <option value="stop">Stop</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Time In Force</span>
+                                <select id="order-time-in-force">
+                                  <option value="day">DAY</option>
+                                  <option value="gtc">GTC</option>
+                                  <option value="ioc">IOC</option>
+                                </select>
+                              </label>
+                              <label id="order-limit-field" class="field">
+                                <span>Limit Price</span>
+                                <input id="order-limit-price" type="number" min="0" step="0.01" placeholder="Optional for stop" />
+                              </label>
+                              <label id="order-stop-field" class="field">
+                                <span>Stop Price</span>
+                                <input id="order-stop-price" type="number" min="0" step="0.01" placeholder="Required for stop" />
+                              </label>
+                              <label class="field field-span-2">
+                                <span>Remark</span>
+                                <input id="order-remark" type="text" maxlength="64" placeholder="Optional broker note" />
+                              </label>
+                            </div>
+                            <div class="form-foot">
+                              <p id="order-form-hint" class="form-hint"></p>
+                              <button id="submit-order" class="icon-button accent" type="submit">
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <path d="M12 5v14"/>
+                                    <path d="M5 12h14"/>
+                                  </svg>
+                                </span>
+                                <span>Submit Order</span>
+                              </button>
+                            </div>
+                          </form>
+                        </section>
+
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Workflow</span>
+                              <h2>Selected Order</h2>
+                            </div>
+                          </div>
+                          <div id="selected-order-card" class="selected-order empty">
+                            Select an order from the table to manage it.
+                          </div>
+                          <form id="replace-order-form" class="ticket-form hidden">
+                            <div class="form-header">
+                              <span class="section-kicker">Replace</span>
+                              <h3>Update Working Order</h3>
+                            </div>
+                            <div class="ticket-grid">
+                              <label class="field">
+                                <span>Quantity</span>
+                                <input id="replace-quantity" type="number" min="1" step="1" />
+                              </label>
+                              <label id="replace-limit-field" class="field">
+                                <span>Limit Price</span>
+                                <input id="replace-limit-price" type="number" min="0" step="0.01" placeholder="Optional for stop" />
+                              </label>
+                              <label id="replace-stop-field" class="field">
+                                <span>Stop Price</span>
+                                <input id="replace-stop-price" type="number" min="0" step="0.01" placeholder="Required for stop" />
+                              </label>
+                              <label class="field field-span-2">
+                                <span>Remark</span>
+                                <input id="replace-remark" type="text" maxlength="64" placeholder="Optional replace note" />
+                              </label>
+                            </div>
+                            <div class="form-foot">
+                              <p id="replace-form-hint" class="form-hint"></p>
+                              <button class="icon-button" type="submit">
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <path d="M20 7H9"/>
+                                    <path d="M14 17H4"/>
+                                    <path d="m17 4 3 3-3 3"/>
+                                    <path d="m7 14-3 3 3 3"/>
+                                  </svg>
+                                </span>
+                                <span>Replace Order</span>
+                              </button>
+                            </div>
+                          </form>
+                        </section>
+                      </div>
+                    </section>
+
                     <section class="band data-band">
                       <div class="data-grid">
                         <section class="panel panel-span-2">
@@ -167,10 +332,11 @@ def render_dashboard() -> HTMLResponse:
                                   <th>Status</th>
                                   <th>Limit</th>
                                   <th>Updated</th>
+                                  <th>Actions</th>
                                 </tr>
                               </thead>
                               <tbody id="orders-body">
-                                <tr><td colspan="6" class="empty-row">No orders loaded.</td></tr>
+                                <tr><td colspan="7" class="empty-row">No orders loaded.</td></tr>
                               </tbody>
                             </table>
                           </div>
@@ -198,14 +364,16 @@ def render_dashboard() -> HTMLResponse:
                               <thead>
                                 <tr>
                                   <th>Symbol</th>
+                                  <th>Type</th>
                                   <th>Qty</th>
                                   <th>Avg Cost</th>
                                   <th>Market Value</th>
                                   <th>Unrealized PnL</th>
+                                  <th>Weight</th>
                                 </tr>
                               </thead>
                               <tbody id="positions-body">
-                                <tr><td colspan="5" class="empty-row">No positions in latest snapshot.</td></tr>
+                                <tr><td colspan="7" class="empty-row">No positions in latest snapshot.</td></tr>
                               </tbody>
                             </table>
                           </div>
