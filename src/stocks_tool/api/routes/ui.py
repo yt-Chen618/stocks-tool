@@ -85,6 +85,33 @@ def render_dashboard() -> HTMLResponse:
                         </button>
                       </div>
 
+                      <div id="reconciliation-strip" class="reconciliation-strip">
+                        <article class="reconciliation-card">
+                          <div class="reconciliation-head">
+                            <span class="metric-label">Auto Reconciliation</span>
+                            <span class="pill neutral">--</span>
+                          </div>
+                          <strong class="reconciliation-value">--</strong>
+                          <span class="reconciliation-detail">Select a broker account to view scheduler state.</span>
+                        </article>
+                        <article class="reconciliation-card">
+                          <div class="reconciliation-head">
+                            <span class="metric-label">Account Sync</span>
+                            <span class="pill neutral">--</span>
+                          </div>
+                          <strong class="reconciliation-value">--</strong>
+                          <span class="reconciliation-detail">No account selected.</span>
+                        </article>
+                        <article class="reconciliation-card">
+                          <div class="reconciliation-head">
+                            <span class="metric-label">Orders Sync</span>
+                            <span class="pill neutral">--</span>
+                          </div>
+                          <strong class="reconciliation-value">--</strong>
+                          <span class="reconciliation-detail">No account selected.</span>
+                        </article>
+                      </div>
+
                       <div id="status-banner" class="status-banner">Ready</div>
                     </section>
 
@@ -271,6 +298,15 @@ def render_dashboard() -> HTMLResponse:
                           <div id="selected-order-card" class="selected-order empty">
                             Select an order from the table to manage it.
                           </div>
+                          <section class="selected-order-execution-shell">
+                            <div class="form-header">
+                              <span class="section-kicker">Execution Summary</span>
+                              <h3>Latest Fill Snapshot</h3>
+                            </div>
+                            <div id="selected-order-execution" class="selected-order-execution empty">
+                              No fills recorded for this order yet.
+                            </div>
+                          </section>
                           <form id="replace-order-form" class="ticket-form hidden">
                             <div class="form-header">
                               <span class="section-kicker">Replace</span>

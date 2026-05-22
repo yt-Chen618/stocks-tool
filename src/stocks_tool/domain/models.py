@@ -15,6 +15,7 @@ from stocks_tool.domain.enums import (
     OrderStatus,
     OrderType,
     PlanStatus,
+    ReconciliationStatus,
     RiskStatus,
     TimeInForce,
     TradeStructure,
@@ -204,7 +205,10 @@ class BrokerOrderSnapshot(BaseModel):
     status: OrderStatus
     limit_price: Decimal | None = None
     stop_price: Decimal | None = None
+    executed_quantity: int = 0
+    executed_price: Decimal | None = None
     submitted_at: datetime | None = None
+    updated_at: datetime | None = None
     raw_payload: dict | None = None
 
 
@@ -223,6 +227,23 @@ class OrderSyncResult(BaseModel):
     created_orders: int
     updated_orders: int
     orders: list[Order] = Field(default_factory=list)
+
+
+class Execution(BaseModel):
+    id: str
+    order_id: str
+    broker: BrokerName
+    external_account_id: str
+    external_order_id: str | None = None
+    external_execution_id: str | None = None
+    symbol: str
+    side: OrderSide
+    quantity: int = Field(ge=0)
+    price: Decimal | None = None
+    executed_at: datetime | None = None
+    raw_payload: dict | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class BrokerCapability(BaseModel):
@@ -283,6 +304,15 @@ class BrokerAccount(BaseModel):
     base_currency: str = "USD"
     options_level: str | None = None
     is_active: bool = True
+    auto_reconcile_enabled: bool = True
+    account_sync_status: ReconciliationStatus = ReconciliationStatus.IDLE
+    account_last_sync_attempt_at: datetime | None = None
+    account_last_synced_at: datetime | None = None
+    account_last_sync_error: str | None = None
+    orders_sync_status: ReconciliationStatus = ReconciliationStatus.IDLE
+    orders_last_sync_attempt_at: datetime | None = None
+    orders_last_synced_at: datetime | None = None
+    orders_last_sync_error: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -294,6 +324,7 @@ class CreateBrokerAccountRequest(BaseModel):
     base_currency: str = "USD"
     options_level: str | None = None
     is_active: bool = True
+    auto_reconcile_enabled: bool = True
 
 
 class SessionQuote(BaseModel):

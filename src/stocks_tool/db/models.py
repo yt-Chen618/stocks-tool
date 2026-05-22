@@ -59,6 +59,30 @@ class BrokerAccountRecord(TimestampMixin, Base):
     base_currency: Mapped[str] = mapped_column(String(8), nullable=False, default="USD", server_default="USD")
     options_level: Mapped[str | None] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    auto_reconcile_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="true",
+    )
+    account_sync_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="idle",
+        server_default="idle",
+    )
+    account_last_sync_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    account_last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    account_last_sync_error: Mapped[str | None] = mapped_column(Text)
+    orders_sync_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="idle",
+        server_default="idle",
+    )
+    orders_last_sync_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    orders_last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    orders_last_sync_error: Mapped[str | None] = mapped_column(Text)
 
     user: Mapped[UserRecord | None] = relationship()
 
@@ -227,3 +251,30 @@ class OrderRecord(TimestampMixin, Base):
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
     trade_plan: Mapped[TradePlanRecord | None] = relationship()
+    executions: Mapped[list["ExecutionRecord"]] = relationship(
+        back_populates="order",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExecutionRecord(TimestampMixin, Base):
+    __tablename__ = "executions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    order_id: Mapped[str] = mapped_column(
+        ForeignKey("orders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_order_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    external_execution_id: Mapped[str | None] = mapped_column(String(128), unique=True, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    side: Mapped[str] = mapped_column(String(16), nullable=False)
+    quantity: Mapped[int] = mapped_column(Integer, nullable=False)
+    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+    order: Mapped[OrderRecord] = relationship(back_populates="executions")

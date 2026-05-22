@@ -6,8 +6,10 @@ Before making changes or giving project-status advice in a new conversation, rea
 
 1. `docs/session-summary.md`
 2. `README.md`
+3. `CODEX.md`
 
 Treat `docs/session-summary.md` as the current handoff document for this repository.
+Treat `CODEX.md` as a mandatory local behavior/instruction document for this repository.
 
 ## Working rules for this project
 

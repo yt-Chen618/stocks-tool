@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Any
 
 import httpx
+from regression_common import build_report, emit_report
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_ACCOUNT_ID = "LBPT10087357"
@@ -54,6 +55,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Actually execute the paper order workflow. Without this flag the script only prints the plan.",
     )
+    parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
     return parser.parse_args()
 
 
@@ -154,7 +156,18 @@ def main() -> None:
         }
 
         if not args.execute:
-            print(json.dumps({"mode": "dry-run", **plan}, indent=2))
+            emit_report(
+                build_report(
+                    script="run_real_paper_order_smoke.py",
+                    workflow="real-paper-order-smoke",
+                    status="planned",
+                    mode="dry-run",
+                    target=base_url,
+                    summary="Paper smoke dry-run plan generated. No broker order was submitted.",
+                    payload={"plan": plan},
+                ),
+                json_output=args.json_output,
+            )
             return
 
         submit_payload = {
@@ -212,20 +225,27 @@ def main() -> None:
             label="canceled order",
         )
 
-        print(
-            json.dumps(
-                {
-                    "mode": "executed",
-                    **plan,
-                    "local_order_id": created_order_id,
-                    "external_order_id": created["external_order_id"],
-                    "submitted_status": submitted["status"],
-                    "replaced_status": replaced["status"],
-                    "canceled_status": canceled["status"],
-                    "updated_at": canceled["updated_at"],
+        emit_report(
+            build_report(
+                script="run_real_paper_order_smoke.py",
+                workflow="real-paper-order-smoke",
+                status="passed",
+                mode="executed",
+                target=base_url,
+                summary="Real paper submit/replace/cancel smoke flow completed.",
+                payload={
+                    "plan": plan,
+                    "order": {
+                        "local_order_id": created_order_id,
+                        "external_order_id": created["external_order_id"],
+                        "submitted_status": submitted["status"],
+                        "replaced_status": replaced["status"],
+                        "canceled_status": canceled["status"],
+                        "updated_at": canceled["updated_at"],
+                    },
                 },
-                indent=2,
-            )
+            ),
+            json_output=args.json_output,
         )
     except Exception as error:
         if created_order_id is not None:
@@ -245,6 +265,19 @@ def main() -> None:
                     )
             except Exception as cleanup_error:  # pragma: no cover - best effort fallback
                 print(f"Cleanup cancel failed for {created_order_id}: {cleanup_error}", file=sys.stderr)
+        emit_report(
+            build_report(
+                script="run_real_paper_order_smoke.py",
+                workflow="real-paper-order-smoke",
+                status="failed",
+                mode="executed" if args.execute else "dry-run",
+                target=base_url,
+                summary="Real paper smoke workflow failed.",
+                payload={"partial_order_id": created_order_id} if created_order_id is not None else {},
+                error=str(error),
+            ),
+            json_output=args.json_output,
+        )
         raise SmokeError(str(error)) from error
     finally:
         client.close()

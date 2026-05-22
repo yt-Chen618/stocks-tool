@@ -18,11 +18,15 @@ from stocks_tool.ports.repository import TradePlanRepository
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
+    ExecutionRepository,
     OrderRepository,
     WatchlistRepository,
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
+)
+from stocks_tool.repositories.sqlalchemy_execution_repository import (
+    SQLAlchemyExecutionRepository,
 )
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
@@ -89,6 +93,12 @@ def get_order_repository(
     return SQLAlchemyOrderRepository(session)
 
 
+def get_execution_repository(
+    session: Session = Depends(get_db_session),
+) -> ExecutionRepository:
+    return SQLAlchemyExecutionRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -111,6 +121,7 @@ def get_order_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
     trade_plans: TradePlanRepository = Depends(get_trade_plan_repository),
     orders: OrderRepository = Depends(get_order_repository),
+    executions: ExecutionRepository = Depends(get_execution_repository),
     adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
 ) -> OrderService:
     settings: Settings = get_settings()
@@ -119,5 +130,6 @@ def get_order_service(
         broker_accounts=broker_accounts,
         trade_plans=trade_plans,
         orders=orders,
+        executions=executions,
         longbridge_adapter=adapter,
     )

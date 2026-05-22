@@ -40,7 +40,17 @@ class MockDashboardState:
             "external_account_id": self.account_id,
             "display_name": "Longbridge Paper",
             "base_currency": "USD",
-            "mode": "paper",
+            "options_level": "level_1",
+            "is_active": True,
+            "auto_reconcile_enabled": True,
+            "account_sync_status": "success",
+            "account_last_sync_attempt_at": "2026-05-21T02:14:50Z",
+            "account_last_synced_at": "2026-05-21T02:14:52Z",
+            "account_last_sync_error": None,
+            "orders_sync_status": "success",
+            "orders_last_sync_attempt_at": "2026-05-21T02:14:53Z",
+            "orders_last_synced_at": "2026-05-21T02:14:54Z",
+            "orders_last_sync_error": None,
             "created_at": "2026-05-21T00:00:00Z",
             "updated_at": "2026-05-21T00:00:00Z",
         }
@@ -117,6 +127,24 @@ class MockDashboardState:
                 updated_at="2026-05-20T19:53:15Z",
                 remark="historical filled seed",
             ),
+        ]
+        self.executions = [
+            {
+                "id": "mock-execution-0001",
+                "order_id": "mock-order-0002",
+                "broker": "longbridge",
+                "external_account_id": self.account_id,
+                "external_order_id": "mock-external-0002",
+                "external_execution_id": "summary:mock-external-0002",
+                "symbol": self.symbol,
+                "side": "buy",
+                "quantity": 10,
+                "price": "388.6500",
+                "executed_at": "2026-05-20T19:53:15Z",
+                "raw_payload": {"source": "order_detail_summary"},
+                "created_at": "2026-05-20T19:53:15Z",
+                "updated_at": "2026-05-20T19:53:15Z",
+            }
         ]
 
     def _build_order(
@@ -250,6 +278,18 @@ class MockDashboardState:
         )
         return deepcopy(order)
 
+    def list_executions(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.executions
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if order_id is not None:
+            rows = [row for row in rows if row["order_id"] == order_id]
+        return deepcopy(rows)
+
 
 def create_app() -> FastAPI:
     state = MockDashboardState()
@@ -286,6 +326,13 @@ def create_app() -> FastAPI:
     @app.get("/orders")
     def orders(external_account_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
         return state.list_orders(external_account_id)
+
+    @app.get("/executions")
+    def executions(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return state.list_executions(external_account_id=external_account_id, order_id=order_id)
 
     @app.get("/orders/{order_id}")
     def get_order(order_id: str) -> dict[str, Any]:

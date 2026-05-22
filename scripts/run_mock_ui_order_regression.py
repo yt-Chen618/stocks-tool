@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from regression_common import build_report, emit_report
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
@@ -31,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=float, default=30.0, help="HTTP timeout and step deadline.")
     parser.add_argument("--poll-seconds", type=float, default=0.5, help="Polling interval for mock state checks.")
     parser.add_argument("--keep-server", action="store_true", help="Leave the mock server running after the script exits.")
+    parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
     return parser.parse_args()
 
 
@@ -128,21 +130,34 @@ def main() -> None:
             assert "Current Holdings" in dashboard.text
             assert "Order Ticket" in dashboard.text
             assert "Selected Order" in dashboard.text
+            assert "Execution Summary" in dashboard.text
             assert "Orders" in dashboard.text
 
             app_js = client.get("/static/app.js")
             app_js.raise_for_status()
-            for marker in ("order-ticket-form", "replace-order-form", "selected-order-card", "submitOrder()", "replaceSelectedOrder()"):
+            for marker in (
+                "order-ticket-form",
+                "replace-order-form",
+                "selected-order-card",
+                "selected-order-execution",
+                "submitOrder()",
+                "replaceSelectedOrder()",
+                "renderSelectedExecution()",
+            ):
                 assert marker in app_js.text
 
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
+            assert accounts[0]["auto_reconcile_enabled"] is True
 
             snapshots = require_ok(client.get("/account-snapshots", params={"external_account_id": "LBPT10087357"}))
             assert snapshots[0]["positions"][0]["symbol"] == "MOCK.US"
 
             initial_orders = require_ok(client.get("/orders", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_orders) == 2
+            initial_executions = require_ok(client.get("/executions", params={"external_account_id": "LBPT10087357"}))
+            assert len(initial_executions) == 1
+            assert initial_executions[0]["order_id"] == "mock-order-0002"
 
             created = require_ok(
                 client.post(
@@ -201,22 +216,51 @@ def main() -> None:
                 label="canceled mock order",
             )
 
-            print(
-                json.dumps(
-                    {
-                        "base_url": base_url,
-                        "local_order_id": created["id"],
-                        "external_order_id": created["external_order_id"],
-                        "submitted_status": submitted["status"],
-                        "replaced_limit": replaced["limit_price"],
-                        "replaced_quantity": replaced["quantity"],
-                        "final_status": canceled["status"],
+            emit_report(
+                build_report(
+                    script="run_mock_ui_order_regression.py",
+                    workflow="mock-dashboard-order-regression",
+                    status="passed",
+                    mode="mock",
+                    target=base_url,
+                    summary="Mock dashboard shell plus submit/replace/cancel order flow passed.",
+                    payload={
+                        "checks": {
+                            "dashboard_shell": True,
+                            "execution_summary_shell": True,
+                            "app_js_markers": True,
+                            "account_seed": True,
+                            "snapshot_seed": True,
+                            "execution_seed": True,
+                        },
+                        "order": {
+                            "local_order_id": created["id"],
+                            "external_order_id": created["external_order_id"],
+                            "submitted_status": submitted["status"],
+                            "replaced_limit": replaced["limit_price"],
+                            "replaced_quantity": replaced["quantity"],
+                            "final_status": canceled["status"],
+                        },
                     },
-                    indent=2,
-                )
+                ),
+                json_output=args.json_output,
             )
         finally:
             client.close()
+    except Exception as error:
+        emit_report(
+            build_report(
+                script="run_mock_ui_order_regression.py",
+                workflow="mock-dashboard-order-regression",
+                status="failed",
+                mode="mock",
+                target=base_url,
+                summary="Mock dashboard regression failed.",
+                error=str(error),
+            ),
+            json_output=args.json_output,
+        )
+        raise
     finally:
         if not args.keep_server:
             stop_server(server)

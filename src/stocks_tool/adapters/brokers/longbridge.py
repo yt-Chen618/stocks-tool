@@ -450,7 +450,10 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             status=self._map_local_order_status(getattr(detail, "status", None)),
             limit_price=self._to_optional_decimal(getattr(detail, "price", None)),
             stop_price=self._to_optional_decimal(getattr(detail, "trigger_price", None)),
+            executed_quantity=int(self._to_decimal(getattr(detail, "executed_quantity", None))),
+            executed_price=self._to_optional_decimal(getattr(detail, "executed_price", None)),
             submitted_at=self._to_optional_datetime(getattr(detail, "submitted_at", None)),
+            updated_at=self._to_optional_datetime(getattr(detail, "updated_at", None)),
             raw_payload=self._serialize_order_payload(detail),
         )
 

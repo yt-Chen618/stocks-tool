@@ -271,6 +271,43 @@ a {
   color: var(--danger-text);
 }
 
+.reconciliation-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.reconciliation-card {
+  min-height: 132px;
+  padding: 16px;
+  border: 1px solid rgba(197, 190, 175, 0.72);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  display: grid;
+  align-content: space-between;
+  gap: 10px;
+}
+
+.reconciliation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reconciliation-value {
+  font-size: 18px;
+  font-weight: 650;
+}
+
+.reconciliation-detail {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
 .metric-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -454,6 +491,53 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+.selected-order-execution-shell {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.selected-order-execution {
+  min-height: 126px;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(243, 239, 232, 0.62);
+}
+
+.selected-order-execution.empty {
+  place-items: center;
+  color: var(--text-soft);
+}
+
+.execution-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.execution-grid div {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.65);
+}
+
+.execution-grid span {
+  display: block;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.execution-grid strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .holdings-focus {
@@ -825,6 +909,7 @@ a {
 
 @media (max-width: 1180px) {
   .controls-grid,
+  .reconciliation-strip,
   .metric-strip,
   .mini-metric-strip,
   .panel-grid,
@@ -873,6 +958,7 @@ a {
   .quote-meta,
   .ticket-grid,
   .selected-order-meta,
+  .execution-grid,
   .holding-stats {
     grid-template-columns: 1fr;
   }

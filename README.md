@@ -19,6 +19,7 @@ This repository currently contains:
 - a runnable FastAPI application skeleton
 - domain models for plans, accounts, risk checks, and orders
 - a Longbridge adapter boundary with quote and account-sync entry points
+- a background paper-account reconciliation loop for account snapshots and orders
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
 - architecture documentation for the next build phases
 
@@ -86,6 +87,7 @@ Then open:
 - `GET /brokers/longbridge/profile`
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
+- `GET /executions`
 - `GET /orders`
 - `POST /orders/submit`
 - `POST /orders/{order_id}/refresh`
@@ -100,11 +102,46 @@ Order submission is currently paper-first and broker-native:
 - `stop` orders are translated to Longbridge `MIT` or `LIT` based on whether `limit_price` is provided
 - live submission stays blocked unless `ALLOW_LIVE_TRADING=true`
 - local order reconciliation can be pulled on demand through `/orders/sync/longbridge/{external_account_id}`
+- automatic paper reconciliation also runs in the background for active Longbridge broker accounts
+- execution summaries are persisted from broker order-detail snapshots and can be read through `/executions`
+
+## Regression scripts
+
+The repo includes two order/dashboard regression workflows plus a single entrypoint:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py mock-ui
+.venv\Scripts\python.exe scripts\run_regression.py real-paper
+```
+
+Available workflows:
+
+- `mock-ui`: starts the in-memory mock dashboard backend and validates the dashboard shell plus submit / replace / cancel flow without touching the real paper account
+- `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
+
+Both scripts now emit the same JSON envelope shape:
+
+- `script`
+- `workflow`
+- `status`
+- `mode`
+- `target`
+- `summary`
+- `generated_at`
+- `payload`
+
+Useful examples:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
+.venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json
+.venv\Scripts\python.exe scripts\run_regression.py real-paper --execute --json-output artifacts/real-paper-executed.json
+```
 
 ## Next milestones
 
-1. Add a background scheduler for order reconciliation runs.
+1. Expand the execution ledger from per-order summary snapshots into broker-native per-fill capture.
 2. Add scheduler and ingestion workers for market/news/event data.
-3. Add Longbridge order push reconciliation loops.
+3. Add Longbridge order push reconciliation loops and execution/fill capture.
 4. Add authentication, audit logging, and strategy-level permission controls.
 5. Expand broker adapters beyond Longbridge.

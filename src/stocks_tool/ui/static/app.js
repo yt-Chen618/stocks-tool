@@ -3,6 +3,7 @@ const state = {
   selectedAccountId: "",
   watchlists: [],
   orders: [],
+  executions: [],
   snapshots: [],
   brokerStatus: null,
   latestSnapshot: null,
@@ -22,6 +23,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 function bindElements() {
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
+  els.reconciliationStrip = document.getElementById("reconciliation-strip");
   els.metricsStrip = document.getElementById("metrics-strip");
   els.positionsSummaryStrip = document.getElementById("positions-summary-strip");
   els.holdingsFocus = document.getElementById("holdings-focus");
@@ -49,6 +51,7 @@ function bindElements() {
   els.orderFormHint = document.getElementById("order-form-hint");
   els.submitOrder = document.getElementById("submit-order");
   els.selectedOrderCard = document.getElementById("selected-order-card");
+  els.selectedOrderExecution = document.getElementById("selected-order-execution");
   els.replaceOrderForm = document.getElementById("replace-order-form");
   els.replaceQuantity = document.getElementById("replace-quantity");
   els.replaceLimitField = document.getElementById("replace-limit-field");
@@ -156,26 +159,16 @@ function wireEvents() {
 async function loadDashboard() {
   setStatus("Loading dashboard...", "warning");
   try {
-    const [accounts, watchlists, brokerStatus] = await Promise.all([
-      fetchJson("/broker-accounts"),
+    const [watchlists, brokerStatus] = await Promise.all([
       fetchJson("/watchlists"),
       fetchJson("/brokers/longbridge/configuration"),
     ]);
 
-    state.accounts = accounts;
     state.watchlists = watchlists;
     state.brokerStatus = brokerStatus;
-
-    if (!state.selectedAccountId && accounts.length > 0) {
-      state.selectedAccountId = accounts[0].external_account_id;
-    } else if (accounts.every((account) => account.external_account_id !== state.selectedAccountId)) {
-      state.selectedAccountId = accounts[0]?.external_account_id || "";
-    }
-
-    renderAccountOptions();
+    await refreshAccounts();
     renderWatchlists();
     renderBrokerStatus();
-    updateOrderTicketAvailability();
     await loadAccountData();
     await loadQuote();
     setStatus("Dashboard updated.", "success");
@@ -189,35 +182,42 @@ async function loadAccountData() {
   if (!state.selectedAccountId) {
     state.snapshots = [];
     state.orders = [];
+    state.executions = [];
     state.latestSnapshot = null;
     state.selectedOrderId = "";
+    renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
     renderOrders();
     renderPositions();
     renderSelectedOrder();
+    updateSyncButtons();
     updateOrderTicketAvailability();
     return;
   }
 
   try {
-    const [snapshots, orders] = await Promise.all([
+    const [snapshots, orders, executions] = await Promise.all([
       fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
     ]);
     state.snapshots = snapshots;
     state.orders = orders;
+    state.executions = executions;
     state.latestSnapshot = snapshots[0] || null;
 
     if (!orders.some((order) => order.id === state.selectedOrderId)) {
       state.selectedOrderId = orders[0]?.id || "";
     }
 
+    renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
     renderOrders();
     renderPositions();
     renderSelectedOrder();
+    updateSyncButtons();
     updateOrderTicketAvailability();
   } catch (error) {
     console.error(error);
@@ -249,10 +249,12 @@ async function syncAccount() {
     await fetchJson(`/brokers/longbridge/account-sync/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
       method: "POST",
     });
+    await refreshAccounts();
     await loadAccountData();
     setStatus(`Account ${state.selectedAccountId} synced.`, "success");
   } catch (error) {
     console.error(error);
+    await refreshAccountsSilently();
     setStatus(error.message || "Account sync failed.", "error");
   }
 }
@@ -263,12 +265,42 @@ async function syncOrders() {
     await fetchJson(`/orders/sync/longbridge/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
       method: "POST",
     });
+    await refreshAccounts();
     await loadAccountData();
     setStatus(`Orders for ${state.selectedAccountId} synced.`, "success");
   } catch (error) {
     console.error(error);
+    await refreshAccountsSilently();
     setStatus(error.message || "Order sync failed.", "error");
   }
+}
+
+async function refreshAccounts() {
+  const accounts = await fetchJson("/broker-accounts");
+  applyAccounts(accounts);
+}
+
+async function refreshAccountsSilently() {
+  try {
+    await refreshAccounts();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function applyAccounts(accounts) {
+  state.accounts = accounts;
+
+  if (!state.selectedAccountId && accounts.length > 0) {
+    state.selectedAccountId = accounts[0].external_account_id;
+  } else if (accounts.every((account) => account.external_account_id !== state.selectedAccountId)) {
+    state.selectedAccountId = accounts[0]?.external_account_id || "";
+  }
+
+  renderAccountOptions();
+  renderReconciliationStatus();
+  updateSyncButtons();
+  updateOrderTicketAvailability();
 }
 
 async function submitOrder() {
@@ -387,6 +419,90 @@ function renderAccountOptions() {
     option.textContent = `${account.display_name || account.external_account_id} / ${account.base_currency}`;
     els.accountSelect.append(option);
   }
+}
+
+function renderReconciliationStatus() {
+  const account = getSelectedAccount();
+  if (!account) {
+    els.reconciliationStrip.innerHTML = `
+      <article class="reconciliation-card">
+        <div class="reconciliation-head">
+          <span class="metric-label">Auto Reconciliation</span>
+          <span class="pill neutral">--</span>
+        </div>
+        <strong class="reconciliation-value">--</strong>
+        <span class="reconciliation-detail">Select a broker account to view scheduler state.</span>
+      </article>
+      <article class="reconciliation-card">
+        <div class="reconciliation-head">
+          <span class="metric-label">Account Sync</span>
+          <span class="pill neutral">--</span>
+        </div>
+        <strong class="reconciliation-value">--</strong>
+        <span class="reconciliation-detail">No account selected.</span>
+      </article>
+      <article class="reconciliation-card">
+        <div class="reconciliation-head">
+          <span class="metric-label">Orders Sync</span>
+          <span class="pill neutral">--</span>
+        </div>
+        <strong class="reconciliation-value">--</strong>
+        <span class="reconciliation-detail">No account selected.</span>
+      </article>
+    `;
+    return;
+  }
+
+  const cards = [
+    {
+      label: "Auto Reconciliation",
+      tone: account.auto_reconcile_enabled ? "success" : "neutral",
+      badge: account.auto_reconcile_enabled ? "Enabled" : "Disabled",
+      value: account.auto_reconcile_enabled ? "Enabled" : "Disabled",
+      detail: account.auto_reconcile_enabled
+        ? "Background polling is active for this paper account."
+        : "Automatic polling is disabled for this account.",
+    },
+    {
+      label: "Account Sync",
+      tone: reconciliationTone(account.account_sync_status),
+      badge: reconciliationLabel(account.account_sync_status),
+      value: formatSyncHeadline(account.account_last_synced_at, account.account_last_sync_attempt_at),
+      detail: formatSyncDetail(
+        account.account_sync_status,
+        account.account_last_synced_at,
+        account.account_last_sync_attempt_at,
+        account.account_last_sync_error
+      ),
+    },
+    {
+      label: "Orders Sync",
+      tone: reconciliationTone(account.orders_sync_status),
+      badge: reconciliationLabel(account.orders_sync_status),
+      value: formatSyncHeadline(account.orders_last_synced_at, account.orders_last_sync_attempt_at),
+      detail: formatSyncDetail(
+        account.orders_sync_status,
+        account.orders_last_synced_at,
+        account.orders_last_sync_attempt_at,
+        account.orders_last_sync_error
+      ),
+    },
+  ];
+
+  els.reconciliationStrip.innerHTML = cards
+    .map(
+      (card) => `
+        <article class="reconciliation-card">
+          <div class="reconciliation-head">
+            <span class="metric-label">${escapeHtml(card.label)}</span>
+            <span class="pill ${escapeHtml(card.tone)}">${escapeHtml(card.badge)}</span>
+          </div>
+          <strong class="reconciliation-value">${escapeHtml(card.value)}</strong>
+          <span class="reconciliation-detail">${escapeHtml(card.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
 }
 
 function renderMetrics() {
@@ -661,6 +777,7 @@ function renderSelectedOrder() {
   if (!order) {
     els.selectedOrderCard.className = "selected-order empty";
     els.selectedOrderCard.textContent = "Select an order from the table to manage it.";
+    renderSelectedExecution();
     hideReplaceForm();
     return;
   }
@@ -742,6 +859,8 @@ function renderSelectedOrder() {
   } else {
     hideReplaceForm();
   }
+
+  renderSelectedExecution();
 }
 
 function setSelectedOrder(orderId, shouldScroll = false) {
@@ -756,6 +875,42 @@ function setSelectedOrder(orderId, shouldScroll = false) {
 
 function getSelectedOrder() {
   return state.orders.find((order) => order.id === state.selectedOrderId) || null;
+}
+
+function getSelectedAccount() {
+  return state.accounts.find((account) => account.external_account_id === state.selectedAccountId) || null;
+}
+
+function getSelectedExecution() {
+  return state.executions.find((execution) => execution.order_id === state.selectedOrderId) || null;
+}
+
+function renderSelectedExecution() {
+  const execution = getSelectedExecution();
+  if (!execution) {
+    els.selectedOrderExecution.className = "selected-order-execution empty";
+    els.selectedOrderExecution.textContent = "No fills recorded for this order yet.";
+    return;
+  }
+
+  els.selectedOrderExecution.className = "selected-order-execution";
+  els.selectedOrderExecution.innerHTML = `
+    <div class="execution-grid">
+      <div>
+        <span>Filled Qty</span>
+        <strong>${escapeHtml(formatPositionQuantity(execution.quantity))}</strong>
+      </div>
+      <div>
+        <span>Avg Fill</span>
+        <strong>${escapeHtml(formatCurrency(execution.price))}</strong>
+      </div>
+      <div>
+        <span>Last Fill</span>
+        <strong>${escapeHtml(formatDateTime(execution.executed_at))}</strong>
+      </div>
+    </div>
+    <p class="form-hint">Derived from the latest broker order detail snapshot for this order.</p>
+  `;
 }
 
 function populateReplaceForm(order) {
@@ -777,6 +932,18 @@ function updateOrderTicketAvailability() {
   const hasAccount = Boolean(state.selectedAccountId);
   els.submitOrder.disabled = !hasAccount;
   els.submitOrder.title = hasAccount ? "" : "Select a broker account first.";
+}
+
+function updateSyncButtons() {
+  const account = getSelectedAccount();
+  const hasAccount = Boolean(account);
+  const accountSyncing = account?.account_sync_status === "syncing";
+  const ordersSyncing = account?.orders_sync_status === "syncing";
+
+  els.syncAccount.disabled = !hasAccount || accountSyncing;
+  els.syncOrders.disabled = !hasAccount || ordersSyncing;
+  els.syncAccount.title = !hasAccount ? "Select a broker account first." : accountSyncing ? "Account sync already in progress." : "";
+  els.syncOrders.title = !hasAccount ? "Select a broker account first." : ordersSyncing ? "Order sync already in progress." : "";
 }
 
 function syncTicketOrderFields() {
@@ -1091,6 +1258,58 @@ function formatDateTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatSyncHeadline(lastSyncedAt, lastAttemptAt) {
+  if (lastSyncedAt) {
+    return `Last success ${formatDateTime(lastSyncedAt)}`;
+  }
+  if (lastAttemptAt) {
+    return `Last attempt ${formatDateTime(lastAttemptAt)}`;
+  }
+  return "Waiting for first run";
+}
+
+function formatSyncDetail(status, lastSyncedAt, lastAttemptAt, error) {
+  if (status === "syncing") {
+    return lastAttemptAt ? `Started ${formatDateTime(lastAttemptAt)}` : "Sync request is in progress.";
+  }
+  if (status === "error") {
+    return error || "The latest sync failed.";
+  }
+  if (lastSyncedAt) {
+    return `Updated ${formatDateTime(lastSyncedAt)}`;
+  }
+  if (lastAttemptAt) {
+    return `Attempted ${formatDateTime(lastAttemptAt)}`;
+  }
+  return "No reconciliation run has completed yet.";
+}
+
+function reconciliationTone(status) {
+  if (status === "success") {
+    return "success";
+  }
+  if (status === "syncing") {
+    return "warning";
+  }
+  if (status === "error") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function reconciliationLabel(status) {
+  if (status === "success") {
+    return "Success";
+  }
+  if (status === "syncing") {
+    return "Syncing";
+  }
+  if (status === "error") {
+    return "Error";
+  }
+  return "Idle";
 }
 
 function statusClass(status) {

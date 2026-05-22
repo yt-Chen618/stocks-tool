@@ -1,5 +1,7 @@
+from datetime import datetime, timezone
+
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
-from stocks_tool.domain.enums import BrokerName, ExecutionMode
+from stocks_tool.domain.enums import BrokerName, ExecutionMode, ReconciliationStatus
 from stocks_tool.domain.models import BrokerAccountSyncResult, SecurityQuoteSnapshot
 from stocks_tool.ports.repository import AccountSnapshotRepository, BrokerAccountRepository
 
@@ -34,18 +36,42 @@ class LongbridgeIntegrationService:
                 f"No local Longbridge broker account was found for '{external_account_id}'."
             )
 
-        snapshot = self.adapter.build_account_snapshot(
-            external_account_id=external_account_id,
-            mode=mode,
-            currency=currency or broker_account.base_currency,
-            options_level=broker_account.options_level,
+        attempted_at = datetime.now(timezone.utc)
+        self.broker_accounts.update_account_sync_state(
+            external_account_id,
+            status=ReconciliationStatus.SYNCING,
+            attempted_at=attempted_at,
+            error=None,
         )
-        persisted_snapshot = self.account_snapshots.create_account_snapshot(snapshot)
-        return BrokerAccountSyncResult(
-            broker=BrokerName.LONGBRIDGE,
-            mode=mode,
-            external_account_id=external_account_id,
-            snapshot_id=persisted_snapshot.id,
-            positions_synced=len(persisted_snapshot.positions),
-            account_snapshot=persisted_snapshot,
-        )
+
+        try:
+            snapshot = self.adapter.build_account_snapshot(
+                external_account_id=external_account_id,
+                mode=mode,
+                currency=currency or broker_account.base_currency,
+                options_level=broker_account.options_level,
+            )
+            persisted_snapshot = self.account_snapshots.create_account_snapshot(snapshot)
+            self.broker_accounts.update_account_sync_state(
+                external_account_id,
+                status=ReconciliationStatus.SUCCESS,
+                attempted_at=attempted_at,
+                synced_at=persisted_snapshot.captured_at,
+                error=None,
+            )
+            return BrokerAccountSyncResult(
+                broker=BrokerName.LONGBRIDGE,
+                mode=mode,
+                external_account_id=external_account_id,
+                snapshot_id=persisted_snapshot.id,
+                positions_synced=len(persisted_snapshot.positions),
+                account_snapshot=persisted_snapshot,
+            )
+        except Exception as exc:
+            self.broker_accounts.update_account_sync_state(
+                external_account_id,
+                status=ReconciliationStatus.ERROR,
+                attempted_at=attempted_at,
+                error=str(exc),
+            )
+            raise

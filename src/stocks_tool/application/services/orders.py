@@ -3,16 +3,18 @@ from uuid import uuid4
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.core.config import Settings
-from stocks_tool.domain.enums import AssetType, BrokerName, ExecutionMode
+from stocks_tool.domain.enums import AssetType, BrokerName, ExecutionMode, ReconciliationStatus
 from stocks_tool.domain.models import (
     BrokerOrderSnapshot,
     CreateOrderRequest,
+    Execution,
     Order,
     OrderSyncResult,
     ReplaceOrderRequest,
 )
 from stocks_tool.ports.repository import (
     BrokerAccountRepository,
+    ExecutionRepository,
     OrderRepository,
     TradePlanRepository,
 )
@@ -25,12 +27,14 @@ class OrderService:
         broker_accounts: BrokerAccountRepository,
         trade_plans: TradePlanRepository,
         orders: OrderRepository,
+        executions: ExecutionRepository,
         longbridge_adapter: LongbridgeBrokerAdapter,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
         self.trade_plans = trade_plans
         self.orders = orders
+        self.executions = executions
         self.longbridge_adapter = longbridge_adapter
 
     def list_orders(
@@ -91,7 +95,9 @@ class OrderService:
             created_at=now,
             updated_at=now,
         )
-        return self.orders.create_order(order)
+        persisted_order = self.orders.create_order(order)
+        self._sync_execution_from_snapshot(persisted_order, remote_snapshot)
+        return persisted_order
 
     def refresh_order(self, order_id: str) -> Order:
         order = self._get_order_or_raise(order_id)
@@ -160,39 +166,63 @@ class OrderService:
                 f"Broker '{broker_account.broker.value}' is not supported yet."
             )
 
-        remote_orders = self.longbridge_adapter.list_today_orders(
-            mode=mode,
-            symbol=symbol,
+        attempted_at = datetime.now(timezone.utc)
+        self.broker_accounts.update_orders_sync_state(
+            external_account_id,
+            status=ReconciliationStatus.SYNCING,
+            attempted_at=attempted_at,
+            error=None,
         )
-        created_orders = 0
-        updated_orders = 0
-        persisted_orders: list[Order] = []
-        for remote_snapshot in remote_orders:
-            existing = self.orders.get_by_external_order_id(remote_snapshot.external_order_id)
-            if existing is None:
-                created_orders += 1
-                persisted_orders.append(
-                    self.orders.create_order(
+
+        try:
+            remote_orders = self.longbridge_adapter.list_today_orders(
+                mode=mode,
+                symbol=symbol,
+            )
+            created_orders = 0
+            updated_orders = 0
+            persisted_orders: list[Order] = []
+            for remote_snapshot in remote_orders:
+                existing = self.orders.get_by_external_order_id(remote_snapshot.external_order_id)
+                if existing is None:
+                    created_orders += 1
+                    persisted_order = self.orders.create_order(
                         self._build_local_order(
                             external_account_id=external_account_id,
                             remote_snapshot=remote_snapshot,
                             mode=mode,
                         )
                     )
-                )
-            else:
-                updated_orders += 1
-                persisted_orders.append(self._merge_remote_snapshot(existing, remote_snapshot))
+                    self._sync_execution_from_snapshot(persisted_order, remote_snapshot)
+                    persisted_orders.append(persisted_order)
+                else:
+                    updated_orders += 1
+                    persisted_orders.append(self._merge_remote_snapshot(existing, remote_snapshot))
 
-        return OrderSyncResult(
-            broker=BrokerName.LONGBRIDGE,
-            external_account_id=external_account_id,
-            mode=mode,
-            synced_orders=len(remote_orders),
-            created_orders=created_orders,
-            updated_orders=updated_orders,
-            orders=persisted_orders,
-        )
+            self.broker_accounts.update_orders_sync_state(
+                external_account_id,
+                status=ReconciliationStatus.SUCCESS,
+                attempted_at=attempted_at,
+                synced_at=datetime.now(timezone.utc),
+                error=None,
+            )
+            return OrderSyncResult(
+                broker=BrokerName.LONGBRIDGE,
+                external_account_id=external_account_id,
+                mode=mode,
+                synced_orders=len(remote_orders),
+                created_orders=created_orders,
+                updated_orders=updated_orders,
+                orders=persisted_orders,
+            )
+        except Exception as exc:
+            self.broker_accounts.update_orders_sync_state(
+                external_account_id,
+                status=ReconciliationStatus.ERROR,
+                attempted_at=attempted_at,
+                error=str(exc),
+            )
+            raise
 
     def _get_order_or_raise(self, order_id: str) -> Order:
         order = self.orders.get_order(order_id)
@@ -224,7 +254,9 @@ class OrderService:
                 "updated_at": datetime.now(timezone.utc),
             }
         )
-        return self.orders.update_order(refreshed_order)
+        persisted_order = self.orders.update_order(refreshed_order)
+        self._sync_execution_from_snapshot(persisted_order, remote_snapshot)
+        return persisted_order
 
     def _build_local_order(
         self,
@@ -260,3 +292,39 @@ class OrderService:
             created_at=remote_snapshot.submitted_at or now,
             updated_at=now,
         )
+
+    def _sync_execution_from_snapshot(
+        self,
+        order: Order,
+        remote_snapshot: BrokerOrderSnapshot,
+    ) -> None:
+        if remote_snapshot.executed_quantity <= 0:
+            return
+
+        external_execution_id = (
+            f"summary:{remote_snapshot.external_order_id}"
+            if remote_snapshot.external_order_id
+            else f"summary:{order.id}"
+        )
+        existing_execution = self.executions.get_by_external_execution_id(external_execution_id)
+        now = datetime.now(timezone.utc)
+        execution = Execution(
+            id=existing_execution.id if existing_execution is not None else str(uuid4()),
+            order_id=order.id,
+            broker=order.broker,
+            external_account_id=order.external_account_id,
+            external_order_id=remote_snapshot.external_order_id,
+            external_execution_id=external_execution_id,
+            symbol=remote_snapshot.symbol,
+            side=remote_snapshot.side,
+            quantity=remote_snapshot.executed_quantity,
+            price=remote_snapshot.executed_price,
+            executed_at=remote_snapshot.updated_at or remote_snapshot.submitted_at,
+            raw_payload={
+                "source": "order_detail_summary",
+                "remote_order": remote_snapshot.raw_payload,
+            },
+            created_at=existing_execution.created_at if existing_execution is not None else now,
+            updated_at=now,
+        )
+        self.executions.upsert_execution(execution)

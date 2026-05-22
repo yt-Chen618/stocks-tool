@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     )
     redis_url: str = Field(default="redis://localhost:6379/0")
     sqlalchemy_echo: bool = False
+    reconciliation_scheduler_enabled: bool = True
+    reconciliation_poll_interval_seconds: int = 15
+    reconciliation_account_interval_seconds: int = 300
+    reconciliation_orders_interval_seconds: int = 300
+    reconciliation_working_orders_interval_seconds: int = 60
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
     longbridge_access_token: str = ""

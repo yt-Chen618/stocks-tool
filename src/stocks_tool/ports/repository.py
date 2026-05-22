@@ -1,11 +1,13 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 
-from stocks_tool.domain.enums import OrderStatus
+from stocks_tool.domain.enums import OrderStatus, ReconciliationStatus
 from stocks_tool.domain.models import (
     AccountSnapshot,
     AddWatchlistItemRequest,
     BrokerAccount,
     CreateBrokerAccountRequest,
+    Execution,
     CreateWatchlistRequest,
     Order,
     TradePlan,
@@ -57,6 +59,30 @@ class BrokerAccountRepository(ABC):
     ) -> BrokerAccount | None:
         raise NotImplementedError
 
+    @abstractmethod
+    def update_account_sync_state(
+        self,
+        external_account_id: str,
+        *,
+        status: ReconciliationStatus,
+        attempted_at: datetime | None = None,
+        synced_at: datetime | None = None,
+        error: str | None = None,
+    ) -> BrokerAccount:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_orders_sync_state(
+        self,
+        external_account_id: str,
+        *,
+        status: ReconciliationStatus,
+        attempted_at: datetime | None = None,
+        synced_at: datetime | None = None,
+        error: str | None = None,
+    ) -> BrokerAccount:
+        raise NotImplementedError
+
 
 class AccountSnapshotRepository(ABC):
     @abstractmethod
@@ -94,4 +120,22 @@ class OrderRepository(ABC):
 
     @abstractmethod
     def update_order(self, order: Order) -> Order:
+        raise NotImplementedError
+
+
+class ExecutionRepository(ABC):
+    @abstractmethod
+    def get_by_external_execution_id(self, external_execution_id: str) -> Execution | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_executions(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+    ) -> list[Execution]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_execution(self, execution: Execution) -> Execution:
         raise NotImplementedError

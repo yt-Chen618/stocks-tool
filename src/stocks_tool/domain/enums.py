@@ -11,6 +11,13 @@ class BrokerName(str, Enum):
     LONGBRIDGE = "longbridge"
 
 
+class ReconciliationStatus(str, Enum):
+    IDLE = "idle"
+    SYNCING = "syncing"
+    SUCCESS = "success"
+    ERROR = "error"
+
+
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
     FILING = "filing"
