@@ -27,6 +27,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `account-snapshots`
 - `brokers/longbridge`
 - `executions`
+- `journals`
 - `orders`
 
 ### Longbridge integration
@@ -72,8 +73,10 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 Available endpoints:
 
 - `GET /executions`
+- `GET /journals`
 - `GET /orders`
 - `GET /orders/{order_id}`
+- `POST /journals`
 - `POST /orders/submit`
 - `POST /orders/{order_id}/refresh`
 - `POST /orders/{order_id}/replace`
@@ -90,6 +93,25 @@ Current behavior:
 - The dashboard frontend now exercises submit, refresh, replace, and cancel against these endpoints.
 - Execution summaries are now derived from broker order-detail snapshots using `executed_quantity`, `executed_price`, and broker `updated_at`.
 - Executions are persisted in the new `executions` table and exposed through `GET /executions`.
+
+### Journal and review workflow
+
+- `GET /journals` lists order-linked or plan-linked notes.
+- `POST /journals` creates a new journal entry.
+- Current journal entry types:
+  - `plan`
+  - `review`
+  - `note`
+- Each entry stores:
+  - `external_account_id`
+  - `symbol`
+  - optional `trade_plan_id`
+  - optional `order_id`
+  - optional `execution_id`
+  - `title`
+  - `notes`
+  - `tags`
+- The creation path validates account / order / execution consistency before persisting.
 
 ### Latest paper-account snapshot
 
@@ -158,6 +180,8 @@ Current dashboard capabilities:
 - Refresh, manage, replace, and cancel eligible orders from the dashboard
 - View selected order details and broker status transitions
 - View execution summary for the selected order
+- Save `plan`, `review`, and `note` journal entries for the selected order
+- View existing order-linked journal entries in the selected-order workflow
 - View recent orders
 - View watchlists
 - View latest positions with type, market value, unrealized PnL, and weight
@@ -178,10 +202,14 @@ Frontend files:
 - Added a dashboard reconciliation strip for `Auto Reconciliation`, `Account Sync`, and `Orders Sync`.
 - Added execution persistence, `GET /executions`, and selected-order fill summary rendering.
 - Added Alembic migration `20260522_0003_execution_ledger`.
+- Added journal persistence, `GET /journals`, `POST /journals`, and selected-order journal/review rendering.
+- Added Alembic migration `20260522_0004_journal_entries`.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
-- Updated the mock dashboard backend to expose reconciliation/account metadata and `GET /executions` so the mock workflow matches the current dashboard data surface.
+- Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
 - Added `tests/test_executions_api.py` for execution route coverage.
+- Added `tests/test_journals_api.py` for journal route coverage.
+- Added `tests/test_journal_service.py` for order / execution linkage validation.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket and holdings sections.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
 - Latest local test run after these UI additions:
@@ -190,18 +218,17 @@ Frontend files:
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `11 passed`
+- Result: `16 passed`
 
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
-- There is no automated browser regression yet for the cancel-confirmation flow.
+- There is no automated browser regression yet for the cancel-confirmation or journal-submit flow.
 
 ## Recommended next steps
 
-1. Clean up test watchlist data and temporary regression artifacts if they are no longer needed.
-2. Add an automated browser regression for submit -> replace -> cancel plus filled-order execution summary.
-3. Expand the execution ledger from per-order summary snapshots into broker-native per-fill records when the Longbridge adapter path is confirmed.
-4. Expand into journal and review workflows.
+1. Add an automated browser regression for submit -> replace -> cancel, filled-order execution summary, and journal submit flow.
+2. Expand the execution ledger from per-order summary snapshots into broker-native per-fill records when the Longbridge adapter path is confirmed.
+3. Decide whether journal entries need edit/delete endpoints or a plan-first capture view outside the selected-order pane.

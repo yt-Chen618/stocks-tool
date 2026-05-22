@@ -20,6 +20,7 @@ This repository currently contains:
 - domain models for plans, accounts, risk checks, and orders
 - a Longbridge adapter boundary with quote and account-sync entry points
 - a background paper-account reconciliation loop for account snapshots and orders
+- an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
 - architecture documentation for the next build phases
 
@@ -87,8 +88,10 @@ Then open:
 - `GET /brokers/longbridge/profile`
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
+- `GET /journals`
 - `GET /executions`
 - `GET /orders`
+- `POST /journals`
 - `POST /orders/submit`
 - `POST /orders/{order_id}/refresh`
 - `POST /orders/{order_id}/replace`
@@ -104,6 +107,7 @@ Order submission is currently paper-first and broker-native:
 - local order reconciliation can be pulled on demand through `/orders/sync/longbridge/{external_account_id}`
 - automatic paper reconciliation also runs in the background for active Longbridge broker accounts
 - execution summaries are persisted from broker order-detail snapshots and can be read through `/executions`
+- journal entries can be linked to an account, order, trade plan, and latest execution context through `/journals`
 
 ## Regression scripts
 
@@ -116,7 +120,7 @@ The repo includes two order/dashboard regression workflows plus a single entrypo
 
 Available workflows:
 
-- `mock-ui`: starts the in-memory mock dashboard backend and validates the dashboard shell plus submit / replace / cancel flow without touching the real paper account
+- `mock-ui`: starts the in-memory mock dashboard backend and validates the dashboard shell, journal data surface, and submit / replace / cancel flow without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 
 Both scripts now emit the same JSON envelope shape:
@@ -141,7 +145,7 @@ Useful examples:
 ## Next milestones
 
 1. Expand the execution ledger from per-order summary snapshots into broker-native per-fill capture.
-2. Add scheduler and ingestion workers for market/news/event data.
-3. Add Longbridge order push reconciliation loops and execution/fill capture.
-4. Add authentication, audit logging, and strategy-level permission controls.
-5. Expand broker adapters beyond Longbridge.
+2. Add automated browser regression for the dashboard submit/replace/cancel and journal-review flows.
+3. Expand the journal workflow into plan-first capture, edit/history, and cross-trade review views when the UI surface is settled.
+4. Add scheduler and ingestion workers for market/news/event data.
+5. Add authentication, audit logging, and strategy-level permission controls.

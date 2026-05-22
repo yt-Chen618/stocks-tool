@@ -12,6 +12,7 @@ from stocks_tool.api.routes import (
     brokers,
     executions,
     health,
+    journals,
     orders,
     plans,
     research,
@@ -82,6 +83,7 @@ def create_app() -> FastAPI:
     app.include_router(account_snapshots.router)
     app.include_router(brokers.router)
     app.include_router(executions.router)
+    app.include_router(journals.router)
     app.include_router(orders.router)
     return app
 

@@ -18,6 +18,12 @@ class ReconciliationStatus(str, Enum):
     ERROR = "error"
 
 
+class JournalEntryType(str, Enum):
+    PLAN = "plan"
+    REVIEW = "review"
+    NOTE = "note"
+
+
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
     FILING = "filing"

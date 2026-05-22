@@ -278,3 +278,27 @@ class ExecutionRecord(TimestampMixin, Base):
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
 
     order: Mapped[OrderRecord] = relationship(back_populates="executions")
+
+
+class JournalEntryRecord(TimestampMixin, Base):
+    __tablename__ = "journal_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    trade_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("trade_plans.id", ondelete="SET NULL"),
+        index=True,
+    )
+    order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("orders.id", ondelete="SET NULL"),
+        index=True,
+    )
+    execution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("executions.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    entry_type: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    notes: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list[str] | None] = mapped_column(JSONB)

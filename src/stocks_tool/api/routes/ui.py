@@ -307,6 +307,51 @@ def render_dashboard() -> HTMLResponse:
                               No fills recorded for this order yet.
                             </div>
                           </section>
+                          <section class="selected-order-journal-shell">
+                            <div class="form-header">
+                              <span class="section-kicker">Journal</span>
+                              <h3>Review Workflow</h3>
+                            </div>
+                            <form id="journal-entry-form" class="ticket-form">
+                              <div class="ticket-grid">
+                                <label class="field">
+                                  <span>Entry Type</span>
+                                  <select id="journal-entry-type">
+                                    <option value="review">Review</option>
+                                    <option value="plan">Plan</option>
+                                    <option value="note">Note</option>
+                                  </select>
+                                </label>
+                                <label class="field field-span-2">
+                                  <span>Title</span>
+                                  <input id="journal-title" type="text" maxlength="120" placeholder="Post-trade review headline" />
+                                </label>
+                                <label class="field field-span-2">
+                                  <span>Tags</span>
+                                  <input id="journal-tags" type="text" maxlength="160" placeholder="discipline, entry, risk" />
+                                </label>
+                                <label class="field field-span-2">
+                                  <span>Notes</span>
+                                  <textarea id="journal-notes" rows="4" placeholder="What happened, what was learned, and what changes next time."></textarea>
+                                </label>
+                              </div>
+                              <div class="form-foot">
+                                <p id="journal-form-hint" class="form-hint">Select an order to save a plan note or post-trade review.</p>
+                                <button id="submit-journal" class="icon-button" type="submit">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M12 5v14"/>
+                                      <path d="M5 12h14"/>
+                                    </svg>
+                                  </span>
+                                  <span>Save Entry</span>
+                                </button>
+                              </div>
+                            </form>
+                            <div id="selected-order-journal" class="selected-order-journal empty">
+                              Select an order to load journal entries.
+                            </div>
+                          </section>
                           <form id="replace-order-form" class="ticket-form hidden">
                             <div class="form-header">
                               <span class="section-kicker">Replace</span>

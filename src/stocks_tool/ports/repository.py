@@ -1,14 +1,15 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from stocks_tool.domain.enums import OrderStatus, ReconciliationStatus
+from stocks_tool.domain.enums import JournalEntryType, OrderStatus, ReconciliationStatus
 from stocks_tool.domain.models import (
     AccountSnapshot,
     AddWatchlistItemRequest,
     BrokerAccount,
-    CreateBrokerAccountRequest,
     Execution,
     CreateWatchlistRequest,
+    CreateBrokerAccountRequest,
+    JournalEntry,
     Order,
     TradePlan,
     Watchlist,
@@ -125,6 +126,10 @@ class OrderRepository(ABC):
 
 class ExecutionRepository(ABC):
     @abstractmethod
+    def get_execution(self, execution_id: str) -> Execution | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_by_external_execution_id(self, external_execution_id: str) -> Execution | None:
         raise NotImplementedError
 
@@ -138,4 +143,20 @@ class ExecutionRepository(ABC):
 
     @abstractmethod
     def upsert_execution(self, execution: Execution) -> Execution:
+        raise NotImplementedError
+
+
+class JournalRepository(ABC):
+    @abstractmethod
+    def create_entry(self, entry: JournalEntry) -> JournalEntry:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_entries(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: JournalEntryType | None = None,
+    ) -> list[JournalEntry]:
         raise NotImplementedError

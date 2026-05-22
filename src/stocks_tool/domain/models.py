@@ -9,6 +9,7 @@ from stocks_tool.domain.enums import (
     BrokerName,
     CatalystType,
     ExecutionMode,
+    JournalEntryType,
     MarketBias,
     OptionRight,
     OrderSide,
@@ -242,6 +243,33 @@ class Execution(BaseModel):
     price: Decimal | None = None
     executed_at: datetime | None = None
     raw_payload: dict | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateJournalEntryRequest(BaseModel):
+    external_account_id: str
+    symbol: str
+    entry_type: JournalEntryType
+    title: str = Field(min_length=1, max_length=120)
+    notes: str = Field(min_length=1)
+    order_id: str | None = None
+    trade_plan_id: str | None = None
+    execution_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class JournalEntry(BaseModel):
+    id: str
+    external_account_id: str
+    symbol: str
+    entry_type: JournalEntryType
+    title: str
+    notes: str
+    order_id: str | None = None
+    trade_plan_id: str | None = None
+    execution_id: str | None = None
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

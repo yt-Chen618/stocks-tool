@@ -4,6 +4,7 @@ const state = {
   watchlists: [],
   orders: [],
   executions: [],
+  journals: [],
   snapshots: [],
   brokerStatus: null,
   latestSnapshot: null,
@@ -52,6 +53,14 @@ function bindElements() {
   els.submitOrder = document.getElementById("submit-order");
   els.selectedOrderCard = document.getElementById("selected-order-card");
   els.selectedOrderExecution = document.getElementById("selected-order-execution");
+  els.journalEntryForm = document.getElementById("journal-entry-form");
+  els.journalEntryType = document.getElementById("journal-entry-type");
+  els.journalTitle = document.getElementById("journal-title");
+  els.journalTags = document.getElementById("journal-tags");
+  els.journalNotes = document.getElementById("journal-notes");
+  els.journalFormHint = document.getElementById("journal-form-hint");
+  els.submitJournal = document.getElementById("submit-journal");
+  els.selectedOrderJournal = document.getElementById("selected-order-journal");
   els.replaceOrderForm = document.getElementById("replace-order-form");
   els.replaceQuantity = document.getElementById("replace-quantity");
   els.replaceLimitField = document.getElementById("replace-limit-field");
@@ -154,6 +163,11 @@ function wireEvents() {
     event.preventDefault();
     await replaceSelectedOrder();
   });
+
+  els.journalEntryForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitJournalEntry();
+  });
 }
 
 async function loadDashboard() {
@@ -183,6 +197,7 @@ async function loadAccountData() {
     state.snapshots = [];
     state.orders = [];
     state.executions = [];
+    state.journals = [];
     state.latestSnapshot = null;
     state.selectedOrderId = "";
     renderReconciliationStatus();
@@ -197,14 +212,16 @@ async function loadAccountData() {
   }
 
   try {
-    const [snapshots, orders, executions] = await Promise.all([
+    const [snapshots, orders, executions, journals] = await Promise.all([
       fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
     ]);
     state.snapshots = snapshots;
     state.orders = orders;
     state.executions = executions;
+    state.journals = journals;
     state.latestSnapshot = snapshots[0] || null;
 
     if (!orders.some((order) => order.id === state.selectedOrderId)) {
@@ -399,6 +416,52 @@ async function replaceSelectedOrder() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Order replace failed.", "error");
+  }
+}
+
+async function submitJournalEntry() {
+  const order = getSelectedOrder();
+  if (!order) {
+    setStatus("Select an order before saving a journal entry.", "warning");
+    return;
+  }
+
+  try {
+    const title = els.journalTitle.value.trim();
+    const notes = els.journalNotes.value.trim();
+    if (!title) {
+      throw new Error("Journal title is required.");
+    }
+    if (!notes) {
+      throw new Error("Journal notes are required.");
+    }
+
+    const execution = getSelectedExecution();
+    const payload = {
+      external_account_id: order.external_account_id,
+      symbol: order.symbol,
+      entry_type: els.journalEntryType.value,
+      title,
+      notes,
+      order_id: order.id,
+      trade_plan_id: order.trade_plan_id,
+      execution_id: execution?.id || null,
+      tags: parseTags(els.journalTags.value),
+    };
+    setStatus(`Saving ${payload.entry_type} entry for ${order.symbol}...`, "warning");
+    const created = await fetchJson("/journals", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.journals = [created, ...state.journals.filter((entry) => entry.id !== created.id)];
+    els.journalTitle.value = "";
+    els.journalTags.value = "";
+    els.journalNotes.value = "";
+    renderSelectedJournal();
+    setStatus(`Journal entry saved for ${created.symbol}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Journal entry save failed.", "error");
   }
 }
 
@@ -778,6 +841,7 @@ function renderSelectedOrder() {
     els.selectedOrderCard.className = "selected-order empty";
     els.selectedOrderCard.textContent = "Select an order from the table to manage it.";
     renderSelectedExecution();
+    renderSelectedJournal();
     hideReplaceForm();
     return;
   }
@@ -861,6 +925,7 @@ function renderSelectedOrder() {
   }
 
   renderSelectedExecution();
+  renderSelectedJournal();
 }
 
 function setSelectedOrder(orderId, shouldScroll = false) {
@@ -883,6 +948,19 @@ function getSelectedAccount() {
 
 function getSelectedExecution() {
   return state.executions.find((execution) => execution.order_id === state.selectedOrderId) || null;
+}
+
+function getSelectedJournalEntries() {
+  const order = getSelectedOrder();
+  if (!order) {
+    return [];
+  }
+
+  return state.journals.filter(
+    (entry) =>
+      entry.order_id === order.id ||
+      (order.trade_plan_id && entry.trade_plan_id === order.trade_plan_id)
+  );
 }
 
 function renderSelectedExecution() {
@@ -911,6 +989,82 @@ function renderSelectedExecution() {
     </div>
     <p class="form-hint">Derived from the latest broker order detail snapshot for this order.</p>
   `;
+}
+
+function renderSelectedJournal() {
+  const order = getSelectedOrder();
+  if (!order) {
+    updateJournalFormAvailability(false);
+    els.journalFormHint.textContent = "Select an order to save a plan note or post-trade review.";
+    els.selectedOrderJournal.className = "selected-order-journal empty";
+    els.selectedOrderJournal.textContent = "Select an order to load journal entries.";
+    return;
+  }
+
+  updateJournalFormAvailability(true);
+  const execution = getSelectedExecution();
+  const entries = getSelectedJournalEntries();
+  const context = [];
+  if (order.trade_plan_id) {
+    context.push("trade plan context");
+  }
+  if (execution) {
+    context.push("latest fill context");
+  }
+  els.journalFormHint.textContent = context.length
+    ? `New entries will attach ${context.join(" and ")} for ${order.symbol}.`
+    : `New entries will attach to ${order.symbol} on ${order.external_account_id}.`;
+
+  if (!entries.length) {
+    els.selectedOrderJournal.className = "selected-order-journal empty";
+    els.selectedOrderJournal.textContent = "No journal entries linked to this order yet.";
+    return;
+  }
+
+  els.selectedOrderJournal.className = "selected-order-journal";
+  els.selectedOrderJournal.innerHTML = entries
+    .map((entry) => {
+      const linkMeta = [];
+      if (entry.trade_plan_id) {
+        linkMeta.push("Plan linked");
+      }
+      if (entry.execution_id) {
+        linkMeta.push("Execution linked");
+      }
+      const tags = entry.tags.length
+        ? `<div class="journal-entry-tags">${entry.tags
+            .map((tag) => `<span class="journal-tag">${escapeHtml(tag)}</span>`)
+            .join("")}</div>`
+        : "";
+
+      return `
+        <article class="journal-entry-card">
+          <div class="journal-entry-head">
+            <div class="journal-entry-title-block">
+              <span class="pill ${journalEntryTone(entry.entry_type)}">${escapeHtml(entry.entry_type)}</span>
+              <strong>${escapeHtml(entry.title)}</strong>
+            </div>
+            <span class="journal-entry-time">${escapeHtml(formatDateTime(entry.updated_at))}</span>
+          </div>
+          <div class="journal-entry-meta">
+            <span>${escapeHtml(linkMeta.join(" / ") || "Order linked")}</span>
+            <span>${escapeHtml(entry.symbol)}</span>
+          </div>
+          <p class="journal-entry-notes">${formatMultilineText(entry.notes)}</p>
+          ${tags}
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function updateJournalFormAvailability(enabled) {
+  els.journalEntryType.disabled = !enabled;
+  els.journalTitle.disabled = !enabled;
+  els.journalTags.disabled = !enabled;
+  els.journalNotes.disabled = !enabled;
+  els.submitJournal.disabled = !enabled;
+  els.submitJournal.title = enabled ? "" : "Select an order first.";
 }
 
 function populateReplaceForm(order) {
@@ -1102,6 +1256,20 @@ function parsePositiveNumber(value, label, required) {
 function normalizeOptionalText(value) {
   const trimmed = String(value ?? "").trim();
   return trimmed ? trimmed : null;
+}
+
+function parseTags(value) {
+  const seen = new Set();
+  return String(value ?? "")
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter((tag) => {
+      if (!tag || seen.has(tag)) {
+        return false;
+      }
+      seen.add(tag);
+      return true;
+    });
 }
 
 function isCancelableOrder(order) {
@@ -1323,6 +1491,20 @@ function statusClass(status) {
     return "warning";
   }
   return "neutral";
+}
+
+function journalEntryTone(entryType) {
+  if (entryType === "review") {
+    return "warning";
+  }
+  if (entryType === "plan") {
+    return "success";
+  }
+  return "neutral";
+}
+
+function formatMultilineText(value) {
+  return escapeHtml(value).replaceAll("\n", "<br />");
 }
 
 function escapeHtml(value) {

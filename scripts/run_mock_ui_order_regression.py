@@ -131,6 +131,7 @@ def main() -> None:
             assert "Order Ticket" in dashboard.text
             assert "Selected Order" in dashboard.text
             assert "Execution Summary" in dashboard.text
+            assert "Review Workflow" in dashboard.text
             assert "Orders" in dashboard.text
 
             app_js = client.get("/static/app.js")
@@ -140,9 +141,13 @@ def main() -> None:
                 "replace-order-form",
                 "selected-order-card",
                 "selected-order-execution",
+                "journal-entry-form",
+                "selected-order-journal",
                 "submitOrder()",
+                "submitJournalEntry()",
                 "replaceSelectedOrder()",
                 "renderSelectedExecution()",
+                "renderSelectedJournal()",
             ):
                 assert marker in app_js.text
 
@@ -158,6 +163,9 @@ def main() -> None:
             initial_executions = require_ok(client.get("/executions", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_executions) == 1
             assert initial_executions[0]["order_id"] == "mock-order-0002"
+            initial_journals = require_ok(client.get("/journals", params={"external_account_id": "LBPT10087357"}))
+            assert len(initial_journals) == 1
+            assert initial_journals[0]["order_id"] == "mock-order-0002"
 
             created = require_ok(
                 client.post(
@@ -207,6 +215,24 @@ def main() -> None:
                 label="replaced mock order",
             )
 
+            journal = require_ok(
+                client.post(
+                    "/journals",
+                    json={
+                        "external_account_id": "LBPT10087357",
+                        "symbol": "MOCK.US",
+                        "entry_type": "review",
+                        "title": "Mock regression review",
+                        "notes": "Submit, replace, and cancel remained reachable.",
+                        "order_id": created["id"],
+                        "tags": ["mock", "workflow"],
+                    },
+                )
+            )
+            linked_journals = require_ok(client.get("/journals", params={"order_id": created["id"]}))
+            assert len(linked_journals) == 1
+            assert linked_journals[0]["id"] == journal["id"]
+
             canceled = require_ok(client.post(f"/orders/{created['id']}/cancel"))
             canceled = wait_for(
                 client,
@@ -232,6 +258,7 @@ def main() -> None:
                             "account_seed": True,
                             "snapshot_seed": True,
                             "execution_seed": True,
+                            "journal_seed": True,
                         },
                         "order": {
                             "local_order_id": created["id"],
@@ -240,6 +267,11 @@ def main() -> None:
                             "replaced_limit": replaced["limit_price"],
                             "replaced_quantity": replaced["quantity"],
                             "final_status": canceled["status"],
+                        },
+                        "journal": {
+                            "entry_id": journal["id"],
+                            "entry_type": journal["entry_type"],
+                            "order_id": journal["order_id"],
                         },
                     },
                 ),

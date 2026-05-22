@@ -34,6 +34,7 @@ class MockDashboardState:
         self.account_id = "LBPT10087357"
         self.symbol = "MOCK.US"
         self._order_counter = 1000
+        self._journal_counter = 2000
         self.account = {
             "id": "mock-account-1",
             "broker": "longbridge",
@@ -144,6 +145,22 @@ class MockDashboardState:
                 "raw_payload": {"source": "order_detail_summary"},
                 "created_at": "2026-05-20T19:53:15Z",
                 "updated_at": "2026-05-20T19:53:15Z",
+            }
+        ]
+        self.journals = [
+            {
+                "id": "mock-journal-0001",
+                "external_account_id": self.account_id,
+                "symbol": self.symbol,
+                "entry_type": "review",
+                "title": "Filled order review",
+                "notes": "Held the entry plan and exited with the expected sizing.",
+                "order_id": "mock-order-0002",
+                "trade_plan_id": None,
+                "execution_id": "mock-execution-0001",
+                "tags": ["filled", "discipline"],
+                "created_at": "2026-05-20T20:10:00Z",
+                "updated_at": "2026-05-20T20:10:00Z",
             }
         ]
 
@@ -290,6 +307,44 @@ class MockDashboardState:
             rows = [row for row in rows if row["order_id"] == order_id]
         return deepcopy(rows)
 
+    def list_journals(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.journals
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if order_id is not None:
+            rows = [row for row in rows if row["order_id"] == order_id]
+        if trade_plan_id is not None:
+            rows = [row for row in rows if row["trade_plan_id"] == trade_plan_id]
+        if entry_type is not None:
+            rows = [row for row in rows if row["entry_type"] == entry_type]
+        return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def create_journal(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self._journal_counter += 1
+        now = iso_now()
+        entry = {
+            "id": f"mock-journal-{self._journal_counter}",
+            "external_account_id": str(payload["external_account_id"]),
+            "symbol": str(payload["symbol"]).upper(),
+            "entry_type": str(payload["entry_type"]),
+            "title": str(payload["title"]).strip(),
+            "notes": str(payload["notes"]).strip(),
+            "order_id": payload.get("order_id"),
+            "trade_plan_id": payload.get("trade_plan_id"),
+            "execution_id": payload.get("execution_id"),
+            "tags": [str(tag).strip() for tag in payload.get("tags", []) if str(tag).strip()],
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.journals.insert(0, entry)
+        return deepcopy(entry)
+
 
 def create_app() -> FastAPI:
     state = MockDashboardState()
@@ -334,6 +389,20 @@ def create_app() -> FastAPI:
     ) -> list[dict[str, Any]]:
         return state.list_executions(external_account_id=external_account_id, order_id=order_id)
 
+    @app.get("/journals")
+    def journals(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        trade_plan_id: str | None = Query(default=None),
+        entry_type: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return state.list_journals(
+            external_account_id=external_account_id,
+            order_id=order_id,
+            trade_plan_id=trade_plan_id,
+            entry_type=entry_type,
+        )
+
     @app.get("/orders/{order_id}")
     def get_order(order_id: str) -> dict[str, Any]:
         try:
@@ -369,6 +438,10 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Order '{order_id}' was not found.") from error
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    @app.post("/journals", status_code=status.HTTP_201_CREATED)
+    def create_journal(payload: dict[str, Any]) -> dict[str, Any]:
+        return state.create_journal(payload)
 
     @app.post("/brokers/longbridge/account-sync/{external_account_id}")
     def sync_account(external_account_id: str, mode: str = Query("paper")) -> dict[str, Any]:

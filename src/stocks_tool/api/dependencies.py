@@ -8,6 +8,7 @@ from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
 from stocks_tool.application.services.execution import ExecutionService
+from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.risk import RiskService
@@ -19,6 +20,7 @@ from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
     ExecutionRepository,
+    JournalRepository,
     OrderRepository,
     WatchlistRepository,
 )
@@ -27,6 +29,9 @@ from stocks_tool.repositories.sqlalchemy_order_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_execution_repository import (
     SQLAlchemyExecutionRepository,
+)
+from stocks_tool.repositories.sqlalchemy_journal_repository import (
+    SQLAlchemyJournalRepository,
 )
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
@@ -99,6 +104,12 @@ def get_execution_repository(
     return SQLAlchemyExecutionRepository(session)
 
 
+def get_journal_repository(
+    session: Session = Depends(get_db_session),
+) -> JournalRepository:
+    return SQLAlchemyJournalRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -132,4 +143,18 @@ def get_order_service(
         orders=orders,
         executions=executions,
         longbridge_adapter=adapter,
+    )
+
+
+def get_journal_service(
+    journals: JournalRepository = Depends(get_journal_repository),
+    orders: OrderRepository = Depends(get_order_repository),
+    trade_plans: TradePlanRepository = Depends(get_trade_plan_repository),
+    executions: ExecutionRepository = Depends(get_execution_repository),
+) -> JournalService:
+    return JournalService(
+        journals=journals,
+        orders=orders,
+        trade_plans=trade_plans,
+        executions=executions,
     )

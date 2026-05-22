@@ -14,6 +14,16 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def get_execution(self, execution_id: str) -> Execution | None:
+        record = self.session.execute(
+            select(ExecutionRecord)
+            .options(selectinload(ExecutionRecord.order))
+            .where(ExecutionRecord.id == execution_id)
+        ).scalar_one_or_none()
+        if record is None:
+            return None
+        return self._to_domain(record)
+
     def get_by_external_execution_id(self, external_execution_id: str) -> Execution | None:
         record = self.session.execute(
             select(ExecutionRecord)
