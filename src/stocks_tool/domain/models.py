@@ -530,6 +530,45 @@ class BullPutSpreadMonitorResult(BaseModel):
     days_to_expiration: int | None = None
 
 
+class BullPutStrategyRuntimeState(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str = "paper_bull_put_v1"
+    external_account_id: str
+    mode: ExecutionMode
+    auto_entry_enabled: bool = True
+    manual_pause: bool = False
+    kill_switch_active: bool = False
+    paused_symbols: list[str] = Field(default_factory=list)
+    current_session_date: date | None = None
+    daily_entry_count: int = 0
+    daily_realized_pnl: Decimal = Decimal("0")
+    last_scan_at: datetime | None = None
+    last_scan_result: str | None = None
+    last_scan_symbol: str | None = None
+    last_skip_reason: str | None = None
+    last_action_at: datetime | None = None
+    last_action: str | None = None
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class UpdateBullPutStrategyRuntimeRequest(BaseModel):
+    auto_entry_enabled: bool | None = None
+    manual_pause: bool | None = None
+    kill_switch_active: bool | None = None
+    paused_symbols: list[str] | None = None
+
+
+class BullPutStrategyScanRunResult(BaseModel):
+    strategy_state: BullPutStrategyRuntimeState
+    scanned_at: datetime
+    executed: bool
+    executed_spread: BullPutSpread | None = None
+    previews: list[BullPutSpreadScanResult] = Field(default_factory=list)
+    reason: str | None = None
+
+
 class BrokerAccountSyncResult(BaseModel):
     broker: BrokerName
     mode: ExecutionMode

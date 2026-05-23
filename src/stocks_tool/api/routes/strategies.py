@@ -14,7 +14,10 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyRuntimeState,
+    BullPutStrategyScanRunResult,
     ExecuteBullPutSpreadRequest,
+    UpdateBullPutStrategyRuntimeRequest,
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
@@ -74,6 +77,70 @@ def get_bull_put_spread(
     if spread is None:
         raise HTTPException(status_code=404, detail="Bull put spread not found.")
     return spread
+
+
+@router.get("/bull-put/runtime", response_model=BullPutStrategyRuntimeState)
+def get_bull_put_runtime_state(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> BullPutStrategyRuntimeState:
+    try:
+        return service.get_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/bull-put/runtime/{external_account_id}", response_model=BullPutStrategyRuntimeState)
+def update_bull_put_runtime_state(
+    external_account_id: str,
+    request: UpdateBullPutStrategyRuntimeRequest,
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> BullPutStrategyRuntimeState:
+    try:
+        return service.update_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/bull-put/runtime/{external_account_id}/scan", response_model=BullPutStrategyScanRunResult)
+def run_bull_put_runtime_scan(
+    external_account_id: str,
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    force: bool = Query(default=False, description="Run outside the scheduled ET scan window."),
+    as_of: datetime | None = Query(
+        default=None,
+        description="Optional UTC timestamp for deterministic auto-scan checks, e.g. 2026-05-23T14:45:00Z",
+    ),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> BullPutStrategyScanRunResult:
+    try:
+        return service.run_entry_scan(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=as_of,
+            force=force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.post("/bull-put/execute", response_model=BullPutSpread, status_code=201)

@@ -4,6 +4,7 @@ const state = {
   watchlists: [],
   orders: [],
   spreads: [],
+  runtime: null,
   executions: [],
   journals: [],
   snapshots: [],
@@ -30,6 +31,17 @@ function bindElements() {
   els.positionsSummaryStrip = document.getElementById("positions-summary-strip");
   els.holdingsFocus = document.getElementById("holdings-focus");
   els.watchlistsBody = document.getElementById("watchlists-body");
+  els.strategyRuntimeStrip = document.getElementById("strategy-runtime-strip");
+  els.strategyControlsForm = document.getElementById("strategy-controls-form");
+  els.strategyAutoEntry = document.getElementById("strategy-auto-entry");
+  els.strategyManualPause = document.getElementById("strategy-manual-pause");
+  els.strategyKillSwitch = document.getElementById("strategy-kill-switch");
+  els.strategyPausedSymbols = document.getElementById("strategy-paused-symbols");
+  els.strategyControlsHint = document.getElementById("strategy-controls-hint");
+  els.saveStrategyControls = document.getElementById("save-strategy-controls");
+  els.runStrategyScan = document.getElementById("run-strategy-scan");
+  els.strategySkipCard = document.getElementById("strategy-skip-card");
+  els.strategyJournalFeed = document.getElementById("strategy-journal-feed");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
   els.ordersBody = document.getElementById("orders-body");
@@ -103,6 +115,15 @@ function wireEvents() {
   els.quoteForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await loadQuote();
+  });
+
+  els.strategyControlsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await saveStrategyControls();
+  });
+
+  els.runStrategyScan.addEventListener("click", async () => {
+    await runStrategyScan();
   });
 
   els.orderType.addEventListener("change", () => {
@@ -221,6 +242,7 @@ async function loadAccountData() {
     state.snapshots = [];
     state.orders = [];
     state.spreads = [];
+    state.runtime = null;
     state.executions = [];
     state.journals = [];
     state.latestSnapshot = null;
@@ -228,6 +250,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderStrategyRuntime();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -238,16 +261,18 @@ async function loadAccountData() {
   }
 
   try {
-    const [snapshots, orders, spreads, executions, journals] = await Promise.all([
+    const [snapshots, orders, spreads, runtime, executions, journals] = await Promise.all([
       fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
     ]);
     state.snapshots = snapshots;
     state.orders = orders;
     state.spreads = spreads;
+    state.runtime = runtime;
     state.executions = executions;
     state.journals = journals;
     state.latestSnapshot = snapshots[0] || null;
@@ -259,6 +284,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderStrategyRuntime();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -318,6 +344,58 @@ async function syncOrders() {
     console.error(error);
     await refreshAccountsSilently();
     setStatus(error.message || "Order sync failed.", "error");
+  }
+}
+
+async function saveStrategyControls() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before updating strategy controls.", "warning");
+    return;
+  }
+
+  const payload = {
+    auto_entry_enabled: els.strategyAutoEntry.value === "true",
+    manual_pause: els.strategyManualPause.value === "true",
+    kill_switch_active: els.strategyKillSwitch.value === "true",
+    paused_symbols: parseSymbolList(els.strategyPausedSymbols.value),
+  };
+
+  setStatus(`Saving bull put controls for ${state.selectedAccountId}...`, "warning");
+  try {
+    await fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await loadAccountData();
+    setStatus(`Bull put controls updated for ${state.selectedAccountId}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Bull put controls update failed.", "error");
+  }
+}
+
+async function runStrategyScan() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before running a bull put scan.", "warning");
+    return;
+  }
+
+  setStatus(`Running bull put scan for ${state.selectedAccountId}...`, "warning");
+  try {
+    const result = await fetchJson(
+      `/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}/scan?mode=paper&force=true`,
+      {
+        method: "POST",
+      }
+    );
+    await loadAccountData();
+    const message = result.executed
+      ? `Bull put scan opened ${result.executed_spread?.underlying_symbol || "a spread"}.`
+      : result.reason || "Bull put scan completed without a new spread.";
+    setStatus(message, result.executed ? "success" : "warning");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Bull put scan failed.", "error");
   }
 }
 
@@ -796,6 +874,110 @@ function renderWatchlists() {
     .join("");
 }
 
+function renderStrategyRuntime() {
+  const runtime = state.runtime;
+  if (!runtime) {
+    els.strategyRuntimeStrip.innerHTML = `
+      <article class="mini-metric-tile">
+        <span class="metric-label">Entry Status</span>
+        <strong class="mini-metric-value">--</strong>
+        <span class="mini-metric-detail">Select a broker account to load bull put controls.</span>
+      </article>
+    `;
+    els.strategySkipCard.className = "strategy-note-body empty";
+    els.strategySkipCard.textContent = "No bull put scan has been skipped yet.";
+    els.strategyJournalFeed.className = "strategy-note-body empty";
+    els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
+    els.strategyControlsHint.textContent = "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.";
+    els.strategyAutoEntry.value = "true";
+    els.strategyManualPause.value = "false";
+    els.strategyKillSwitch.value = "false";
+    els.strategyPausedSymbols.value = "";
+    updateStrategyButtons();
+    return;
+  }
+
+  const statusSummary = describeStrategyStatus(runtime);
+  const summaryValues = [
+    {
+      label: "Entry Status",
+      value: statusSummary.value,
+      tone: statusSummary.tone,
+      detail: statusSummary.detail,
+    },
+    {
+      label: "Daily Entries",
+      value: `${runtime.daily_entry_count}`,
+      tone: runtime.daily_entry_count > 0 ? "success" : "",
+      detail: `Cap ${state.spreads.length ? "tracked with active spreads" : "ready for first spread"}`,
+    },
+    {
+      label: "Daily Realized PnL",
+      value: formatSignedCurrency(runtime.daily_realized_pnl, "USD"),
+      tone: pnlTone(runtime.daily_realized_pnl),
+      detail: runtime.current_session_date ? `Session ${runtime.current_session_date}` : "No tracked session date",
+    },
+    {
+      label: "Last Scan",
+      value: runtime.last_scan_result ? formatRuntimeScanResult(runtime.last_scan_result) : "--",
+      tone: runtime.last_scan_result === "executed" ? "success" : runtime.last_scan_result === "skipped" ? "warning" : "",
+      detail: runtime.last_scan_at
+        ? `${runtime.last_scan_symbol || "Account"} / ${formatDateTime(runtime.last_scan_at)}`
+        : "Waiting for first bull put scan",
+    },
+  ];
+
+  els.strategyRuntimeStrip.innerHTML = summaryValues
+    .map(
+      (item) => `
+        <article class="mini-metric-tile">
+          <span class="metric-label">${escapeHtml(item.label)}</span>
+          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
+
+  els.strategyAutoEntry.value = runtime.auto_entry_enabled ? "true" : "false";
+  els.strategyManualPause.value = runtime.manual_pause ? "true" : "false";
+  els.strategyKillSwitch.value = runtime.kill_switch_active ? "true" : "false";
+  els.strategyPausedSymbols.value = (runtime.paused_symbols || []).join(", ");
+  els.strategyControlsHint.textContent = runtime.last_action
+    ? `${runtime.last_action}${runtime.last_action_at ? ` (${formatDateTime(runtime.last_action_at)})` : ""}`
+    : "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.";
+
+  const skipReason = runtime.last_skip_reason || "No bull put skip reason recorded.";
+  els.strategySkipCard.className = `strategy-note-body ${runtime.last_skip_reason ? "" : "empty"}`;
+  els.strategySkipCard.textContent = skipReason;
+
+  const strategyNotes = state.journals.filter((entry) =>
+    Array.isArray(entry.tags) && entry.tags.some((tag) => String(tag).toLowerCase() === "bull-put")
+  );
+  if (strategyNotes.length === 0) {
+    els.strategyJournalFeed.className = "strategy-note-body empty";
+    els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
+  } else {
+    els.strategyJournalFeed.className = "strategy-note-body";
+    els.strategyJournalFeed.innerHTML = strategyNotes
+      .slice(0, 4)
+      .map(
+        (entry) => `
+          <article class="strategy-journal-entry">
+            <div class="strategy-journal-head">
+              <strong>${escapeHtml(entry.title)}</strong>
+              <span>${escapeHtml(formatDateTime(entry.updated_at))}</span>
+            </div>
+            <p>${escapeHtml(entry.notes)}</p>
+          </article>
+        `
+      )
+      .join("");
+  }
+
+  updateStrategyButtons();
+}
+
 function renderSpreads() {
   const spreads = [...state.spreads].sort(
     (left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime()
@@ -1266,6 +1448,14 @@ function updateSyncButtons() {
   els.syncOrders.title = !hasAccount ? "Select a broker account first." : ordersSyncing ? "Order sync already in progress." : "";
 }
 
+function updateStrategyButtons() {
+  const hasAccount = Boolean(state.selectedAccountId);
+  els.saveStrategyControls.disabled = !hasAccount;
+  els.runStrategyScan.disabled = !hasAccount;
+  els.saveStrategyControls.title = hasAccount ? "" : "Select a broker account first.";
+  els.runStrategyScan.title = hasAccount ? "" : "Select a broker account first.";
+}
+
 function syncTicketOrderFields() {
   syncOrderTypeFields({
     orderType: els.orderType.value,
@@ -1434,8 +1624,15 @@ function parseTags(value) {
         return false;
       }
       seen.add(tag);
-      return true;
-    });
+        return true;
+      });
+}
+
+function parseSymbolList(value) {
+  return String(value ?? "")
+    .split(",")
+    .map((symbol) => symbol.trim().toUpperCase())
+    .filter(Boolean);
 }
 
 function isCancelableOrder(order) {
@@ -1487,6 +1684,48 @@ function pnlTone(value) {
     return "error";
   }
   return "neutral";
+}
+
+function describeStrategyStatus(runtime) {
+  if (runtime.kill_switch_active) {
+    return {
+      value: "Kill Switch",
+      tone: "error",
+      detail: "New bull put entries are blocked until the kill switch is cleared.",
+    };
+  }
+  if (runtime.manual_pause) {
+    return {
+      value: "Paused",
+      tone: "warning",
+      detail: "Manual pause blocks new bull put entries while monitoring stays active.",
+    };
+  }
+  if (!runtime.auto_entry_enabled) {
+    return {
+      value: "Disabled",
+      tone: "neutral",
+      detail: "Automatic entry is disabled for this account.",
+    };
+  }
+  if ((runtime.paused_symbols || []).length) {
+    return {
+      value: "Selective Pause",
+      tone: "warning",
+      detail: `Paused symbols: ${(runtime.paused_symbols || []).join(", ")}`,
+    };
+  }
+  return {
+    value: "Running",
+    tone: "success",
+    detail: "Automatic bull put entry is enabled for this account.",
+  };
+}
+
+function formatRuntimeScanResult(value) {
+  return String(value || "--")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
 function formatSignedCurrency(value, currency = "USD") {

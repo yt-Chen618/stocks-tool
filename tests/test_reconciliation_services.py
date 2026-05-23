@@ -329,6 +329,9 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
 
     coordinator.run_once()
 
+    strategy_service.run_entry_scan.assert_called_once()
+    scan_call = strategy_service.run_entry_scan.call_args
+    assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
     strategy_service.monitor_spread.assert_called_once()
     monitor_call = strategy_service.monitor_spread.call_args
     assert monitor_call.args[0] == "spread-1"
@@ -408,4 +411,5 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
 
     coordinator.run_once()
 
+    strategy_service.run_entry_scan.assert_called_once()
     strategy_service.monitor_spread.assert_not_called()

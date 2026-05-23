@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 import time
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
@@ -13,6 +15,7 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    JournalEntryType,
     OptionRight,
     OrderSide,
     OrderStatus,
@@ -27,17 +30,22 @@ from stocks_tool.domain.models import (
     BullPutSpreadCandidate,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyRuntimeState,
+    BullPutStrategyScanRunResult,
     CreateOrderRequest,
+    CreateJournalEntryRequest,
     ExecuteBullPutSpreadRequest,
     HistoricalPriceBar,
     OptionMarketSnapshot,
     OptionContractRef,
     Order,
+    UpdateBullPutStrategyRuntimeRequest,
 )
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
     BullPutSpreadRepository,
+    BullPutStrategyRuntimeRepository,
 )
 
 
@@ -48,6 +56,7 @@ ACTIVE_SPREAD_STATUSES = {
     SpreadStatus.EXIT_PENDING_SHORT,
     SpreadStatus.EXIT_PENDING_LONG,
 }
+logger = logging.getLogger(__name__)
 
 
 class BullPutStrategyService:
@@ -58,17 +67,21 @@ class BullPutStrategyService:
         broker_accounts: BrokerAccountRepository,
         account_snapshots: AccountSnapshotRepository,
         spreads: BullPutSpreadRepository,
+        runtime_states: BullPutStrategyRuntimeRepository,
         order_service: OrderService,
         longbridge_adapter: LongbridgeBrokerAdapter,
         risk_service: RiskService,
+        journal_service: JournalService,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
         self.account_snapshots = account_snapshots
         self.spreads = spreads
+        self.runtime_states = runtime_states
         self.order_service = order_service
         self.longbridge_adapter = longbridge_adapter
         self.risk_service = risk_service
+        self.journal_service = journal_service
         self.new_york = ZoneInfo("America/New_York")
 
     def list_spreads(
@@ -84,6 +97,153 @@ class BullPutStrategyService:
 
     def get_spread(self, spread_id: str) -> BullPutSpread | None:
         return self.spreads.get_spread(spread_id)
+
+    def get_runtime_state(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        as_of: datetime | None = None,
+    ) -> BullPutStrategyRuntimeState:
+        return self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=as_of,
+        )
+
+    def update_runtime_state(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        request: UpdateBullPutStrategyRuntimeRequest,
+        as_of: datetime | None = None,
+    ) -> BullPutStrategyRuntimeState:
+        state = self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=as_of,
+        )
+        updates: dict = {}
+        if request.auto_entry_enabled is not None:
+            updates["auto_entry_enabled"] = request.auto_entry_enabled
+        if request.manual_pause is not None:
+            updates["manual_pause"] = request.manual_pause
+        if request.kill_switch_active is not None:
+            updates["kill_switch_active"] = request.kill_switch_active
+        if request.paused_symbols is not None:
+            updates["paused_symbols"] = self._normalize_paused_symbols(request.paused_symbols)
+        if updates:
+            summary = self._describe_runtime_update(updates)
+            state = self._update_runtime_state(
+                state,
+                last_action=summary,
+                last_action_at=as_of or datetime.now(timezone.utc),
+                **updates,
+            )
+        return state
+
+    def run_entry_scan(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        as_of: datetime | None = None,
+        force: bool = False,
+    ) -> BullPutStrategyScanRunResult:
+        scanned_at = as_of or datetime.now(timezone.utc)
+        if scanned_at.tzinfo is None:
+            scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+
+        state = self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=scanned_at,
+        )
+        if not force:
+            due_reason = self._scan_not_due_reason(state=state, as_of=scanned_at)
+            if due_reason is not None:
+                updates: dict = {
+                    "last_scan_result": "not_due",
+                    "last_skip_reason": due_reason,
+                    "last_error": None,
+                }
+                if due_reason == "Automatic bull put scan already ran for this account today.":
+                    updates["last_scan_at"] = scanned_at
+                state = self._update_runtime_state(
+                    state,
+                    **updates,
+                )
+                return BullPutStrategyScanRunResult(
+                    strategy_state=state,
+                    scanned_at=scanned_at,
+                    executed=False,
+                    reason=due_reason,
+                )
+
+        previews: list[BullPutSpreadScanResult] = []
+        strategy = self.settings.bull_put_strategy
+        for symbol in strategy.symbols:
+            preview = self.preview_spread(
+                external_account_id=external_account_id,
+                symbol=symbol,
+                mode=mode,
+                as_of=scanned_at,
+            )
+            previews.append(preview)
+            if preview.eligible:
+                spread = self._execute_preview_candidate(
+                    request=ExecuteBullPutSpreadRequest(
+                        external_account_id=external_account_id,
+                        symbol=symbol,
+                        mode=mode,
+                        as_of=scanned_at,
+                        remark="auto_scan",
+                    ),
+                    preview=preview,
+                )
+                state = self._prepare_runtime_state(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    as_of=scanned_at,
+                )
+                state = self._update_runtime_state(
+                    state,
+                    last_scan_at=scanned_at,
+                    last_scan_result="executed",
+                    last_scan_symbol=symbol,
+                    last_skip_reason=None,
+                    last_action=f"Opened bull put spread for {symbol} during scheduled scan.",
+                    last_action_at=scanned_at,
+                    last_error=None,
+                )
+                return BullPutStrategyScanRunResult(
+                    strategy_state=state,
+                    scanned_at=scanned_at,
+                    executed=spread.status == SpreadStatus.OPEN,
+                    executed_spread=spread,
+                    previews=previews,
+                )
+
+            self._log_scan_skip(preview=preview, automatic=not force)
+
+        last_preview = previews[-1] if previews else None
+        reason = last_preview.reasons[0] if last_preview and last_preview.reasons else "No bull put spread candidate was eligible."
+        state = self._update_runtime_state(
+            state,
+            last_scan_at=scanned_at,
+            last_scan_result="skipped",
+            last_scan_symbol=last_preview.symbol if last_preview is not None else None,
+            last_skip_reason=reason,
+            last_error=None,
+        )
+        return BullPutStrategyScanRunResult(
+            strategy_state=state,
+            scanned_at=scanned_at,
+            executed=False,
+            previews=previews,
+            reason=reason,
+        )
 
     def preview_spread(
         self,
@@ -108,6 +268,11 @@ class BullPutStrategyService:
         scanned_at = as_of or datetime.now(tz=timezone.utc)
         if scanned_at.tzinfo is None:
             scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+        runtime_state = self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=scanned_at,
+        )
         account_snapshot = self._get_latest_account_snapshot(external_account_id)
         account_snapshot = account_snapshot.model_copy(
             update={
@@ -129,6 +294,14 @@ class BullPutStrategyService:
 
         if mode != ExecutionMode.PAPER:
             result.reasons.append("paper_bull_put_v1 currently supports paper mode only.")
+            return result
+
+        runtime_reason = self._runtime_entry_block_reason(
+            state=runtime_state,
+            symbol=symbol,
+        )
+        if runtime_reason is not None:
+            result.reasons.append(runtime_reason)
             return result
 
         underlying_quote = self.longbridge_adapter.get_quote(symbol=symbol, mode=mode)
@@ -276,6 +449,14 @@ class BullPutStrategyService:
             mode=request.mode,
             as_of=request.as_of,
         )
+        return self._execute_preview_candidate(request=request, preview=preview)
+
+    def _execute_preview_candidate(
+        self,
+        *,
+        request: ExecuteBullPutSpreadRequest,
+        preview: BullPutSpreadScanResult,
+    ) -> BullPutSpread:
         if not preview.eligible or preview.candidate is None or preview.risk is None:
             failure_reason = (
                 preview.reasons[0]
@@ -284,9 +465,15 @@ class BullPutStrategyService:
             )
             raise ValueError(failure_reason)
 
+        runtime_state = self._prepare_runtime_state(
+            external_account_id=request.external_account_id,
+            mode=request.mode,
+            as_of=preview.scanned_at,
+        )
         self._assert_entry_capacity(
             external_account_id=request.external_account_id,
             symbol=request.symbol,
+            runtime_state=runtime_state,
         )
 
         now = preview.scanned_at
@@ -336,13 +523,15 @@ class BullPutStrategyService:
         long_entry_order = self._await_terminal_or_fill(long_entry_order)
         if not self._is_filled(long_entry_order):
             self._cancel_if_working(long_entry_order)
-            return self._update_spread(
+            failed = self._update_spread(
                 spread,
                 status=SpreadStatus.ENTRY_FAILED,
                 exit_reason="long_entry_unfilled",
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
+            self._log_spread_entry_failure(failed, reason="long_entry_unfilled")
+            return failed
 
         spread = self._update_spread(
             spread,
@@ -366,7 +555,9 @@ class BullPutStrategyService:
                 )
             )
         except Exception:
-            return self._rollback_long_leg(spread, reason="short_entry_submit_failed")
+            rolled_back = self._rollback_long_leg(spread, reason="short_entry_submit_failed")
+            self._log_spread_entry_failure(rolled_back, reason="short_entry_submit_failed")
+            return rolled_back
 
         spread = self._update_spread(
             spread,
@@ -376,7 +567,9 @@ class BullPutStrategyService:
         short_entry_order = self._await_terminal_or_fill(short_entry_order)
         if not self._is_filled(short_entry_order):
             self._cancel_if_working(short_entry_order)
-            return self._rollback_long_leg(spread, reason="short_entry_unfilled")
+            rolled_back = self._rollback_long_leg(spread, reason="short_entry_unfilled")
+            self._log_spread_entry_failure(rolled_back, reason="short_entry_unfilled")
+            return rolled_back
 
         entry_long_price = self._effective_fill_price(long_entry_order)
         entry_short_price = self._effective_fill_price(short_entry_order)
@@ -384,7 +577,7 @@ class BullPutStrategyService:
         if entry_long_price is not None and entry_short_price is not None:
             entry_net_credit = entry_short_price - entry_long_price
 
-        return self._update_spread(
+        opened = self._update_spread(
             spread,
             status=SpreadStatus.OPEN,
             entry_long_price=entry_long_price,
@@ -394,6 +587,8 @@ class BullPutStrategyService:
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
+        self._record_opened_spread(opened, preview=preview, runtime_state=runtime_state, as_of=now)
+        return opened
 
     def refresh_spread(self, spread_id: str) -> BullPutSpread:
         spread = self._get_spread_or_raise(spread_id)
@@ -464,18 +659,30 @@ class BullPutStrategyService:
         evaluated_at = as_of or datetime.now(timezone.utc)
         if evaluated_at.tzinfo is None:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+        runtime_state = self._prepare_runtime_state(
+            external_account_id=spread.external_account_id,
+            mode=spread.mode,
+            as_of=evaluated_at,
+        )
+        previous_status = spread.status
 
         if spread.status == SpreadStatus.EXIT_PENDING_LONG:
             spread = self._close_long_leg(
                 spread,
                 reason=spread.exit_reason or "long_exit_retry",
             )
-            return BullPutSpreadMonitorResult(
+            result = BullPutSpreadMonitorResult(
                 spread=spread,
                 evaluated_at=evaluated_at,
                 should_close=True,
                 exit_reason=spread.exit_reason,
             )
+            self._record_monitor_close_if_terminal(
+                previous_status=previous_status,
+                result=result,
+                runtime_state=runtime_state,
+            )
+            return result
 
         if spread.status != SpreadStatus.OPEN:
             return BullPutSpreadMonitorResult(
@@ -531,7 +738,7 @@ class BullPutStrategyService:
             short_leg=short_leg,
             long_leg=long_leg,
         )
-        return BullPutSpreadMonitorResult(
+        result = BullPutSpreadMonitorResult(
             spread=spread,
             evaluated_at=evaluated_at,
             should_close=True,
@@ -541,6 +748,12 @@ class BullPutStrategyService:
             estimated_pnl=estimated_pnl,
             days_to_expiration=days_to_expiration,
         )
+        self._record_monitor_close_if_terminal(
+            previous_status=previous_status,
+            result=result,
+            runtime_state=runtime_state,
+        )
+        return result
 
     def _entry_filter_reasons(
         self,
@@ -583,7 +796,316 @@ class BullPutStrategyService:
         close_total = sum((bar.close for bar in bars), start=Decimal("0"))
         return close_total / Decimal(len(bars))
 
-    def _assert_entry_capacity(self, *, external_account_id: str, symbol: str) -> None:
+    def _prepare_runtime_state(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        as_of: datetime | None,
+    ) -> BullPutStrategyRuntimeState:
+        broker_account = self.broker_accounts.get_by_external_account_id(external_account_id)
+        if broker_account is None or broker_account.broker != BrokerName.LONGBRIDGE:
+            raise LookupError(
+                f"No local Longbridge broker account was found for '{external_account_id}'."
+            )
+        reference_time = as_of or datetime.now(timezone.utc)
+        if reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
+        state = self.runtime_states.get_runtime_state(external_account_id=external_account_id)
+        if state is None:
+            state = BullPutStrategyRuntimeState(
+                external_account_id=external_account_id,
+                mode=mode,
+                current_session_date=self._session_date(reference_time),
+            )
+            return self.runtime_states.upsert_runtime_state(state)
+
+        if state.current_session_date != self._session_date(reference_time):
+            state = self._update_runtime_state(
+                state,
+                current_session_date=self._session_date(reference_time),
+                daily_entry_count=0,
+                daily_realized_pnl=Decimal("0"),
+                last_error=None,
+            )
+        return state
+
+    def _update_runtime_state(
+        self,
+        state: BullPutStrategyRuntimeState,
+        **updates,
+    ) -> BullPutStrategyRuntimeState:
+        payload = {"updated_at": datetime.now(timezone.utc), **updates}
+        next_state = state.model_copy(update=payload)
+        return self.runtime_states.upsert_runtime_state(next_state)
+
+    def _runtime_entry_block_reason(
+        self,
+        *,
+        state: BullPutStrategyRuntimeState,
+        symbol: str,
+    ) -> str | None:
+        strategy = self.settings.bull_put_strategy
+        if not state.auto_entry_enabled:
+            return "Automatic bull put entry is disabled for this account."
+        if state.manual_pause:
+            return "Bull put strategy is manually paused for this account."
+        if state.kill_switch_active:
+            return "Bull put kill switch is active for this account."
+        if symbol in state.paused_symbols:
+            return f"Bull put strategy is paused for '{symbol}'."
+        if state.daily_entry_count >= strategy.max_new_spreads_per_day:
+            return "Bull put daily entry cap has already been reached for this account."
+        if state.daily_realized_pnl <= (strategy.daily_realized_loss_limit * Decimal("-1")):
+            return "Bull put daily realized loss limit has already been reached for this account."
+        return None
+
+    def _scan_not_due_reason(
+        self,
+        *,
+        state: BullPutStrategyRuntimeState,
+        as_of: datetime,
+    ) -> str | None:
+        strategy = self.settings.bull_put_strategy
+        if not strategy.enabled:
+            return "Bull put spread strategy is disabled by configuration."
+        if not strategy.auto_scan_enabled:
+            return "Automatic bull put scan is disabled by configuration."
+        local_time = as_of.astimezone(self.new_york)
+        if local_time.weekday() >= 5:
+            return "Automatic bull put scans only run on weekdays."
+
+        window_minutes = (local_time.hour * 60) + local_time.minute
+        start_minutes = (strategy.scan_window_start_hour_et * 60) + strategy.scan_window_start_minute_et
+        end_minutes = (strategy.scan_window_end_hour_et * 60) + strategy.scan_window_end_minute_et
+        if window_minutes < start_minutes or window_minutes > end_minutes:
+            return "Automatic bull put scan is outside the configured ET entry window."
+
+        if state.last_scan_at is None:
+            return None
+        if state.last_scan_at.astimezone(self.new_york).date() == local_time.date():
+            return "Automatic bull put scan already ran for this account today."
+        return None
+
+    def _record_opened_spread(
+        self,
+        spread: BullPutSpread,
+        *,
+        preview: BullPutSpreadScanResult,
+        runtime_state: BullPutStrategyRuntimeState,
+        as_of: datetime,
+    ) -> None:
+        runtime_state = self._update_runtime_state(
+            runtime_state,
+            daily_entry_count=runtime_state.daily_entry_count + 1,
+            last_action=f"Opened bull put spread for {spread.underlying_symbol}.",
+            last_action_at=as_of,
+            last_error=None,
+        )
+        self._log_spread_entry_open(spread=spread, preview=preview)
+        self._update_runtime_state(
+            runtime_state,
+            last_scan_at=as_of,
+            last_scan_result="executed",
+            last_scan_symbol=spread.underlying_symbol,
+            last_skip_reason=None,
+        )
+
+    def _record_monitor_close_if_terminal(
+        self,
+        *,
+        previous_status: SpreadStatus,
+        result: BullPutSpreadMonitorResult,
+        runtime_state: BullPutStrategyRuntimeState,
+    ) -> None:
+        spread = result.spread
+        if spread.status != SpreadStatus.CLOSED or previous_status == SpreadStatus.CLOSED:
+            return
+        realized_pnl = result.estimated_pnl
+        if realized_pnl is None:
+            realized_pnl = self._realized_pnl_from_orders(spread)
+        runtime_state = self._update_runtime_state(
+            runtime_state,
+            daily_realized_pnl=runtime_state.daily_realized_pnl + (realized_pnl or Decimal("0")),
+            last_action=f"Closed bull put spread for {spread.underlying_symbol} via {spread.exit_reason or 'manual_close'}.",
+            last_action_at=result.evaluated_at,
+            last_error=None,
+        )
+        self._log_spread_close(spread=spread, realized_pnl=realized_pnl, evaluated_at=result.evaluated_at)
+        self._update_runtime_state(
+            runtime_state,
+            last_scan_result=runtime_state.last_scan_result,
+            last_skip_reason=None,
+        )
+
+    def _log_spread_entry_open(
+        self,
+        *,
+        spread: BullPutSpread,
+        preview: BullPutSpreadScanResult,
+    ) -> None:
+        if self._spread_journal_flag(spread, "entry_logged_at"):
+            return
+        candidate = preview.candidate
+        risk = preview.risk
+        if candidate is None or risk is None:
+            return
+        self._safe_create_journal_entry(
+            CreateJournalEntryRequest(
+                external_account_id=spread.external_account_id,
+                symbol=spread.underlying_symbol,
+                entry_type=JournalEntryType.PLAN,
+                title=f"Bull put spread opened for {spread.underlying_symbol}",
+                notes=(
+                    f"Spread {spread.id} opened {spread.contracts}x "
+                    f"{candidate.long_put.strike}/{candidate.short_put.strike} puts expiring {spread.expiration_date}. "
+                    f"Entry credit {self._format_decimal(spread.entry_net_credit)}. "
+                    f"Max profit {self._format_decimal(risk.max_profit)}, max loss {self._format_decimal(risk.max_loss)}."
+                ),
+                tags=["strategy", "bull-put", "entry", "paper"],
+            ),
+            context=f"bull put entry open {spread.id}",
+        )
+        self._mark_spread_journal_flag(spread, "entry_logged_at")
+
+    def _log_spread_entry_failure(self, spread: BullPutSpread, *, reason: str) -> None:
+        if self._spread_journal_flag(spread, "entry_failure_logged_at"):
+            return
+        self._safe_create_journal_entry(
+            CreateJournalEntryRequest(
+                external_account_id=spread.external_account_id,
+                symbol=spread.underlying_symbol,
+                entry_type=JournalEntryType.NOTE,
+                title=f"Bull put entry failed for {spread.underlying_symbol}",
+                notes=f"Spread {spread.id} did not open cleanly. Final status {spread.status.value}. Reason: {reason}.",
+                tags=["strategy", "bull-put", "entry-failed", "paper"],
+            ),
+            context=f"bull put entry failure {spread.id}",
+        )
+        self._mark_spread_journal_flag(spread, "entry_failure_logged_at")
+
+    def _log_spread_close(
+        self,
+        *,
+        spread: BullPutSpread,
+        realized_pnl: Decimal | None,
+        evaluated_at: datetime,
+    ) -> None:
+        if self._spread_journal_flag(spread, "close_logged_at"):
+            return
+        self._safe_create_journal_entry(
+            CreateJournalEntryRequest(
+                external_account_id=spread.external_account_id,
+                symbol=spread.underlying_symbol,
+                entry_type=JournalEntryType.REVIEW,
+                title=f"Bull put spread closed for {spread.underlying_symbol}",
+                notes=(
+                    f"Spread {spread.id} closed on {evaluated_at.date()} via {spread.exit_reason or 'manual_close'}. "
+                    f"Estimated realized PnL {self._format_decimal(realized_pnl)}."
+                ),
+                tags=["strategy", "bull-put", "close", spread.exit_reason or "manual-close", "paper"],
+            ),
+            context=f"bull put close {spread.id}",
+        )
+        self._mark_spread_journal_flag(spread, "close_logged_at")
+
+    def _log_scan_skip(self, *, preview: BullPutSpreadScanResult, automatic: bool) -> None:
+        reason = preview.reasons[0] if preview.reasons else "No bull put spread candidate was eligible."
+        self._safe_create_journal_entry(
+            CreateJournalEntryRequest(
+                external_account_id=preview.external_account_id,
+                symbol=preview.symbol,
+                entry_type=JournalEntryType.NOTE,
+                title=f"Bull put scan skipped for {preview.symbol}",
+                notes=(
+                    f"{'Automatic' if automatic else 'Manual'} bull put scan at {preview.scanned_at.isoformat()} skipped "
+                    f"{preview.symbol}. Reason: {reason}."
+                ),
+                tags=["strategy", "bull-put", "scan", "skip", "paper"],
+            ),
+            context=f"bull put scan skip {preview.symbol}",
+        )
+
+    @staticmethod
+    def _format_decimal(value: Decimal | None) -> str:
+        if value is None:
+            return "--"
+        return f"{value:.2f}"
+
+    def _mark_spread_journal_flag(self, spread: BullPutSpread, key: str) -> BullPutSpread:
+        raw_payload = dict(spread.raw_payload or {})
+        journal_meta = dict(raw_payload.get("journal") or {})
+        journal_meta[key] = datetime.now(timezone.utc).isoformat()
+        raw_payload["journal"] = journal_meta
+        return self._update_spread(
+            spread,
+            raw_payload=raw_payload,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _spread_journal_flag(spread: BullPutSpread, key: str) -> bool:
+        raw_payload = spread.raw_payload or {}
+        journal_meta = raw_payload.get("journal") or {}
+        return key in journal_meta
+
+    def _realized_pnl_from_orders(self, spread: BullPutSpread) -> Decimal | None:
+        if spread.entry_net_credit is None:
+            return None
+        short_exit_order = self._refresh_if_present(spread.short_exit_order_id)
+        long_exit_order = self._refresh_if_present(spread.long_exit_order_id)
+        short_exit_price = self._effective_fill_price(short_exit_order)
+        long_exit_price = self._effective_fill_price(long_exit_order)
+        if short_exit_price is None or long_exit_price is None:
+            return None
+        exit_debit = short_exit_price - long_exit_price
+        return (spread.entry_net_credit - exit_debit) * Decimal(spread.contracts) * Decimal("100")
+
+    def _normalize_paused_symbols(self, symbols: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        configured = set(self.settings.bull_put_strategy.symbols)
+        for symbol in symbols:
+            value = symbol.strip().upper()
+            if not value or value in seen or value not in configured:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    @staticmethod
+    def _describe_runtime_update(updates: dict) -> str:
+        parts: list[str] = []
+        for key, value in updates.items():
+            if key == "paused_symbols":
+                rendered = ", ".join(value) if value else "none"
+                parts.append(f"paused symbols={rendered}")
+            else:
+                parts.append(f"{key}={value}")
+        return "Updated bull put runtime controls: " + "; ".join(parts)
+
+    def _session_date(self, as_of: datetime) -> date:
+        return as_of.astimezone(self.new_york).date()
+
+    def _safe_create_journal_entry(self, request: CreateJournalEntryRequest, *, context: str) -> None:
+        try:
+            self.journal_service.create_entry(request)
+        except Exception:
+            logger.exception("Bull put strategy journal write failed during %s", context)
+
+    def _assert_entry_capacity(
+        self,
+        *,
+        external_account_id: str,
+        symbol: str,
+        runtime_state: BullPutStrategyRuntimeState,
+    ) -> None:
+        runtime_reason = self._runtime_entry_block_reason(
+            state=runtime_state,
+            symbol=symbol,
+        )
+        if runtime_reason is not None:
+            raise ValueError(runtime_reason)
         strategy = self.settings.bull_put_strategy
         active_spreads = [
             spread

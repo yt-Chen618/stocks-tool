@@ -12,6 +12,7 @@ from stocks_tool.domain.models import (
     AddWatchlistItemRequest,
     BrokerAccount,
     BullPutSpread,
+    BullPutStrategyRuntimeState,
     Execution,
     CreateWatchlistRequest,
     CreateBrokerAccountRequest,
@@ -187,4 +188,22 @@ class BullPutSpreadRepository(ABC):
 
     @abstractmethod
     def update_spread(self, spread: BullPutSpread) -> BullPutSpread:
+        raise NotImplementedError
+
+
+class BullPutStrategyRuntimeRepository(ABC):
+    @abstractmethod
+    def get_runtime_state(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str = "paper_bull_put_v1",
+    ) -> BullPutStrategyRuntimeState | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_runtime_state(
+        self,
+        state: BullPutStrategyRuntimeState,
+    ) -> BullPutStrategyRuntimeState:
         raise NotImplementedError

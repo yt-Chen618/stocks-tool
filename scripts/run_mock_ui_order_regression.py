@@ -163,6 +163,8 @@ def main() -> None:
             dashboard.raise_for_status()
             assert "Holdings Overview" in dashboard.text
             assert "Current Holdings" in dashboard.text
+            assert "Bull Put Strategy" in dashboard.text
+            assert "Latest Skip Reason" in dashboard.text
             assert "Bull Put Monitor" in dashboard.text
             assert "Bull Put Spreads" in dashboard.text
             assert "Order Ticket" in dashboard.text
@@ -180,6 +182,11 @@ def main() -> None:
                 "selected-order-execution",
                 "journal-entry-form",
                 "selected-order-journal",
+                "strategy-runtime-strip",
+                "strategy-controls-form",
+                "runStrategyScan()",
+                "saveStrategyControls()",
+                "renderStrategyRuntime()",
                 "spread-summary-strip",
                 "spreads-body",
                 "submitOrder()",
@@ -204,6 +211,11 @@ def main() -> None:
             initial_spreads = require_ok(client.get("/strategies/bull-put/spreads", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_spreads) == 1
             assert initial_spreads[0]["status"] == "open"
+            runtime_state = require_ok(
+                client.get("/strategies/bull-put/runtime", params={"external_account_id": "LBPT10087357"})
+            )
+            assert runtime_state["auto_entry_enabled"] is True
+            assert runtime_state["kill_switch_active"] is False
             initial_executions = require_ok(client.get("/executions", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_executions) == 1
             assert initial_executions[0]["order_id"] == "mock-order-0002"
@@ -228,6 +240,7 @@ def main() -> None:
                             "app_js_markers": True,
                             "account_seed": True,
                             "snapshot_seed": True,
+                            "runtime_seed": True,
                             "spread_seed": True,
                             "execution_seed": True,
                             "journal_seed": True,

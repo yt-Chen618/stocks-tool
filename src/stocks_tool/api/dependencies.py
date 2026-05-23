@@ -20,6 +20,7 @@ from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
     BullPutSpreadRepository,
+    BullPutStrategyRuntimeRepository,
     ExecutionRepository,
     JournalRepository,
     OrderRepository,
@@ -28,6 +29,9 @@ from stocks_tool.ports.repository import (
 )
 from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import (
     SQLAlchemyBullPutSpreadRepository,
+)
+from stocks_tool.repositories.sqlalchemy_bull_put_strategy_runtime_repository import (
+    SQLAlchemyBullPutStrategyRuntimeRepository,
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
@@ -121,6 +125,12 @@ def get_bull_put_spread_repository(
     return SQLAlchemyBullPutSpreadRepository(session)
 
 
+def get_bull_put_strategy_runtime_repository(
+    session: Session = Depends(get_db_session),
+) -> BullPutStrategyRuntimeRepository:
+    return SQLAlchemyBullPutStrategyRuntimeRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -157,26 +167,6 @@ def get_order_service(
     )
 
 
-def get_bull_put_strategy_service(
-    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
-    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
-    spreads: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
-    order_service: OrderService = Depends(get_order_service),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
-    risk_service: RiskService = Depends(get_risk_service),
-) -> BullPutStrategyService:
-    settings: Settings = get_settings()
-    return BullPutStrategyService(
-        settings=settings,
-        broker_accounts=broker_accounts,
-        account_snapshots=account_snapshots,
-        spreads=spreads,
-        order_service=order_service,
-        longbridge_adapter=adapter,
-        risk_service=risk_service,
-    )
-
-
 def get_journal_service(
     journals: JournalRepository = Depends(get_journal_repository),
     orders: OrderRepository = Depends(get_order_repository),
@@ -188,4 +178,28 @@ def get_journal_service(
         orders=orders,
         trade_plans=trade_plans,
         executions=executions,
+    )
+
+
+def get_bull_put_strategy_service(
+    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
+    spreads: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
+    runtime_states: BullPutStrategyRuntimeRepository = Depends(get_bull_put_strategy_runtime_repository),
+    order_service: OrderService = Depends(get_order_service),
+    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    risk_service: RiskService = Depends(get_risk_service),
+    journal_service: JournalService = Depends(get_journal_service),
+) -> BullPutStrategyService:
+    settings: Settings = get_settings()
+    return BullPutStrategyService(
+        settings=settings,
+        broker_accounts=broker_accounts,
+        account_snapshots=account_snapshots,
+        spreads=spreads,
+        runtime_states=runtime_states,
+        order_service=order_service,
+        longbridge_adapter=adapter,
+        risk_service=risk_service,
+        journal_service=journal_service,
     )

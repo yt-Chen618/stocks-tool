@@ -9,13 +9,20 @@ from stocks_tool.domain.enums import BrokerName, ExecutionMode
 
 class BullPutSpreadStrategySettings(BaseModel):
     enabled: bool = True
+    auto_scan_enabled: bool = True
     auto_monitor_enabled: bool = True
+    scan_window_start_hour_et: int = Field(default=10, ge=0, le=23)
+    scan_window_start_minute_et: int = Field(default=45, ge=0, le=59)
+    scan_window_end_hour_et: int = Field(default=11, ge=0, le=23)
+    scan_window_end_minute_et: int = Field(default=15, ge=0, le=59)
     monitor_interval_seconds: int = Field(default=300, ge=1)
     symbols: tuple[str, ...] = ("QQQ.US", "SMH.US", "SOXL.US", "EWY.US")
     correlated_symbols: tuple[str, ...] = ("QQQ.US", "SMH.US", "SOXL.US")
     account_max_open_spreads: int = Field(default=2, ge=1)
     per_symbol_max_open_spreads: int = Field(default=1, ge=1)
     correlated_group_max_open_spreads: int = Field(default=1, ge=1)
+    max_new_spreads_per_day: int = Field(default=1, ge=1)
+    daily_realized_loss_limit: Decimal = Field(default=Decimal("300"), gt=0)
     min_dte: int = Field(default=28, ge=1)
     max_dte: int = Field(default=35, ge=1)
     short_delta_target: Decimal = Field(default=Decimal("0.22"), gt=0)
@@ -37,6 +44,11 @@ class BullPutSpreadStrategySettings(BaseModel):
     def validate_thresholds(self) -> "BullPutSpreadStrategySettings":
         if self.min_dte > self.max_dte:
             raise ValueError("Bull put spread min_dte must be less than or equal to max_dte.")
+        if (self.scan_window_end_hour_et, self.scan_window_end_minute_et) < (
+            self.scan_window_start_hour_et,
+            self.scan_window_start_minute_et,
+        ):
+            raise ValueError("Bull put spread scan window end must be after the scan window start.")
         if self.short_delta_min > self.short_delta_target:
             raise ValueError("Bull put spread short_delta_min cannot exceed short_delta_target.")
         if self.short_delta_target > self.short_delta_max:

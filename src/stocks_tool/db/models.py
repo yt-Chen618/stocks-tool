@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -324,6 +325,54 @@ class BullPutSpreadRecord(TimestampMixin, Base):
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class BullPutStrategyRuntimeRecord(TimestampMixin, Base):
+    __tablename__ = "bull_put_strategy_runtime"
+    __table_args__ = (
+        UniqueConstraint("external_account_id", "strategy_id", name="uq_bull_put_strategy_runtime_account_strategy"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+        default="paper_bull_put_v1",
+        server_default="paper_bull_put_v1",
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    auto_entry_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    manual_pause: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    kill_switch_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    paused_symbols: Mapped[list[str] | None] = mapped_column(JSONB)
+    current_session_date: Mapped[date | None] = mapped_column(Date, index=True)
+    daily_entry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    daily_realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+    )
+    last_scan_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_scan_result: Mapped[str | None] = mapped_column(String(32))
+    last_scan_symbol: Mapped[str | None] = mapped_column(String(32))
+    last_skip_reason: Mapped[str | None] = mapped_column(Text)
+    last_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_action: Mapped[str | None] = mapped_column(Text)
+    last_error: Mapped[str | None] = mapped_column(Text)
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 

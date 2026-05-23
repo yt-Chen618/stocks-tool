@@ -62,13 +62,18 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
   - `GET /strategies/bull-put/spreads`
   - `GET /strategies/bull-put/spreads/{spread_id}`
+  - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
   - `POST /strategies/bull-put/execute`
   - `POST /strategies/bull-put/spreads/{spread_id}/refresh`
   - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
+  - `POST /strategies/bull-put/runtime/{external_account_id}`
+  - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - Current scope:
   - paper-only
   - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
   - entry caps: at most `2` active spreads per account, `1` active spread per symbol, and `1` active spread across the correlated `QQQ.US / SMH.US / SOXL.US` group
+  - runtime controls: per-account auto-entry toggle, manual pause, kill switch, and paused-symbol list
+  - per-day throttles: at most `1` new spread per day plus a runtime-tracked realized loss stop before new entries are blocked
   - target expiry window: `28-35 DTE`
   - same-expiry bull put spread only
   - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
@@ -76,19 +81,23 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - trend filter uses price vs `20 DMA / 50 DMA`, prior-close drift, and gap-down guard
   - risk preview computes spread credit, max profit, max loss, break-even, and account risk percentage
   - execution buys the long put first, then sells the short put
+  - automatic entry scan can now run once per trading day during the configured `10:45-11:15 ET` window
   - exit monitor checks `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
   - close sequencing buys back the short put first, then sells the long put
   - if the long close does not fill, the spread remains `exit_pending_long` for later cleanup
   - entry failures are persisted locally as `entry_failed`, `rolled_back`, or `rollback_failed`
   - spread lifecycle, linked local order ids, and entry metrics are stored in `bull_put_spreads`
+  - runtime state is stored in `bull_put_strategy_runtime`
+  - strategy-driven journal entries are now written automatically for spread opens, spread closes, and scan skips
 - Current limitations:
-  - no browser-level regression yet for the spread workflow
+  - there is still no real broker-backed paper smoke that sends option orders through Longbridge
 
 ### Automatic reconciliation
 
 - A background reconciliation scheduler now starts with the FastAPI app.
 - Active Longbridge paper accounts with `auto_reconcile_enabled=true` are polled automatically.
 - The same background loop now also monitors open or exit-pending bull put spreads.
+- The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - Default intervals:
   - scheduler poll loop: `15s`
   - account snapshot sync: `300s`
@@ -212,6 +221,7 @@ Current dashboard capabilities:
 - View automatic reconciliation state for the selected account
 - View account metrics
 - View holdings overview and current holdings cards
+- View bull put runtime status, controls, last skip reason, and recent strategy notes
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View Longbridge configuration status
 - Load quick quote
@@ -248,11 +258,18 @@ Frontend files:
 - Added Longbridge adapter support for option expiry dates, option chains, option market snapshots, option top-of-book lookup, and recent daily bars.
 - Added a bull put spread service with preview, `POST /strategies/bull-put/execute`, `GET /strategies/bull-put/spreads`, `POST /strategies/bull-put/spreads/{spread_id}/refresh`, and `POST /strategies/bull-put/spreads/{spread_id}/monitor`.
 - Added spread persistence through the new `bull_put_spreads` table and Alembic migration `20260522_0005_bull_put_spreads`.
+- Added bull put runtime-state persistence through `bull_put_strategy_runtime` and Alembic migration `20260523_0006_bull_put_strategy_runtime`.
 - Added two-leg paper entry coordination with long-leg-first execution and long-leg rollback when the short leg does not fill.
 - Added spread exit monitoring with take-profit / stop-loss / short-strike breach / DTE rules plus short-first close sequencing.
 - Wired the bull put exit monitor into the background reconciliation coordinator so open or exit-pending spreads are checked automatically.
 - Added account-level, per-symbol, and correlated-group entry caps for bull put spreads.
+- Added automatic daily bull put entry scans, per-day entry caps, daily realized-loss stops, and runtime controls for manual pause / kill switch / paused symbols.
+- Added automatic strategy journaling for bull put opens, closes, and scan skips.
+- Added strategy runtime and controls routes under `/strategies/bull-put/runtime`.
 - Added dashboard spread-monitor visibility with bull put summary cards, latest exit action, and per-spread refresh / monitor actions.
+- Added dashboard bull put runtime cards, control form, last skip reason, and recent strategy-note feed.
+- Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
+- Added a headless browser-driven `mock-ui` regression that exercises spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
@@ -261,26 +278,39 @@ Frontend files:
 - Added `tests/test_journal_service.py` for order / execution linkage validation.
 - Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, and exit-monitor flows.
 - Added `tests/test_strategies_api.py` for strategy preview, execute, and monitor route coverage.
-- Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket and holdings sections.
+- Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, and bull put strategy sections.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local test run after the bull put dashboard additions:
+- Latest local verification run after the bull put runtime-control additions:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `34 passed`
+- Result: `39 passed`
+- Latest browser-regression run:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py mock-ui
+```
+
+- Result: `passed` and now includes bull put strategy controls plus skip-reason rendering
+- Latest bull put service-regression run:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
+```
+
+- Result: `passed`
 
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
-- There is no automated browser regression yet for the cancel-confirmation, bull put monitor, or journal-submit flow.
-- There are no per-day spread-entry caps yet.
+- There is no real broker-backed bull put paper smoke yet through Longbridge.
 - The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
 
 ## Recommended next steps
 
-1. Add automated browser regression for submit -> replace -> cancel, bull put monitor, filled-order execution summary, and journal submit flow.
-2. Add per-day spread-entry caps.
+1. Add a real broker-backed paper smoke for the bull put spread workflow.
+2. Add runtime controls and strategy activity views to any future authenticated user/session layer.

@@ -201,6 +201,28 @@ class MockDashboardState:
                 "updated_at": "2026-05-21T02:14:54Z",
             }
         ]
+        self.runtime = {
+            "id": "mock-runtime-0001",
+            "strategy_id": "paper_bull_put_v1",
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "auto_entry_enabled": True,
+            "manual_pause": False,
+            "kill_switch_active": False,
+            "paused_symbols": [],
+            "current_session_date": "2026-05-23",
+            "daily_entry_count": 0,
+            "daily_realized_pnl": "0.0000",
+            "last_scan_at": None,
+            "last_scan_result": None,
+            "last_scan_symbol": None,
+            "last_skip_reason": None,
+            "last_action_at": "2026-05-21T02:14:54Z",
+            "last_action": "Waiting for the first bull put scan.",
+            "last_error": None,
+            "created_at": "2026-05-21T02:14:54Z",
+            "updated_at": "2026-05-21T02:14:54Z",
+        }
 
     def _build_order(
         self,
@@ -395,6 +417,142 @@ class MockDashboardState:
             rows = [row for row in rows if row["status"] == status]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
 
+    def get_runtime_state(self, external_account_id: str) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        return deepcopy(self.runtime)
+
+    def update_runtime_state(self, external_account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        now = iso_now()
+        if "auto_entry_enabled" in payload:
+            self.runtime["auto_entry_enabled"] = bool(payload["auto_entry_enabled"])
+        if "manual_pause" in payload:
+            self.runtime["manual_pause"] = bool(payload["manual_pause"])
+        if "kill_switch_active" in payload:
+            self.runtime["kill_switch_active"] = bool(payload["kill_switch_active"])
+        if "paused_symbols" in payload:
+            self.runtime["paused_symbols"] = [
+                str(symbol).strip().upper()
+                for symbol in payload["paused_symbols"]
+                if str(symbol).strip()
+            ]
+        self.runtime["last_action"] = "Updated bull put runtime controls."
+        self.runtime["last_action_at"] = now
+        self.runtime["updated_at"] = now
+        return deepcopy(self.runtime)
+
+    def run_entry_scan(self, external_account_id: str, *, force: bool) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        now = iso_now()
+        self.runtime["last_scan_at"] = now
+
+        if self.runtime["kill_switch_active"]:
+            self.runtime["last_scan_result"] = "skipped"
+            self.runtime["last_skip_reason"] = "Bull put kill switch is active for this account."
+            self.runtime["updated_at"] = now
+            return {
+                "strategy_state": deepcopy(self.runtime),
+                "scanned_at": now,
+                "executed": False,
+                "executed_spread": None,
+                "previews": [],
+                "reason": self.runtime["last_skip_reason"],
+            }
+
+        if self.runtime["manual_pause"]:
+            self.runtime["last_scan_result"] = "skipped"
+            self.runtime["last_skip_reason"] = "Bull put strategy is manually paused for this account."
+            self.runtime["updated_at"] = now
+            return {
+                "strategy_state": deepcopy(self.runtime),
+                "scanned_at": now,
+                "executed": False,
+                "executed_spread": None,
+                "previews": [],
+                "reason": self.runtime["last_skip_reason"],
+            }
+
+        active_spreads = [spread for spread in self.spreads if spread["status"] in {"open", "exit_pending_short", "exit_pending_long"}]
+        if active_spreads:
+            self.runtime["last_scan_result"] = "skipped"
+            self.runtime["last_skip_reason"] = "Bull put daily entry cap has already been reached for this account."
+            self.runtime["updated_at"] = now
+            return {
+                "strategy_state": deepcopy(self.runtime),
+                "scanned_at": now,
+                "executed": False,
+                "executed_spread": None,
+                "previews": [],
+                "reason": self.runtime["last_skip_reason"],
+            }
+
+        self._spread_counter += 1
+        spread_id = f"mock-spread-{self._spread_counter}"
+        spread = {
+            "id": spread_id,
+            "strategy_id": "paper_bull_put_v1",
+            "broker": "longbridge",
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "underlying_symbol": "QQQ.US",
+            "expiration_date": "2026-06-19",
+            "contracts": 1,
+            "width": "3.0000",
+            "long_symbol": "QQQ260619P467000.US",
+            "long_strike": "467.0000",
+            "short_symbol": "QQQ260619P470000.US",
+            "short_strike": "470.0000",
+            "status": "open",
+            "long_entry_order_id": None,
+            "short_entry_order_id": None,
+            "long_exit_order_id": None,
+            "short_exit_order_id": None,
+            "entry_long_price": "1.1000",
+            "entry_short_price": "2.4000",
+            "entry_net_credit": "1.3000",
+            "max_profit": "130.0000",
+            "max_loss": "170.0000",
+            "break_even": "468.7000",
+            "account_risk_pct": "0.003400",
+            "exit_reason": None,
+            "raw_payload": {"source": "mock-auto-scan", "force": force},
+            "entry_started_at": now,
+            "opened_at": now,
+            "closed_at": None,
+            "last_synced_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        self.spreads.insert(0, spread)
+        self.runtime["daily_entry_count"] = int(self.runtime["daily_entry_count"]) + 1
+        self.runtime["last_scan_result"] = "executed"
+        self.runtime["last_scan_symbol"] = "QQQ.US"
+        self.runtime["last_skip_reason"] = None
+        self.runtime["last_action"] = "Opened bull put spread for QQQ.US."
+        self.runtime["last_action_at"] = now
+        self.runtime["updated_at"] = now
+        self.create_journal(
+            {
+                "external_account_id": self.account_id,
+                "symbol": "QQQ.US",
+                "entry_type": "plan",
+                "title": "Bull put spread opened for QQQ.US",
+                "notes": "Mock runtime scan opened a bull put spread for dashboard regression.",
+                "tags": ["strategy", "bull-put", "entry", "paper"],
+            }
+        )
+        return {
+            "strategy_state": deepcopy(self.runtime),
+            "scanned_at": now,
+            "executed": True,
+            "executed_spread": deepcopy(spread),
+            "previews": [],
+            "reason": None,
+        }
+
     def get_spread(self, spread_id: str) -> dict[str, Any]:
         for spread in self.spreads:
             if spread["id"] == spread_id:
@@ -419,6 +577,20 @@ class MockDashboardState:
             spread["short_exit_order_id"] = f"mock-spread-short-exit-{self._spread_counter}"
             spread["long_exit_order_id"] = f"mock-spread-long-exit-{self._spread_counter}"
             spread["closed_at"] = now
+            self.runtime["daily_realized_pnl"] = "80.0000"
+            self.runtime["last_action"] = f"Closed bull put spread for {spread['underlying_symbol']} via take profit."
+            self.runtime["last_action_at"] = now
+            self.runtime["updated_at"] = now
+            self.create_journal(
+                {
+                    "external_account_id": self.account_id,
+                    "symbol": spread["underlying_symbol"],
+                    "entry_type": "review",
+                    "title": f"Bull put spread closed for {spread['underlying_symbol']}",
+                    "notes": "Mock spread monitor closed the spread via take profit.",
+                    "tags": ["strategy", "bull-put", "close", "take-profit", "paper"],
+                }
+            )
         spread["last_synced_at"] = now
         spread["updated_at"] = now
         return {
@@ -475,6 +647,18 @@ def create_app() -> FastAPI:
         status: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
         return state.list_spreads(external_account_id=external_account_id, status=status)
+
+    @app.get("/strategies/bull-put/runtime")
+    def bull_put_runtime(
+        external_account_id: str = Query(...),
+    ) -> dict[str, Any]:
+        try:
+            return state.get_runtime_state(external_account_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Runtime state for '{external_account_id}' was not found.",
+            ) from error
 
     @app.get("/executions")
     def executions(
@@ -553,6 +737,32 @@ def create_app() -> FastAPI:
             return state.monitor_spread(spread_id)
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
+
+    @app.post("/strategies/bull-put/runtime/{external_account_id}")
+    def update_bull_put_runtime(
+        external_account_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            return state.update_runtime_state(external_account_id, payload)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Runtime state for '{external_account_id}' was not found.",
+            ) from error
+
+    @app.post("/strategies/bull-put/runtime/{external_account_id}/scan")
+    def scan_bull_put_runtime(
+        external_account_id: str,
+        force: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        try:
+            return state.run_entry_scan(external_account_id, force=force)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Runtime state for '{external_account_id}' was not found.",
+            ) from error
 
     @app.post("/journals", status_code=status.HTTP_201_CREATED)
     def create_journal(payload: dict[str, Any]) -> dict[str, Any]:

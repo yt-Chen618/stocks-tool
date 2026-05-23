@@ -10,6 +10,8 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyRuntimeState,
+    BullPutStrategyScanRunResult,
 )
 from stocks_tool.main import app
 
@@ -155,6 +157,95 @@ def test_execute_bull_put_strategy_maps_value_error_to_400() -> None:
         response.json()["detail"]
         == "An active bull put spread already exists for 'QQQ.US' in account 'LBPT10087357'."
     )
+
+
+def test_get_bull_put_runtime_state_returns_runtime_state() -> None:
+    service = Mock()
+    service.get_runtime_state.return_value = BullPutStrategyRuntimeState(
+        id="runtime-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        auto_entry_enabled=True,
+        manual_pause=False,
+        kill_switch_active=False,
+        paused_symbols=["SMH.US"],
+        current_session_date=datetime(2026, 5, 23, tzinfo=timezone.utc).date(),
+        daily_entry_count=1,
+        daily_realized_pnl=Decimal("80.00"),
+        last_scan_at=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+        last_scan_result="executed",
+        last_scan_symbol="QQQ.US",
+        last_action="Opened bull put spread for QQQ.US.",
+        last_action_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 14, 40, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.get(
+            "/strategies/bull-put/runtime",
+            params={"external_account_id": "LBPT10087357", "mode": "paper"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["daily_entry_count"] == 1
+    assert body["paused_symbols"] == ["SMH.US"]
+
+
+def test_run_bull_put_runtime_scan_returns_scan_result() -> None:
+    service = Mock()
+    runtime_state = BullPutStrategyRuntimeState(
+        id="runtime-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        daily_entry_count=1,
+        last_scan_result="executed",
+        last_scan_symbol="QQQ.US",
+        last_scan_at=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 23, 14, 40, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+    )
+    spread = BullPutSpread(
+        id="spread-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        underlying_symbol="QQQ.US",
+        expiration_date=datetime(2026, 6, 19, tzinfo=timezone.utc).date(),
+        contracts=1,
+        width=Decimal("3"),
+        long_symbol="QQQ260619P467000.US",
+        long_strike=Decimal("467"),
+        short_symbol="QQQ260619P470000.US",
+        short_strike=Decimal("470"),
+        status=SpreadStatus.OPEN,
+        created_at=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+    )
+    service.run_entry_scan.return_value = BullPutStrategyScanRunResult(
+        strategy_state=runtime_state,
+        scanned_at=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+        executed=True,
+        executed_spread=spread,
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/runtime/LBPT10087357/scan",
+            params={"mode": "paper", "force": "true"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["executed"] is True
+    assert body["executed_spread"]["id"] == "spread-1"
 
 
 def test_monitor_bull_put_strategy_returns_monitor_result() -> None:

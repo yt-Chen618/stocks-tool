@@ -20,6 +20,7 @@ This repository currently contains:
 - domain models for plans, accounts, risk checks, and orders
 - a Longbridge adapter boundary with quote and account-sync entry points
 - a paper bull put spread workflow with preview, two-leg entry, exit monitoring, rollback, and spread persistence
+- a bull put runtime-state layer with scheduled entry scans, kill-switch style controls, and strategy journaling
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
 - an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
@@ -92,9 +93,12 @@ Then open:
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/bull-put/spreads`
 - `GET /strategies/bull-put/spreads/{spread_id}`
+- `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
 - `POST /strategies/bull-put/execute`
 - `POST /strategies/bull-put/spreads/{spread_id}/refresh`
 - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
+- `POST /strategies/bull-put/runtime/{external_account_id}`
+- `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `GET /journals`
 - `GET /executions`
 - `GET /orders`
@@ -121,6 +125,7 @@ The bull put spread workflow is currently paper-only:
 
 - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
 - entry caps: at most `2` active spreads per account, `1` active spread per symbol, and `1` active spread across the correlated `QQQ.US / SMH.US / SOXL.US` group
+- daily caps and controls: at most `1` new spread per day, a runtime-tracked realized loss stop, per-account manual pause, kill switch, and paused-symbol list
 - target expiration window: `28-35 DTE`
 - short-leg filter: `abs(delta)` in `0.18-0.28`, `open_interest >= 200`
 - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
@@ -129,23 +134,27 @@ The bull put spread workflow is currently paper-only:
 - entry workflow: preview the candidate, buy the protective long put first, then sell the short put
 - exit monitor: manual or scripted `monitor` calls evaluate `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
 - close workflow: buy back the short put first, then flatten the long put; if the long-leg close does not fill, the spread remains `exit_pending_long`
-- scheduler: the existing background reconciliation loop now also checks open or exit-pending bull put spreads on the configured monitor interval
+- scheduler: the existing background reconciliation loop now checks the bull put entry window once per loop and also monitors open or exit-pending bull put spreads on the configured monitor interval
 - rollback behavior: if the short leg fails to fill, the service attempts to flatten the long leg and marks the spread `rolled_back` or `rollback_failed`
 - persistence: spread lifecycle, order ids, entry credit, and risk summary are stored in `bull_put_spreads`
-- dashboard: the `/` workbench now shows bull put spread summary cards, latest exit action, and per-spread `refresh` / `monitor` controls
+- runtime state: daily entry count, daily realized PnL, last scan result, last skip reason, last action, and paused symbols are stored in `bull_put_strategy_runtime`
+- journaling: the strategy now writes entry, close, and scan-skip notes into the existing journal workflow
+- dashboard: the `/` workbench now shows bull put strategy controls, last skip reason, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 
 ## Regression scripts
 
 The repo includes two order/dashboard regression workflows plus a single entrypoint:
 
 ```powershell
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 .venv\Scripts\python.exe scripts\run_regression.py real-paper
 ```
 
 Available workflows:
 
-- `mock-ui`: starts the in-memory mock dashboard backend and validates the dashboard shell, journal data surface, and submit / replace / cancel flow without touching the real paper account
+- `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, runtime PnL update, and strategy journal writes
+- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through strategy controls, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 
 Both scripts now emit the same JSON envelope shape:
@@ -162,6 +171,7 @@ Both scripts now emit the same JSON envelope shape:
 Useful examples:
 
 ```powershell
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-paper --json-output artifacts/bull-put-paper-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --execute --json-output artifacts/real-paper-executed.json
@@ -169,6 +179,6 @@ Useful examples:
 
 ## Next milestones
 
-1. Add automated browser regression for the dashboard submit/replace/cancel, spread monitor, and journal-review flows.
+1. Add real broker-backed paper smoke coverage for the bull put scan/open/close workflow.
 2. Add scheduler and ingestion workers for market/news/event data.
 3. Add authentication, audit logging, and strategy-level permission controls.

@@ -400,6 +400,110 @@ def render_dashboard() -> HTMLResponse:
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Strategy</span>
+                              <h2>Bull Put Strategy</h2>
+                            </div>
+                          </div>
+                          <div id="strategy-runtime-strip" class="mini-metric-strip strategy-summary-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Entry Status</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No runtime state loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Daily Entries</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first scan.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Daily Realized PnL</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread closes recorded today.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Last Scan</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first bull put scan.</span>
+                            </article>
+                          </div>
+                          <form id="strategy-controls-form" class="ticket-form">
+                            <div class="ticket-grid">
+                              <label class="field">
+                                <span>Auto Entry</span>
+                                <select id="strategy-auto-entry">
+                                  <option value="true">Enabled</option>
+                                  <option value="false">Disabled</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Manual Pause</span>
+                                <select id="strategy-manual-pause">
+                                  <option value="false">Running</option>
+                                  <option value="true">Paused</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Kill Switch</span>
+                                <select id="strategy-kill-switch">
+                                  <option value="false">Off</option>
+                                  <option value="true">On</option>
+                                </select>
+                              </label>
+                              <label class="field field-span-2">
+                                <span>Paused Symbols</span>
+                                <input id="strategy-paused-symbols" type="text" maxlength="160" placeholder="QQQ.US, SMH.US" />
+                              </label>
+                            </div>
+                            <div class="form-foot">
+                              <p id="strategy-controls-hint" class="form-hint">Strategy controls apply to new bull put entries only. Existing spreads remain monitored.</p>
+                              <div class="inline-actions">
+                                <button id="save-strategy-controls" class="icon-button" type="submit">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M5 5h11l3 3v11H5z"/>
+                                      <path d="M8 5v6h8"/>
+                                      <path d="M8 19v-6h8v6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Save Controls</span>
+                                </button>
+                                <button id="run-strategy-scan" class="icon-button accent" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M3 12h18"/>
+                                      <path d="m13 6 6 6-6 6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Run Scan</span>
+                                </button>
+                              </div>
+                            </div>
+                          </form>
+                          <div class="strategy-notes-grid">
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Last Skip</span>
+                                <h3>Latest Skip Reason</h3>
+                              </div>
+                              <div id="strategy-skip-card" class="strategy-note-body empty">
+                                No bull put scan has been skipped yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Journal</span>
+                                <h3>Recent Strategy Notes</h3>
+                              </div>
+                              <div id="strategy-journal-feed" class="strategy-note-body empty">
+                                No bull put strategy notes for this account yet.
+                              </div>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Strategy</span>
                               <h2>Bull Put Monitor</h2>
                             </div>
                           </div>

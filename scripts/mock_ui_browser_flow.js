@@ -11,13 +11,17 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1600, height: 2200 } });
   page.on("dialog", (dialog) => dialog.accept());
+  let journalPanelText = "";
+  let strategySkipText = "";
 
   try {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.waitForSelector("#account-select");
     await page.waitForSelector("#spreads-body tr");
+    await expectText(page.locator("body"), "Bull Put Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Bull Put Spreads");
+    await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
 
     await clickRowButton(page, "#spreads-body tr", "QQQ.US", "Monitor");
@@ -25,8 +29,20 @@ async function main() {
       () => document.getElementById("status-banner")?.textContent?.includes("Take Profit"),
     );
     await page.waitForFunction(
-      () => document.getElementById("spreads-body")?.innerText?.includes("Closed"),
+      () => document.getElementById("spreads-body")?.innerText?.toLowerCase().includes("closed"),
     );
+
+    await page.selectOption("#strategy-manual-pause", "true");
+    await page.fill("#strategy-paused-symbols", "SMH.US");
+    await page.click("#save-strategy-controls");
+    await page.waitForFunction(
+      () => document.getElementById("status-banner")?.textContent?.includes("controls updated"),
+    );
+    await page.click("#run-strategy-scan");
+    await page.waitForFunction(
+      () => document.getElementById("strategy-skip-card")?.innerText?.toLowerCase().includes("manually paused"),
+    );
+    strategySkipText = await page.locator("#strategy-skip-card").innerText();
 
     await clickFilledOrderManage(page);
     await expectText(page.locator("#selected-order-execution"), "Filled Qty");
@@ -43,6 +59,7 @@ async function main() {
       () => document.getElementById("status-banner")?.textContent?.includes("Journal entry saved"),
     );
     await expectText(page.locator("#selected-order-journal"), "Browser regression review");
+    journalPanelText = await page.locator("#selected-order-journal").innerText();
 
     await page.fill("#order-symbol", "MOCK.US");
     await page.fill("#order-quantity", "1");
@@ -87,15 +104,21 @@ async function main() {
       JSON.stringify(
         {
           spread: {
-            monitorTriggered: summary.statusBanner.includes("canceled") || summary.spreadTable.includes("Closed"),
+            monitorTriggered:
+              summary.statusBanner.includes("canceled") || summary.spreadTable.toLowerCase().includes("closed"),
             tableRow: summary.spreadTable,
+          },
+          strategy: {
+            manualPauseRendered: strategySkipText.toLowerCase().includes("manually paused"),
+            skipReason: strategySkipText,
           },
           order: {
             selectedOrder: summary.selectedOrderText,
             finalStatusBanner: summary.statusBanner,
           },
           journal: {
-            rendered: summary.journalText.includes("Browser regression review"),
+            rendered: journalPanelText.includes("Browser regression review"),
+            latestPanel: journalPanelText,
           },
           screenshot: screenshotPath,
         },

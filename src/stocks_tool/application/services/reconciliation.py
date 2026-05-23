@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
+from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
@@ -22,8 +23,14 @@ from stocks_tool.repositories.sqlalchemy_broker_account_repository import (
 from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import (
     SQLAlchemyBullPutSpreadRepository,
 )
+from stocks_tool.repositories.sqlalchemy_bull_put_strategy_runtime_repository import (
+    SQLAlchemyBullPutStrategyRuntimeRepository,
+)
 from stocks_tool.repositories.sqlalchemy_execution_repository import (
     SQLAlchemyExecutionRepository,
+)
+from stocks_tool.repositories.sqlalchemy_journal_repository import (
+    SQLAlchemyJournalRepository,
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
@@ -67,6 +74,7 @@ class ReconciliationCoordinator:
             executions = SQLAlchemyExecutionRepository(session)
             trade_plans = SQLAlchemyTradePlanRepository(session)
             spreads = SQLAlchemyBullPutSpreadRepository(session)
+            runtime_states = SQLAlchemyBullPutStrategyRuntimeRepository(session)
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -80,14 +88,22 @@ class ReconciliationCoordinator:
                 executions=executions,
                 longbridge_adapter=self.longbridge_adapter,
             )
+            journal_service = JournalService(
+                journals=SQLAlchemyJournalRepository(session),
+                orders=orders,
+                trade_plans=trade_plans,
+                executions=executions,
+            )
             strategy_service = BullPutStrategyService(
                 settings=self.settings,
                 broker_accounts=broker_accounts,
                 account_snapshots=account_snapshots,
                 spreads=spreads,
+                runtime_states=runtime_states,
                 order_service=order_service,
                 longbridge_adapter=self.longbridge_adapter,
                 risk_service=RiskService(settings=self.settings),
+                journal_service=journal_service,
             )
 
             now = datetime.now(timezone.utc)
@@ -140,6 +156,18 @@ class ReconciliationCoordinator:
 
                 if not self.settings.bull_put_strategy.enabled:
                     continue
+                if self.settings.bull_put_strategy.auto_scan_enabled:
+                    try:
+                        strategy_service.run_entry_scan(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                            as_of=now,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Automatic bull put entry scan failed for %s",
+                            broker_account.external_account_id,
+                        )
                 if not self.settings.bull_put_strategy.auto_monitor_enabled:
                     continue
 

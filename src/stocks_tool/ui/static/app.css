@@ -437,11 +437,67 @@ a {
   gap: 16px;
 }
 
+.inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .form-hint {
   margin: 0;
   color: var(--text-soft);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.strategy-notes-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.strategy-note-card {
+  padding: 16px;
+  border: 1px solid rgba(197, 190, 175, 0.72);
+  border-radius: 8px;
+  background: rgba(243, 239, 232, 0.62);
+  display: grid;
+  gap: 14px;
+}
+
+.strategy-note-body {
+  display: grid;
+  gap: 12px;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.strategy-note-body.empty {
+  color: var(--text-soft);
+}
+
+.strategy-journal-entry {
+  padding-top: 12px;
+  border-top: 1px solid rgba(197, 190, 175, 0.72);
+  display: grid;
+  gap: 8px;
+}
+
+.strategy-journal-entry:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.strategy-journal-entry p {
+  margin: 0;
+}
+
+.strategy-journal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .hidden {
@@ -1030,6 +1086,10 @@ a {
     grid-template-columns: 1fr 1fr;
   }
 
+  .strategy-notes-grid {
+    grid-template-columns: 1fr;
+  }
+
   .mini-metric-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1071,6 +1131,7 @@ a {
 
   .selected-order-head,
   .holding-head,
+  .strategy-journal-head,
   .form-foot {
     flex-direction: column;
     align-items: stretch;

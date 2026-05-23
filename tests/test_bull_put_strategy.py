@@ -27,6 +27,7 @@ from stocks_tool.domain.models import (
     OptionMarketSnapshot,
     Order,
     SecurityQuoteSnapshot,
+    UpdateBullPutStrategyRuntimeRequest,
 )
 
 
@@ -232,6 +233,10 @@ def build_open_spread(
     )
 
 
+def build_scan_time() -> datetime:
+    return datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc)
+
+
 def build_service(
     *,
     account_snapshot: AccountSnapshot | None = None,
@@ -261,15 +266,30 @@ def build_service(
     spreads.list_spreads.return_value = []
     spreads.create_spread.side_effect = lambda spread: spread
     spreads.update_spread.side_effect = lambda spread: spread
+    runtime_states = Mock()
+    runtime_store: dict[str, object] = {}
+
+    def get_runtime_state(*, external_account_id: str, strategy_id: str = "paper_bull_put_v1"):
+        return runtime_store.get((external_account_id, strategy_id))
+
+    def upsert_runtime_state(state):
+        runtime_store[(state.external_account_id, state.strategy_id)] = state
+        return state
+
+    runtime_states.get_runtime_state.side_effect = get_runtime_state
+    runtime_states.upsert_runtime_state.side_effect = upsert_runtime_state
+    journal_service = Mock()
 
     service = BullPutStrategyService(
         settings=Settings(),
         broker_accounts=broker_accounts,
         account_snapshots=account_snapshots,
         spreads=spreads,
+        runtime_states=runtime_states,
         order_service=order_service,
         longbridge_adapter=adapter,
         risk_service=RiskService(settings=Settings()),
+        journal_service=journal_service,
     )
     return service, adapter, spreads, order_service
 
@@ -397,6 +417,7 @@ def test_execute_spread_opens_position_when_both_legs_fill() -> None:
             external_account_id="LBPT10087357",
             symbol="QQQ.US",
             mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
         )
     )
 
@@ -446,6 +467,7 @@ def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
             external_account_id="LBPT10087357",
             symbol="QQQ.US",
             mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
         )
     )
 
@@ -465,6 +487,7 @@ def test_execute_spread_blocks_when_same_symbol_is_already_active() -> None:
                 external_account_id="LBPT10087357",
                 symbol="QQQ.US",
                 mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
             )
         )
     except ValueError as exc:
@@ -488,6 +511,7 @@ def test_execute_spread_blocks_when_correlated_group_is_already_at_capacity() ->
                 external_account_id="LBPT10087357",
                 symbol="SMH.US",
                 mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
             )
         )
     except ValueError as exc:
@@ -512,6 +536,7 @@ def test_execute_spread_blocks_when_account_is_already_at_capacity() -> None:
                 external_account_id="LBPT10087357",
                 symbol="SMH.US",
                 mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
             )
         )
     except ValueError as exc:
@@ -521,6 +546,76 @@ def test_execute_spread_blocks_when_account_is_already_at_capacity() -> None:
         )
     else:
         raise AssertionError("Expected execute_spread to block when the account is at capacity.")
+
+
+def test_update_runtime_state_normalizes_paused_symbols() -> None:
+    service, _, _, _ = build_service()
+
+    runtime = service.update_runtime_state(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        request=UpdateBullPutStrategyRuntimeRequest(
+            auto_entry_enabled=False,
+            paused_symbols=[" qqq.us ", "QQQ.US", "BAD.US", "smh.us"],
+        ),
+        as_of=build_scan_time(),
+    )
+
+    assert runtime.auto_entry_enabled is False
+    assert runtime.paused_symbols == ["QQQ.US", "SMH.US"]
+
+
+def test_preview_spread_blocks_when_kill_switch_is_active() -> None:
+    service, _, _, _ = build_service()
+    service.update_runtime_state(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        request=UpdateBullPutStrategyRuntimeRequest(kill_switch_active=True),
+        as_of=build_scan_time(),
+    )
+
+    result = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert result.eligible is False
+    assert result.reasons == ["Bull put kill switch is active for this account."]
+
+
+def test_run_entry_scan_executes_and_updates_runtime_state() -> None:
+    service, _, _, order_service = build_service()
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+        ),
+        build_option_order(
+            order_id="short-entry",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+        ),
+    ]
+
+    result = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+        force=True,
+    )
+
+    assert result.executed is True
+    assert result.executed_spread is not None
+    assert result.strategy_state.daily_entry_count == 1
+    assert result.strategy_state.last_scan_result == "executed"
+    assert service.journal_service.create_entry.call_count >= 1
 
 
 def test_monitor_spread_keeps_open_position_without_exit_trigger() -> None:
