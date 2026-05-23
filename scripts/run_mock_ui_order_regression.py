@@ -165,6 +165,7 @@ def main() -> None:
             assert "Current Holdings" in dashboard.text
             assert "Bull Put Strategy" in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
+            assert "Latest Review" in dashboard.text
             assert "Bull Put Monitor" in dashboard.text
             assert "Bull Put Spreads" in dashboard.text
             assert "Order Ticket" in dashboard.text
@@ -185,6 +186,7 @@ def main() -> None:
                 "strategy-runtime-strip",
                 "strategy-controls-form",
                 "runStrategyScan()",
+                "runStrategyReview()",
                 "saveStrategyControls()",
                 "renderStrategyRuntime()",
                 "spread-summary-strip",

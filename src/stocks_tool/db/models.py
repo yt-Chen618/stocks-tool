@@ -372,6 +372,9 @@ class BullPutStrategyRuntimeRecord(TimestampMixin, Base):
     last_skip_reason: Mapped[str | None] = mapped_column(Text)
     last_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_action: Mapped[str | None] = mapped_column(Text)
+    last_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_review_status: Mapped[str | None] = mapped_column(String(32))
+    last_review_summary: Mapped[str | None] = mapped_column(Text)
     last_error: Mapped[str | None] = mapped_column(Text)
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()

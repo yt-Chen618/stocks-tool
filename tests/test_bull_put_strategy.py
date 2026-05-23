@@ -1,6 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.risk import RiskService
@@ -233,6 +233,25 @@ def build_open_spread(
     )
 
 
+def build_closed_spread(
+    *,
+    spread_id: str,
+    closed_at: datetime,
+    exit_reason: str,
+) -> BullPutSpread:
+    return build_open_spread(status=SpreadStatus.CLOSED).model_copy(
+        update={
+            "id": spread_id,
+            "status": SpreadStatus.CLOSED,
+            "short_exit_order_id": f"{spread_id}-short-exit",
+            "long_exit_order_id": f"{spread_id}-long-exit",
+            "exit_reason": exit_reason,
+            "closed_at": closed_at,
+            "updated_at": closed_at,
+        }
+    )
+
+
 def build_scan_time() -> datetime:
     return datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc)
 
@@ -429,6 +448,58 @@ def test_execute_spread_opens_position_when_both_legs_fill() -> None:
     assert spread.entry_net_credit == Decimal("1.30")
 
 
+def test_execute_spread_uses_buffered_long_limit_and_waits_for_fill() -> None:
+    service, _, _, order_service = build_service()
+    service.settings.bull_put_strategy.entry_fill_timeout_seconds = 10
+    service.settings.bull_put_strategy.entry_fill_poll_interval_seconds = 0
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.20"),
+        ),
+        build_option_order(
+            order_id="short-entry",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+        ),
+    ]
+    order_service.refresh_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.20"),
+        ),
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.20"),
+        ),
+    ]
+
+    with patch("stocks_tool.application.services.bull_put_strategy.time.monotonic", side_effect=[0, 0, 1]):
+        spread = service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            )
+        )
+
+    assert spread.status == SpreadStatus.OPEN
+    assert order_service.submit_order.call_args_list[0].args[0].limit_price == Decimal("1.20")
+    assert order_service.refresh_order.call_count == 2
+
+
 def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
     service, _, _, order_service = build_service()
     order_service.submit_order.side_effect = [
@@ -615,6 +686,72 @@ def test_run_entry_scan_executes_and_updates_runtime_state() -> None:
     assert result.executed_spread is not None
     assert result.strategy_state.daily_entry_count == 1
     assert result.strategy_state.last_scan_result == "executed"
+    assert service.journal_service.create_entry.call_count >= 1
+
+
+def test_run_review_returns_not_due_before_threshold() -> None:
+    service, _, spreads, _ = build_service()
+    closed_at = datetime(2026, 5, 20, 14, 45, tzinfo=timezone.utc)
+    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None: (
+        [build_closed_spread(spread_id="closed-1", closed_at=closed_at, exit_reason="take_profit")]
+        if status == SpreadStatus.CLOSED
+        else []
+    )
+
+    result = service.run_review(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+    )
+
+    assert result.review_status == "not_due"
+    assert result.reason == "Bull put review is not due yet."
+
+
+def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:
+    service, _, spreads, order_service = build_service()
+    service.journal_service.create_entry.return_value = Mock(id="journal-1")
+    closed_spreads = []
+    order_map = {}
+    for index in range(20):
+        closed_at = datetime(2026, 6, 20, 14, 45, tzinfo=timezone.utc) - timedelta(days=index)
+        spread = build_closed_spread(
+            spread_id=f"closed-{index}",
+            closed_at=closed_at,
+            exit_reason="stop_loss",
+        )
+        closed_spreads.append(spread)
+        order_map[spread.short_exit_order_id] = build_option_order(
+            order_id=spread.short_exit_order_id,
+            symbol=spread.short_symbol,
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.60"),
+        )
+        order_map[spread.long_exit_order_id] = build_option_order(
+            order_id=spread.long_exit_order_id,
+            symbol=spread.long_symbol,
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("0.50"),
+        )
+
+    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None: (
+        closed_spreads if status == SpreadStatus.CLOSED else []
+    )
+    order_service.get_order.side_effect = lambda order_id: order_map.get(order_id)
+
+    result = service.run_review(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=datetime(2026, 6, 22, 14, 45, tzinfo=timezone.utc),
+        force=True,
+    )
+
+    assert result.review_status == "suggested"
+    assert result.parameter_name == "short_delta_target"
+    assert result.suggested_value == "0.20"
+    assert result.journal_entry_id == "journal-1"
     assert service.journal_service.create_entry.call_count >= 1
 
 

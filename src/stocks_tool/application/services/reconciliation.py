@@ -168,6 +168,18 @@ class ReconciliationCoordinator:
                             "Automatic bull put entry scan failed for %s",
                             broker_account.external_account_id,
                         )
+                if self.settings.bull_put_strategy.auto_review_enabled:
+                    try:
+                        strategy_service.run_review(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                            as_of=now,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Automatic bull put review failed for %s",
+                            broker_account.external_account_id,
+                        )
                 if not self.settings.bull_put_strategy.auto_monitor_enabled:
                     continue
 

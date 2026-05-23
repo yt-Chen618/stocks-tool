@@ -13,6 +13,7 @@ async function main() {
   page.on("dialog", (dialog) => dialog.accept());
   let journalPanelText = "";
   let strategySkipText = "";
+  let strategyReviewText = "";
 
   try {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
@@ -43,6 +44,11 @@ async function main() {
       () => document.getElementById("strategy-skip-card")?.innerText?.toLowerCase().includes("manually paused"),
     );
     strategySkipText = await page.locator("#strategy-skip-card").innerText();
+    await page.click("#run-strategy-review");
+    await page.waitForFunction(
+      () => document.getElementById("strategy-review-card")?.innerText?.toLowerCase().includes("short delta target"),
+    );
+    strategyReviewText = await page.locator("#strategy-review-card").innerText();
 
     await clickFilledOrderManage(page);
     await expectText(page.locator("#selected-order-execution"), "Filled Qty");
@@ -111,6 +117,8 @@ async function main() {
           strategy: {
             manualPauseRendered: strategySkipText.toLowerCase().includes("manually paused"),
             skipReason: strategySkipText,
+            reviewRendered: strategyReviewText.toLowerCase().includes("short delta target"),
+            reviewSummary: strategyReviewText,
           },
           order: {
             selectedOrder: summary.selectedOrderText,

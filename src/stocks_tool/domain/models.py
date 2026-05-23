@@ -548,6 +548,9 @@ class BullPutStrategyRuntimeState(BaseModel):
     last_skip_reason: str | None = None
     last_action_at: datetime | None = None
     last_action: str | None = None
+    last_review_at: datetime | None = None
+    last_review_status: str | None = None
+    last_review_summary: str | None = None
     last_error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -566,6 +569,24 @@ class BullPutStrategyScanRunResult(BaseModel):
     executed: bool
     executed_spread: BullPutSpread | None = None
     previews: list[BullPutSpreadScanResult] = Field(default_factory=list)
+    reason: str | None = None
+
+
+class BullPutStrategyReviewResult(BaseModel):
+    strategy_state: BullPutStrategyRuntimeState
+    evaluated_at: datetime
+    review_status: str
+    closed_spreads_considered: int
+    lookback_days: int
+    net_realized_pnl: Decimal | None = None
+    take_profit_rate: Decimal | None = None
+    stop_loss_rate: Decimal | None = None
+    recommendation: str | None = None
+    parameter_name: str | None = None
+    current_value: str | None = None
+    suggested_value: str | None = None
+    journal_entry_id: str | None = None
+    reviewed_spread_ids: list[str] = Field(default_factory=list)
     reason: str | None = None
 
 

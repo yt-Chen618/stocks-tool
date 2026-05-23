@@ -40,8 +40,10 @@ function bindElements() {
   els.strategyControlsHint = document.getElementById("strategy-controls-hint");
   els.saveStrategyControls = document.getElementById("save-strategy-controls");
   els.runStrategyScan = document.getElementById("run-strategy-scan");
+  els.runStrategyReview = document.getElementById("run-strategy-review");
   els.strategySkipCard = document.getElementById("strategy-skip-card");
   els.strategyJournalFeed = document.getElementById("strategy-journal-feed");
+  els.strategyReviewCard = document.getElementById("strategy-review-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
   els.ordersBody = document.getElementById("orders-body");
@@ -124,6 +126,10 @@ function wireEvents() {
 
   els.runStrategyScan.addEventListener("click", async () => {
     await runStrategyScan();
+  });
+
+  els.runStrategyReview.addEventListener("click", async () => {
+    await runStrategyReview();
   });
 
   els.orderType.addEventListener("change", () => {
@@ -396,6 +402,29 @@ async function runStrategyScan() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put scan failed.", "error");
+  }
+}
+
+async function runStrategyReview() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before running a bull put review.", "warning");
+    return;
+  }
+
+  setStatus(`Running bull put review for ${state.selectedAccountId}...`, "warning");
+  try {
+    const result = await fetchJson(
+      `/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}/review?mode=paper&force=true`,
+      {
+        method: "POST",
+      }
+    );
+    await loadAccountData();
+    const message = result.recommendation || result.reason || result.strategy_state?.last_review_summary || "Bull put review completed.";
+    setStatus(message, result.review_status === "suggested" ? "success" : "warning");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Bull put review failed.", "error");
   }
 }
 
@@ -888,6 +917,8 @@ function renderStrategyRuntime() {
     els.strategySkipCard.textContent = "No bull put scan has been skipped yet.";
     els.strategyJournalFeed.className = "strategy-note-body empty";
     els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
+    els.strategyReviewCard.className = "strategy-note-body empty";
+    els.strategyReviewCard.textContent = "No bull put strategy review has been generated yet.";
     els.strategyControlsHint.textContent = "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.";
     els.strategyAutoEntry.value = "true";
     els.strategyManualPause.value = "false";
@@ -954,6 +985,11 @@ function renderStrategyRuntime() {
   const strategyNotes = state.journals.filter((entry) =>
     Array.isArray(entry.tags) && entry.tags.some((tag) => String(tag).toLowerCase() === "bull-put")
   );
+  const reviewSummary = runtime.last_review_summary || "No bull put strategy review has been generated yet.";
+  els.strategyReviewCard.className = `strategy-note-body ${runtime.last_review_summary ? "" : "empty"}`;
+  els.strategyReviewCard.textContent = runtime.last_review_at
+    ? `${reviewSummary} (${formatDateTime(runtime.last_review_at)})`
+    : reviewSummary;
   if (strategyNotes.length === 0) {
     els.strategyJournalFeed.className = "strategy-note-body empty";
     els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
@@ -1452,8 +1488,10 @@ function updateStrategyButtons() {
   const hasAccount = Boolean(state.selectedAccountId);
   els.saveStrategyControls.disabled = !hasAccount;
   els.runStrategyScan.disabled = !hasAccount;
+  els.runStrategyReview.disabled = !hasAccount;
   els.saveStrategyControls.title = hasAccount ? "" : "Select a broker account first.";
   els.runStrategyScan.title = hasAccount ? "" : "Select a broker account first.";
+  els.runStrategyReview.title = hasAccount ? "" : "Select a broker account first.";
 }
 
 function syncTicketOrderFields() {

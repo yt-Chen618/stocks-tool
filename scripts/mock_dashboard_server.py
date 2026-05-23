@@ -219,6 +219,9 @@ class MockDashboardState:
             "last_skip_reason": None,
             "last_action_at": "2026-05-21T02:14:54Z",
             "last_action": "Waiting for the first bull put scan.",
+            "last_review_at": None,
+            "last_review_status": None,
+            "last_review_summary": None,
             "last_error": None,
             "created_at": "2026-05-21T02:14:54Z",
             "updated_at": "2026-05-21T02:14:54Z",
@@ -553,6 +556,46 @@ class MockDashboardState:
             "reason": None,
         }
 
+    def run_review(self, external_account_id: str, *, force: bool) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        now = iso_now()
+        summary = "Suggest tightening short delta target from 0.22 to 0.20 after repeated stop-loss exits."
+        self.runtime["last_review_at"] = now
+        self.runtime["last_review_status"] = "suggested"
+        self.runtime["last_review_summary"] = summary
+        self.runtime["last_action"] = summary
+        self.runtime["last_action_at"] = now
+        self.runtime["updated_at"] = now
+        journal = self.create_journal(
+            {
+                "external_account_id": self.account_id,
+                "symbol": "QQQ.US",
+                "entry_type": "review",
+                "title": "Bull put strategy review",
+                "notes": summary,
+                "tags": ["strategy", "bull-put", "review", "suggested", "paper"],
+            }
+        )
+        return {
+            "strategy_state": deepcopy(self.runtime),
+            "evaluated_at": now,
+            "review_status": "suggested",
+            "closed_spreads_considered": 20,
+            "lookback_days": 30,
+            "net_realized_pnl": "-420.0000",
+            "take_profit_rate": "0.2500",
+            "stop_loss_rate": "0.4000",
+            "recommendation": summary,
+            "parameter_name": "short_delta_target",
+            "current_value": "0.22",
+            "suggested_value": "0.20",
+            "journal_entry_id": journal["id"],
+            "reviewed_spread_ids": [spread["id"] for spread in self.spreads if spread["status"] == "closed"],
+            "reason": None,
+            "force": force,
+        }
+
     def get_spread(self, spread_id: str) -> dict[str, Any]:
         for spread in self.spreads:
             if spread["id"] == spread_id:
@@ -758,6 +801,19 @@ def create_app() -> FastAPI:
     ) -> dict[str, Any]:
         try:
             return state.run_entry_scan(external_account_id, force=force)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Runtime state for '{external_account_id}' was not found.",
+            ) from error
+
+    @app.post("/strategies/bull-put/runtime/{external_account_id}/review")
+    def review_bull_put_runtime(
+        external_account_id: str,
+        force: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        try:
+            return state.run_review(external_account_id, force=force)
         except KeyError as error:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

@@ -100,24 +100,30 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         symbol: str,
         mode: ExecutionMode,
     ) -> SecurityQuoteSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        quotes = quote_context.quote([symbol])
-        if not quotes:
-            raise LongbridgeIntegrationError(f"No quote returned for symbol '{symbol}'.")
-        return self._map_security_quote(quotes[0])
+        def _load_quote() -> SecurityQuoteSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            quotes = quote_context.quote([symbol])
+            if not quotes:
+                raise LongbridgeIntegrationError(f"No quote returned for symbol '{symbol}'.")
+            return self._map_security_quote(quotes[0])
+
+        return self._run_sdk_action(f"load quote for '{symbol}'", _load_quote)
 
     def list_option_expiry_dates(
         self,
         symbol: str,
         mode: ExecutionMode,
     ) -> list[date]:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        expiry_dates = quote_context.option_chain_expiry_date_list(symbol)
-        return [self._to_date(expiry_date) for expiry_date in expiry_dates]
+        def _load_expiry_dates() -> list[date]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            expiry_dates = quote_context.option_chain_expiry_date_list(symbol)
+            return [self._to_date(expiry_date) for expiry_date in expiry_dates]
+
+        return self._run_sdk_action(f"load option expiry dates for '{symbol}'", _load_expiry_dates)
 
     def list_option_chain(
         self,
@@ -125,19 +131,25 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         expiry_date: date,
         mode: ExecutionMode,
     ) -> list[OptionChainEntry]:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        contracts = quote_context.option_chain_info_by_date(symbol, expiry_date)
-        return [
-            OptionChainEntry(
-                strike=self._to_decimal(getattr(contract, "price", None)),
-                call_symbol=getattr(contract, "call_symbol", None),
-                put_symbol=getattr(contract, "put_symbol", None),
-                standard=bool(getattr(contract, "standard", True)),
-            )
-            for contract in contracts
-        ]
+        def _load_option_chain() -> list[OptionChainEntry]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            contracts = quote_context.option_chain_info_by_date(symbol, expiry_date)
+            return [
+                OptionChainEntry(
+                    strike=self._to_decimal(getattr(contract, "price", None)),
+                    call_symbol=getattr(contract, "call_symbol", None),
+                    put_symbol=getattr(contract, "put_symbol", None),
+                    standard=bool(getattr(contract, "standard", True)),
+                )
+                for contract in contracts
+            ]
+
+        return self._run_sdk_action(
+            f"load option chain for '{symbol}' on {expiry_date.isoformat()}",
+            _load_option_chain,
+        )
 
     def get_option_market_snapshots(
         self,
@@ -147,52 +159,61 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if not symbols:
             return []
 
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        option_quotes = quote_context.option_quote(symbols)
-        calc_indexes = quote_context.calc_indexes(
-            symbols,
-            [
-                sdk["CalcIndex"].OpenInterest,
-                sdk["CalcIndex"].ImpliedVolatility,
-                sdk["CalcIndex"].Delta,
-                sdk["CalcIndex"].Gamma,
-                sdk["CalcIndex"].Theta,
-                sdk["CalcIndex"].Vega,
-                sdk["CalcIndex"].StrikePrice,
-                sdk["CalcIndex"].ExpiryDate,
-            ],
-        )
-        calc_by_symbol = {
-            getattr(calc_index, "symbol"): calc_index
-            for calc_index in calc_indexes
-            if getattr(calc_index, "symbol", None)
-        }
-        return [
-            self._map_option_market_snapshot(
-                quote=quote,
-                calc_index=calc_by_symbol.get(getattr(quote, "symbol", None)),
+        def _load_option_snapshots() -> list[OptionMarketSnapshot]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            option_quotes = quote_context.option_quote(symbols)
+            calc_indexes = quote_context.calc_indexes(
+                symbols,
+                [
+                    sdk["CalcIndex"].OpenInterest,
+                    sdk["CalcIndex"].ImpliedVolatility,
+                    sdk["CalcIndex"].Delta,
+                    sdk["CalcIndex"].Gamma,
+                    sdk["CalcIndex"].Theta,
+                    sdk["CalcIndex"].Vega,
+                    sdk["CalcIndex"].StrikePrice,
+                    sdk["CalcIndex"].ExpiryDate,
+                ],
             )
-            for quote in option_quotes
-        ]
+            calc_by_symbol = {
+                getattr(calc_index, "symbol"): calc_index
+                for calc_index in calc_indexes
+                if getattr(calc_index, "symbol", None)
+            }
+            return [
+                self._map_option_market_snapshot(
+                    quote=quote,
+                    calc_index=calc_by_symbol.get(getattr(quote, "symbol", None)),
+                )
+                for quote in option_quotes
+            ]
+
+        return self._run_sdk_action(
+            f"load option market snapshots for {', '.join(symbols)}",
+            _load_option_snapshots,
+        )
 
     def get_best_bid_ask(
         self,
         symbol: str,
         mode: ExecutionMode,
     ) -> tuple[Decimal | None, Decimal | None]:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        depth = quote_context.depth(symbol)
-        best_ask = self._to_optional_decimal(
-            getattr((getattr(depth, "asks", None) or [None])[0], "price", None)
-        )
-        best_bid = self._to_optional_decimal(
-            getattr((getattr(depth, "bids", None) or [None])[0], "price", None)
-        )
-        return best_bid, best_ask
+        def _load_best_bid_ask() -> tuple[Decimal | None, Decimal | None]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            depth = quote_context.depth(symbol)
+            best_ask = self._to_optional_decimal(
+                getattr((getattr(depth, "asks", None) or [None])[0], "price", None)
+            )
+            best_bid = self._to_optional_decimal(
+                getattr((getattr(depth, "bids", None) or [None])[0], "price", None)
+            )
+            return best_bid, best_ask
+
+        return self._run_sdk_action(f"load best bid/ask for '{symbol}'", _load_best_bid_ask)
 
     def get_recent_daily_bars(
         self,
@@ -201,32 +222,35 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         count: int,
         mode: ExecutionMode,
     ) -> list[HistoricalPriceBar]:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        quote_context = sdk["QuoteContext"](config)
-        candlesticks = quote_context.candlesticks(
-            symbol,
-            sdk["Period"].Day,
-            count,
-            sdk["AdjustType"].NoAdjust,
-        )
-        return [
-            HistoricalPriceBar(
-                symbol=symbol,
-                timestamp=self._to_datetime(getattr(bar, "timestamp", None)),
-                open=self._to_decimal(getattr(bar, "open", None)),
-                high=self._to_decimal(getattr(bar, "high", None)),
-                low=self._to_decimal(getattr(bar, "low", None)),
-                close=self._to_decimal(getattr(bar, "close", None)),
-                volume=int(getattr(bar, "volume", 0) or 0),
-                turnover=self._to_decimal(getattr(bar, "turnover", None)),
-                raw_payload=self._serialize_attrs(
-                    bar,
-                    ["open", "high", "low", "close", "volume", "turnover", "timestamp"],
-                ),
+        def _load_daily_bars() -> list[HistoricalPriceBar]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            candlesticks = quote_context.candlesticks(
+                symbol,
+                sdk["Period"].Day,
+                count,
+                sdk["AdjustType"].NoAdjust,
             )
-            for bar in candlesticks
-        ]
+            return [
+                HistoricalPriceBar(
+                    symbol=symbol,
+                    timestamp=self._to_datetime(getattr(bar, "timestamp", None)),
+                    open=self._to_decimal(getattr(bar, "open", None)),
+                    high=self._to_decimal(getattr(bar, "high", None)),
+                    low=self._to_decimal(getattr(bar, "low", None)),
+                    close=self._to_decimal(getattr(bar, "close", None)),
+                    volume=int(getattr(bar, "volume", 0) or 0),
+                    turnover=self._to_decimal(getattr(bar, "turnover", None)),
+                    raw_payload=self._serialize_attrs(
+                        bar,
+                        ["open", "high", "low", "close", "volume", "turnover", "timestamp"],
+                    ),
+                )
+                for bar in candlesticks
+            ]
+
+        return self._run_sdk_action(f"load recent daily bars for '{symbol}'", _load_daily_bars)
 
     def build_account_snapshot(
         self,
@@ -457,6 +481,16 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             "zh-hk": getattr(language_enum, "ZH_HK"),
         }
         return mapping.get(self.settings.longbridge_language.lower(), getattr(language_enum, "EN"))
+
+    def _run_sdk_action(self, action: str, func):
+        try:
+            return func()
+        except LongbridgeIntegrationError:
+            raise
+        except Exception as exc:
+            raise LongbridgeIntegrationError(
+                f"Longbridge failed to {action}: {exc}"
+            ) from exc
 
     def _pick_account_balance(
         self,

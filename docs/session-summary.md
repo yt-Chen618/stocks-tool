@@ -68,6 +68,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
   - `POST /strategies/bull-put/runtime/{external_account_id}`
   - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
+  - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - Current scope:
   - paper-only
   - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
@@ -88,9 +89,10 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - entry failures are persisted locally as `entry_failed`, `rolled_back`, or `rollback_failed`
   - spread lifecycle, linked local order ids, and entry metrics are stored in `bull_put_spreads`
   - runtime state is stored in `bull_put_strategy_runtime`
-  - strategy-driven journal entries are now written automatically for spread opens, spread closes, and scan skips
+  - strategy-driven journal entries are now written automatically for spread opens, spread closes, scan skips, and periodic parameter reviews
+  - periodic review now generates at most one parameter suggestion at a time and never changes runtime strategy parameters automatically
 - Current limitations:
-  - there is still no real broker-backed paper smoke that sends option orders through Longbridge
+  - the new `bull-put-real-paper` smoke script still needs to be run against a live local API session with working Longbridge connectivity to complete real-broker validation
 
 ### Automatic reconciliation
 
@@ -98,6 +100,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - Active Longbridge paper accounts with `auto_reconcile_enabled=true` are polled automatically.
 - The same background loop now also monitors open or exit-pending bull put spreads.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
+- The same background loop now also triggers periodic bull put review checks per account.
 - Default intervals:
   - scheduler poll loop: `15s`
   - account snapshot sync: `300s`
@@ -221,13 +224,14 @@ Current dashboard capabilities:
 - View automatic reconciliation state for the selected account
 - View account metrics
 - View holdings overview and current holdings cards
-- View bull put runtime status, controls, last skip reason, and recent strategy notes
+- View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View Longbridge configuration status
 - Load quick quote
 - Submit `market`, `limit`, and `stop` paper orders
 - Refresh, manage, replace, and cancel eligible orders from the dashboard
 - Refresh and monitor bull put spreads from the dashboard
+- Run an on-demand bull put strategy review from the dashboard
 - View selected order details and broker status transitions
 - View execution summary for the selected order
 - Save `plan`, `review`, and `note` journal entries for the selected order
@@ -264,36 +268,38 @@ Frontend files:
 - Wired the bull put exit monitor into the background reconciliation coordinator so open or exit-pending spreads are checked automatically.
 - Added account-level, per-symbol, and correlated-group entry caps for bull put spreads.
 - Added automatic daily bull put entry scans, per-day entry caps, daily realized-loss stops, and runtime controls for manual pause / kill switch / paused symbols.
-- Added automatic strategy journaling for bull put opens, closes, and scan skips.
+- Added automatic strategy journaling for bull put opens, closes, scan skips, and parameter reviews.
 - Added strategy runtime and controls routes under `/strategies/bull-put/runtime`.
+- Added bull put review state persistence through Alembic migration `20260523_0007_bull_put_strategy_review_state`.
 - Added dashboard spread-monitor visibility with bull put summary cards, latest exit action, and per-spread refresh / monitor actions.
-- Added dashboard bull put runtime cards, control form, last skip reason, and recent strategy-note feed.
+- Added dashboard bull put runtime cards, control form, last skip reason, latest review, and recent strategy-note feed.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
-- Added a headless browser-driven `mock-ui` regression that exercises spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
+- Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
+- Added a headless browser-driven `mock-ui` regression that exercises strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
 - Added `tests/test_executions_api.py` for execution route coverage.
 - Added `tests/test_journals_api.py` for journal route coverage.
 - Added `tests/test_journal_service.py` for order / execution linkage validation.
-- Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, and exit-monitor flows.
-- Added `tests/test_strategies_api.py` for strategy preview, execute, and monitor route coverage.
+- Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, exit-monitor flows, and strategy review suggestions.
+- Added `tests/test_strategies_api.py` for strategy preview, execute, monitor, and runtime-review route coverage.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, and bull put strategy sections.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the bull put runtime-control additions:
+- Latest local verification run after the bull put review and smoke additions:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `39 passed`
+- Result: `42 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes bull put strategy controls plus skip-reason rendering
+- Result: `passed` and now includes bull put strategy controls, skip-reason rendering, and latest-review rendering
 - Latest bull put service-regression run:
 
 ```powershell
@@ -301,16 +307,23 @@ Frontend files:
 ```
 
 - Result: `passed`
+- Latest bull put real-paper smoke entrypoint:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
+```
+
+- Result in the current assistant sandbox: `failed` because `127.0.0.1:8000` was not listening inside the sandboxed run, and sandbox-started API processes also could not reach `openapi.longbridge.com`
 
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
-- There is no real broker-backed bull put paper smoke yet through Longbridge.
+- The real broker-backed bull put smoke script exists, but it still needs to be executed from a live local API session with working Longbridge connectivity.
 - The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
 
 ## Recommended next steps
 
-1. Add a real broker-backed paper smoke for the bull put spread workflow.
+1. Run `scripts/run_regression.py bull-put-real-paper` from a live local API session and confirm Longbridge preview or execute behavior end to end.
 2. Add runtime controls and strategy activity views to any future authenticated user/session layer.

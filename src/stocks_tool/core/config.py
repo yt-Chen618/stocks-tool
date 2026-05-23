@@ -11,6 +11,7 @@ class BullPutSpreadStrategySettings(BaseModel):
     enabled: bool = True
     auto_scan_enabled: bool = True
     auto_monitor_enabled: bool = True
+    auto_review_enabled: bool = True
     scan_window_start_hour_et: int = Field(default=10, ge=0, le=23)
     scan_window_start_minute_et: int = Field(default=45, ge=0, le=59)
     scan_window_end_hour_et: int = Field(default=11, ge=0, le=23)
@@ -33,12 +34,20 @@ class BullPutSpreadStrategySettings(BaseModel):
     min_credit_per_width_ratio: Decimal = Field(default=Decimal("0.18"), gt=0)
     min_conservative_credit_per_width_ratio: Decimal = Field(default=Decimal("0.10"), gt=0)
     min_mid_credit: Decimal = Field(default=Decimal("0.20"), gt=0)
+    entry_long_limit_buffer: Decimal = Field(default=Decimal("0.10"), ge=0)
+    entry_fill_timeout_seconds: int = Field(default=45, ge=0)
+    entry_fill_poll_interval_seconds: int = Field(default=5, ge=0)
     contracts_per_trade: int = Field(default=1, ge=1)
     per_trade_max_account_risk_pct: Decimal = Field(default=Decimal("0.01"), gt=0)
     architecture_max_account_risk_pct: Decimal = Field(default=Decimal("0.02"), gt=0)
     take_profit_exit_ratio: Decimal = Field(default=Decimal("0.50"), ge=0)
     stop_loss_exit_multiple: Decimal = Field(default=Decimal("2.00"), gt=0)
     close_days_to_expiration: int = Field(default=7, ge=0)
+    review_interval_days: int = Field(default=30, ge=1)
+    review_min_closed_spreads: int = Field(default=20, ge=1)
+    review_min_spreads_for_suggestion: int = Field(default=5, ge=1)
+    review_delta_step: Decimal = Field(default=Decimal("0.02"), gt=0)
+    review_credit_step: Decimal = Field(default=Decimal("0.05"), gt=0)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "BullPutSpreadStrategySettings":

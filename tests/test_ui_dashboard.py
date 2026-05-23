@@ -23,6 +23,8 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Entry Status" in response.text
     assert "Latest Skip Reason" in response.text
     assert "Run Scan" in response.text
+    assert "Run Review" in response.text
+    assert "Latest Review" in response.text
     assert "Bull Put Monitor" in response.text
     assert "Bull Put Spreads" in response.text
     assert "Latest Exit Action" in response.text

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -30,6 +30,7 @@ from stocks_tool.domain.models import (
     BullPutSpreadCandidate,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     CreateOrderRequest,
@@ -243,6 +244,134 @@ class BullPutStrategyService:
             executed=False,
             previews=previews,
             reason=reason,
+        )
+
+    def run_review(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        as_of: datetime | None = None,
+        force: bool = False,
+    ) -> BullPutStrategyReviewResult:
+        evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        state = self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=evaluated_at,
+        )
+        closed_spreads = self._list_closed_spreads(external_account_id=external_account_id)
+        if not force:
+            due_reason = self._review_not_due_reason(
+                state=state,
+                closed_spreads=closed_spreads,
+                as_of=evaluated_at,
+            )
+            if due_reason is not None:
+                return BullPutStrategyReviewResult(
+                    strategy_state=state,
+                    evaluated_at=evaluated_at,
+                    review_status="not_due",
+                    closed_spreads_considered=0,
+                    lookback_days=self.settings.bull_put_strategy.review_interval_days,
+                    reason=due_reason,
+                )
+
+        strategy = self.settings.bull_put_strategy
+        window_start = evaluated_at.astimezone(self.new_york).date() - timedelta(days=strategy.review_interval_days)
+        recent_spreads = [
+            spread
+            for spread in closed_spreads
+            if spread.closed_at is not None
+            and spread.closed_at.astimezone(self.new_york).date() >= window_start
+        ]
+        reviewed_metrics = [
+            (spread, realized_pnl)
+            for spread in recent_spreads
+            if (realized_pnl := self._resolved_realized_pnl(spread)) is not None
+        ]
+        spread_ids = [spread.id for spread, _ in reviewed_metrics]
+        count = len(reviewed_metrics)
+        total_realized_pnl = sum((pnl for _, pnl in reviewed_metrics), start=Decimal("0"))
+        take_profit_count = sum(1 for spread, _ in reviewed_metrics if spread.exit_reason == "take_profit")
+        stop_loss_count = sum(1 for spread, _ in reviewed_metrics if spread.exit_reason == "stop_loss")
+        take_profit_rate = (
+            Decimal(take_profit_count) / Decimal(count)
+            if count > 0
+            else None
+        )
+        stop_loss_rate = (
+            Decimal(stop_loss_count) / Decimal(count)
+            if count > 0
+            else None
+        )
+
+        review_status = "no_change"
+        summary = "Recent closed bull put spreads do not justify a parameter change."
+        recommendation = None
+        parameter_name = None
+        current_value = None
+        suggested_value = None
+
+        if count == 0:
+            review_status = "insufficient_history"
+            summary = "No closed bull put spreads with realized PnL are available for review yet."
+        elif count < strategy.review_min_closed_spreads:
+            review_status = "insufficient_history"
+            summary = (
+                f"Closed-spread sample is {count} trades in the last {strategy.review_interval_days} days. "
+                "Keep collecting history before changing bull put parameters."
+            )
+        else:
+            (
+                review_status,
+                summary,
+                recommendation,
+                parameter_name,
+                current_value,
+                suggested_value,
+            ) = self._build_review_recommendation(
+                count=count,
+                total_realized_pnl=total_realized_pnl,
+                take_profit_rate=take_profit_rate,
+                stop_loss_rate=stop_loss_rate,
+            )
+
+        journal_entry = self._create_strategy_review_entry(
+            external_account_id=external_account_id,
+            reviewed_metrics=reviewed_metrics,
+            evaluated_at=evaluated_at,
+            review_status=review_status,
+            summary=summary,
+            recommendation=recommendation,
+        )
+        state = self._update_runtime_state(
+            state,
+            last_review_at=evaluated_at,
+            last_review_status=review_status,
+            last_review_summary=summary,
+            last_action=summary,
+            last_action_at=evaluated_at,
+            last_error=None,
+        )
+        return BullPutStrategyReviewResult(
+            strategy_state=state,
+            evaluated_at=evaluated_at,
+            review_status=review_status,
+            closed_spreads_considered=count,
+            lookback_days=strategy.review_interval_days,
+            net_realized_pnl=total_realized_pnl if count > 0 else None,
+            take_profit_rate=take_profit_rate,
+            stop_loss_rate=stop_loss_rate,
+            recommendation=recommendation,
+            parameter_name=parameter_name,
+            current_value=current_value,
+            suggested_value=suggested_value,
+            journal_entry_id=getattr(journal_entry, "id", None) if journal_entry is not None else None,
+            reviewed_spread_ids=spread_ids,
         )
 
     def preview_spread(
@@ -502,16 +631,23 @@ class BullPutStrategyService:
             updated_at=now,
         )
         spread = self.spreads.create_spread(spread)
+        entry_long_leg = self._with_top_of_book(preview.candidate.long_put, mode=request.mode)
+        entry_short_leg = self._with_top_of_book(preview.candidate.short_put, mode=request.mode)
+        long_entry_limit = self._entry_long_limit_price(
+            long_leg=entry_long_leg,
+            short_leg=entry_short_leg,
+            width=preview.candidate.width,
+        )
 
         long_entry_order = self.order_service.submit_order(
             self._build_leg_order_request(
                 external_account_id=request.external_account_id,
-                leg=preview.candidate.long_put,
+                leg=entry_long_leg,
                 side=OrderSide.BUY,
                 quantity=spread.contracts,
                 mode=request.mode,
                 order_type=OrderType.LIMIT,
-                limit_price=preview.candidate.long_put.ask,
+                limit_price=long_entry_limit,
                 remark=request.remark,
             )
         )
@@ -545,12 +681,12 @@ class BullPutStrategyService:
             short_entry_order = self.order_service.submit_order(
                 self._build_leg_order_request(
                     external_account_id=request.external_account_id,
-                    leg=preview.candidate.short_put,
+                    leg=entry_short_leg,
                     side=OrderSide.SELL,
                     quantity=spread.contracts,
                     mode=request.mode,
                     order_type=OrderType.LIMIT,
-                    limit_price=preview.candidate.short_put.bid,
+                    limit_price=entry_short_leg.bid,
                     remark=request.remark,
                 )
             )
@@ -887,6 +1023,55 @@ class BullPutStrategyService:
             return "Automatic bull put scan already ran for this account today."
         return None
 
+    def _review_not_due_reason(
+        self,
+        *,
+        state: BullPutStrategyRuntimeState,
+        closed_spreads: list[BullPutSpread],
+        as_of: datetime,
+    ) -> str | None:
+        strategy = self.settings.bull_put_strategy
+        if not strategy.enabled:
+            return "Bull put spread strategy is disabled by configuration."
+        if not strategy.auto_review_enabled:
+            return "Automatic bull put review is disabled by configuration."
+        if not closed_spreads:
+            return "Bull put review is waiting for the first closed spread."
+
+        if state.last_review_at is None:
+            if len(closed_spreads) >= strategy.review_min_closed_spreads:
+                return None
+            oldest_close = min(
+                spread.closed_at for spread in closed_spreads if spread.closed_at is not None
+            )
+            if oldest_close is None:
+                return "Bull put review is waiting for the first closed spread."
+            if (as_of - oldest_close).days >= strategy.review_interval_days:
+                return None
+            return "Bull put review is not due yet."
+
+        closed_since_last_review = [
+            spread
+            for spread in closed_spreads
+            if spread.closed_at is not None and spread.closed_at > state.last_review_at
+        ]
+        if len(closed_since_last_review) >= strategy.review_min_closed_spreads:
+            return None
+        if (as_of - state.last_review_at).days >= strategy.review_interval_days:
+            return None
+        return "Bull put review is not due yet."
+
+    def _list_closed_spreads(self, *, external_account_id: str) -> list[BullPutSpread]:
+        spreads = self.spreads.list_spreads(
+            external_account_id=external_account_id,
+            status=SpreadStatus.CLOSED,
+        )
+        return sorted(
+            [spread for spread in spreads if spread.closed_at is not None],
+            key=lambda spread: spread.closed_at or spread.updated_at,
+            reverse=True,
+        )
+
     def _record_opened_spread(
         self,
         spread: BullPutSpread,
@@ -924,6 +1109,12 @@ class BullPutStrategyService:
         realized_pnl = result.estimated_pnl
         if realized_pnl is None:
             realized_pnl = self._realized_pnl_from_orders(spread)
+        spread = self._persist_closed_spread_metrics(
+            spread=spread,
+            realized_pnl=realized_pnl,
+            evaluated_at=result.evaluated_at,
+        )
+        result.spread = spread
         runtime_state = self._update_runtime_state(
             runtime_state,
             daily_realized_pnl=runtime_state.daily_realized_pnl + (realized_pnl or Decimal("0")),
@@ -937,6 +1128,15 @@ class BullPutStrategyService:
             last_scan_result=runtime_state.last_scan_result,
             last_skip_reason=None,
         )
+        if self.settings.bull_put_strategy.auto_review_enabled:
+            try:
+                self.run_review(
+                    external_account_id=spread.external_account_id,
+                    mode=spread.mode,
+                    as_of=result.evaluated_at,
+                )
+            except Exception:
+                logger.exception("Bull put review generation failed after spread close %s", spread.id)
 
     def _log_spread_entry_open(
         self,
@@ -983,6 +1183,115 @@ class BullPutStrategyService:
             context=f"bull put entry failure {spread.id}",
         )
         self._mark_spread_journal_flag(spread, "entry_failure_logged_at")
+
+    def _build_review_recommendation(
+        self,
+        *,
+        count: int,
+        total_realized_pnl: Decimal,
+        take_profit_rate: Decimal | None,
+        stop_loss_rate: Decimal | None,
+    ) -> tuple[str, str, str | None, str | None, str | None, str | None]:
+        strategy = self.settings.bull_put_strategy
+        if count < strategy.review_min_spreads_for_suggestion:
+            return (
+                "no_change",
+                "Recent closed bull put spreads do not justify a parameter change yet.",
+                None,
+                None,
+                None,
+                None,
+            )
+
+        if (
+            stop_loss_rate is not None
+            and stop_loss_rate >= Decimal("0.35")
+            and total_realized_pnl < 0
+        ):
+            suggested_delta = max(
+                strategy.short_delta_min,
+                strategy.short_delta_target - strategy.review_delta_step,
+            )
+            summary = (
+                f"Stop-loss exits were elevated over the last {count} closed spreads. "
+                f"Suggest tightening short delta target from {strategy.short_delta_target:.2f} to {suggested_delta:.2f}."
+            )
+            return (
+                "suggested",
+                summary,
+                summary,
+                "short_delta_target",
+                f"{strategy.short_delta_target:.2f}",
+                f"{suggested_delta:.2f}",
+            )
+
+        if (
+            take_profit_rate is not None
+            and take_profit_rate >= Decimal("0.75")
+            and total_realized_pnl > 0
+        ):
+            suggested_credit = strategy.min_mid_credit + strategy.review_credit_step
+            summary = (
+                f"Take-profit exits dominated the last {count} closed spreads. "
+                f"Suggest raising minimum mid credit from {strategy.min_mid_credit:.2f} to {suggested_credit:.2f}."
+            )
+            return (
+                "suggested",
+                summary,
+                summary,
+                "min_mid_credit",
+                f"{strategy.min_mid_credit:.2f}",
+                f"{suggested_credit:.2f}",
+            )
+
+        return (
+            "no_change",
+            "Recent closed bull put spreads do not justify a parameter change.",
+            None,
+            None,
+            None,
+            None,
+        )
+
+    def _create_strategy_review_entry(
+        self,
+        *,
+        external_account_id: str,
+        reviewed_metrics: list[tuple[BullPutSpread, Decimal]],
+        evaluated_at: datetime,
+        review_status: str,
+        summary: str,
+        recommendation: str | None,
+    ):
+        primary_symbol = self._primary_review_symbol(reviewed_metrics)
+        notes = (
+            f"Bull put review at {evaluated_at.isoformat()} considered {len(reviewed_metrics)} closed spreads. "
+            f"{summary}"
+        )
+        if recommendation is not None:
+            notes = f"{notes} Recommendation: {recommendation}"
+        try:
+            return self.journal_service.create_entry(
+                CreateJournalEntryRequest(
+                    external_account_id=external_account_id,
+                    symbol=primary_symbol,
+                    entry_type=JournalEntryType.REVIEW,
+                    title="Bull put strategy review",
+                    notes=notes,
+                    tags=["strategy", "bull-put", "review", review_status, "paper"],
+                )
+            )
+        except Exception:
+            logger.exception("Bull put strategy review journal write failed for %s", external_account_id)
+            return None
+
+    def _primary_review_symbol(self, reviewed_metrics: list[tuple[BullPutSpread, Decimal]]) -> str:
+        if not reviewed_metrics:
+            return self.settings.bull_put_strategy.symbols[0]
+        counts: dict[str, int] = {}
+        for spread, _ in reviewed_metrics:
+            counts[spread.underlying_symbol] = counts.get(spread.underlying_symbol, 0) + 1
+        return max(counts.items(), key=lambda item: item[1])[0]
 
     def _log_spread_close(
         self,
@@ -1060,6 +1369,45 @@ class BullPutStrategyService:
             return None
         exit_debit = short_exit_price - long_exit_price
         return (spread.entry_net_credit - exit_debit) * Decimal(spread.contracts) * Decimal("100")
+
+    def _resolved_realized_pnl(self, spread: BullPutSpread) -> Decimal | None:
+        raw_payload = spread.raw_payload or {}
+        close_meta = raw_payload.get("close") or {}
+        if close_meta.get("realized_pnl") is not None:
+            return Decimal(str(close_meta["realized_pnl"]))
+        if spread.entry_net_credit is None:
+            return None
+        short_exit_order = self._get_local_order_if_present(spread.short_exit_order_id)
+        long_exit_order = self._get_local_order_if_present(spread.long_exit_order_id)
+        short_exit_price = self._effective_fill_price(short_exit_order)
+        long_exit_price = self._effective_fill_price(long_exit_order)
+        if short_exit_price is None or long_exit_price is None:
+            return None
+        exit_debit = short_exit_price - long_exit_price
+        return (spread.entry_net_credit - exit_debit) * Decimal(spread.contracts) * Decimal("100")
+
+    def _persist_closed_spread_metrics(
+        self,
+        *,
+        spread: BullPutSpread,
+        realized_pnl: Decimal | None,
+        evaluated_at: datetime,
+    ) -> BullPutSpread:
+        raw_payload = dict(spread.raw_payload or {})
+        close_meta = dict(raw_payload.get("close") or {})
+        close_meta.update(
+            {
+                "evaluated_at": evaluated_at.isoformat(),
+                "exit_reason": spread.exit_reason,
+                "realized_pnl": str(realized_pnl) if realized_pnl is not None else None,
+            }
+        )
+        raw_payload["close"] = close_meta
+        return self._update_spread(
+            spread,
+            raw_payload=raw_payload,
+            updated_at=datetime.now(timezone.utc),
+        )
 
     def _normalize_paused_symbols(self, symbols: list[str]) -> list[str]:
         normalized: list[str] = []
@@ -1200,8 +1548,18 @@ class BullPutStrategyService:
         current = order
         if self._is_terminal(current) or self._is_filled(current):
             return current
-        time.sleep(0)
-        return self.order_service.refresh_order(current.id)
+        strategy = self.settings.bull_put_strategy
+        deadline = time.monotonic() + strategy.entry_fill_timeout_seconds
+        first_refresh = True
+        while True:
+            if not first_refresh and strategy.entry_fill_poll_interval_seconds > 0:
+                time.sleep(strategy.entry_fill_poll_interval_seconds)
+            first_refresh = False
+            current = self.order_service.refresh_order(current.id)
+            if self._is_terminal(current) or self._is_filled(current):
+                return current
+            if time.monotonic() >= deadline:
+                return current
 
     def _cancel_if_working(self, order: Order) -> Order | None:
         if order.status not in {
@@ -1366,6 +1724,11 @@ class BullPutStrategyService:
             return None
         return self.order_service.refresh_order(order_id)
 
+    def _get_local_order_if_present(self, order_id: str | None) -> Order | None:
+        if order_id is None:
+            return None
+        return self.order_service.get_order(order_id)
+
     def _update_spread(self, spread: BullPutSpread, **updates) -> BullPutSpread:
         next_spread = spread.model_copy(update=updates)
         return self.spreads.update_spread(next_spread)
@@ -1514,6 +1877,25 @@ class BullPutStrategyService:
         if quote.ask <= Decimal("0"):
             return False
         return quote.ask > quote.bid
+
+    def _entry_long_limit_price(
+        self,
+        *,
+        long_leg: OptionMarketSnapshot,
+        short_leg: OptionMarketSnapshot,
+        width: Decimal,
+    ) -> Decimal | None:
+        if long_leg.ask is None:
+            return None
+        strategy = self.settings.bull_put_strategy
+        buffered_price = long_leg.ask + strategy.entry_long_limit_buffer
+        if short_leg.bid is None:
+            return buffered_price
+        min_credit_floor = width * strategy.min_conservative_credit_per_width_ratio
+        max_price_for_credit = short_leg.bid - min_credit_floor
+        if max_price_for_credit <= long_leg.ask:
+            return long_leg.ask
+        return min(buffered_price, max_price_for_credit)
 
     @staticmethod
     def _mid_price(quote: OptionMarketSnapshot) -> Decimal | None:

@@ -475,6 +475,17 @@ def render_dashboard() -> HTMLResponse:
                                   </span>
                                   <span>Run Scan</span>
                                 </button>
+                                <button id="run-strategy-review" class="icon-button" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M4 5h16v14H4z"/>
+                                      <path d="M8 9h8"/>
+                                      <path d="M8 13h6"/>
+                                      <path d="M8 17h5"/>
+                                    </svg>
+                                  </span>
+                                  <span>Run Review</span>
+                                </button>
                               </div>
                             </div>
                           </form>
@@ -495,6 +506,15 @@ def render_dashboard() -> HTMLResponse:
                               </div>
                               <div id="strategy-journal-feed" class="strategy-note-body empty">
                                 No bull put strategy notes for this account yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Review</span>
+                                <h3>Latest Review</h3>
+                              </div>
+                              <div id="strategy-review-card" class="strategy-note-body empty">
+                                No bull put strategy review has been generated yet.
                               </div>
                             </article>
                           </div>

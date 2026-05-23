@@ -10,6 +10,7 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
 )
@@ -246,6 +247,51 @@ def test_run_bull_put_runtime_scan_returns_scan_result() -> None:
     body = response.json()
     assert body["executed"] is True
     assert body["executed_spread"]["id"] == "spread-1"
+
+
+def test_run_bull_put_runtime_review_returns_review_result() -> None:
+    service = Mock()
+    runtime_state = BullPutStrategyRuntimeState(
+        id="runtime-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        last_review_at=datetime(2026, 6, 22, 14, 45, tzinfo=timezone.utc),
+        last_review_status="suggested",
+        last_review_summary="Suggest tightening short delta target from 0.22 to 0.20.",
+        created_at=datetime(2026, 5, 23, 14, 40, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 22, 14, 46, tzinfo=timezone.utc),
+    )
+    service.run_review.return_value = BullPutStrategyReviewResult(
+        strategy_state=runtime_state,
+        evaluated_at=datetime(2026, 6, 22, 14, 45, tzinfo=timezone.utc),
+        review_status="suggested",
+        closed_spreads_considered=20,
+        lookback_days=30,
+        net_realized_pnl=Decimal("-420.00"),
+        take_profit_rate=Decimal("0.25"),
+        stop_loss_rate=Decimal("0.40"),
+        recommendation="Suggest tightening short delta target from 0.22 to 0.20.",
+        parameter_name="short_delta_target",
+        current_value="0.22",
+        suggested_value="0.20",
+        journal_entry_id="journal-1",
+        reviewed_spread_ids=["spread-1"],
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/runtime/LBPT10087357/review",
+            params={"mode": "paper", "force": "true"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review_status"] == "suggested"
+    assert body["parameter_name"] == "short_delta_target"
+    assert body["journal_entry_id"] == "journal-1"
 
 
 def test_monitor_bull_put_strategy_returns_monitor_result() -> None:

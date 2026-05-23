@@ -14,6 +14,7 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     ExecuteBullPutSpreadRequest,
@@ -141,6 +142,30 @@ def run_bull_put_runtime_scan(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeIntegrationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/bull-put/runtime/{external_account_id}/review", response_model=BullPutStrategyReviewResult)
+def run_bull_put_runtime_review(
+    external_account_id: str,
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    force: bool = Query(default=False, description="Run even if the periodic review is not due yet."),
+    as_of: datetime | None = Query(
+        default=None,
+        description="Optional UTC timestamp for deterministic review checks, e.g. 2026-06-22T15:00:00Z",
+    ),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> BullPutStrategyReviewResult:
+    try:
+        return service.run_review(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=as_of,
+            force=force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/bull-put/execute", response_model=BullPutSpread, status_code=201)

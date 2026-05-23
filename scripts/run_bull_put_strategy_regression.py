@@ -292,6 +292,9 @@ class FakeOrderService:
     def refresh_order(self, order_id: str) -> Order:
         return self.orders[order_id]
 
+    def get_order(self, order_id: str) -> Order | None:
+        return self.orders.get(order_id)
+
     def cancel_order(self, order_id: str) -> Order:
         order = self.orders[order_id].model_copy(update={"status": OrderStatus.CANCELED})
         self.orders[order_id] = order
@@ -371,6 +374,22 @@ def main() -> None:
             scan_result.executed_spread.id,
             as_of=datetime(2026, 5, 23, 15, 5, tzinfo=timezone.utc),
         )
+        for index in range(1, 20):
+            seeded_spread = monitor_result.spread.model_copy(
+                update={
+                    "id": f"seed-closed-{index}",
+                    "closed_at": datetime(2026, 5, 23, 15, 5, tzinfo=timezone.utc) - timedelta(days=index),
+                    "updated_at": datetime(2026, 5, 23, 15, 5, tzinfo=timezone.utc) - timedelta(days=index),
+                    "raw_payload": {},
+                }
+            )
+            spreads.update_spread(seeded_spread)
+        review_result = service.run_review(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            as_of=datetime(2026, 5, 23, 16, 5, tzinfo=timezone.utc),
+            force=True,
+        )
 
         payload = {
             "checks": {
@@ -379,7 +398,8 @@ def main() -> None:
                 "monitor_closed": monitor_result.spread.status == SpreadStatus.CLOSED,
                 "daily_entry_count": scan_result.strategy_state.daily_entry_count == 1,
                 "runtime_realized_pnl": runtime_states.state is not None and runtime_states.state.daily_realized_pnl == Decimal("80.00"),
-                "journal_entries": len(journal_service.entries) >= 2,
+                "journal_entries": len(journal_service.entries) >= 3,
+                "review_generated": review_result.review_status == "suggested",
             },
             "scan": {
                 "runtime_result": scan_result.strategy_state.last_scan_result,
@@ -391,6 +411,11 @@ def main() -> None:
                 "exit_reason": monitor_result.exit_reason,
                 "estimated_pnl": str(monitor_result.estimated_pnl),
             },
+            "review": {
+                "status": review_result.review_status,
+                "parameter_name": review_result.parameter_name,
+                "suggested_value": review_result.suggested_value,
+            },
             "journal_titles": [entry.title for entry in journal_service.entries],
         }
         report = build_report(
@@ -398,7 +423,7 @@ def main() -> None:
             workflow="bull-put-paper-regression",
             status="passed",
             mode="paper",
-            summary="Bull put scan, open, monitor, close, and journal workflow passed.",
+            summary="Bull put scan, open, monitor, close, review, and journal workflow passed.",
             target="BullPutStrategyService",
             payload=payload,
         )

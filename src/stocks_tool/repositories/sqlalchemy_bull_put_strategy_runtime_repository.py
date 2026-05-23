@@ -80,6 +80,9 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
         record.last_skip_reason = state.last_skip_reason
         record.last_action_at = state.last_action_at
         record.last_action = state.last_action
+        record.last_review_at = state.last_review_at
+        record.last_review_status = state.last_review_status
+        record.last_review_summary = state.last_review_summary
         record.last_error = state.last_error
 
     @staticmethod
@@ -102,6 +105,9 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
             last_skip_reason=record.last_skip_reason,
             last_action_at=record.last_action_at,
             last_action=record.last_action,
+            last_review_at=record.last_review_at,
+            last_review_status=record.last_review_status,
+            last_review_summary=record.last_review_summary,
             last_error=record.last_error,
             created_at=record.created_at,
             updated_at=record.updated_at,
