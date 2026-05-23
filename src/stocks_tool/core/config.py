@@ -34,9 +34,22 @@ class BullPutSpreadStrategySettings(BaseModel):
     min_credit_per_width_ratio: Decimal = Field(default=Decimal("0.18"), gt=0)
     min_conservative_credit_per_width_ratio: Decimal = Field(default=Decimal("0.10"), gt=0)
     min_mid_credit: Decimal = Field(default=Decimal("0.20"), gt=0)
+    entry_session_start_hour_et: int = Field(default=9, ge=0, le=23)
+    entry_session_start_minute_et: int = Field(default=30, ge=0, le=59)
+    entry_session_end_hour_et: int = Field(default=16, ge=0, le=23)
+    entry_session_end_minute_et: int = Field(default=0, ge=0, le=59)
     entry_long_limit_buffer: Decimal = Field(default=Decimal("0.10"), ge=0)
     entry_fill_timeout_seconds: int = Field(default=45, ge=0)
     entry_fill_poll_interval_seconds: int = Field(default=5, ge=0)
+    entry_reprice_increment: Decimal = Field(default=Decimal("0.05"), gt=0)
+    entry_reprice_max_steps: int = Field(default=2, ge=0)
+    pre_open_proxy_spy_symbol: str = "SPY.US"
+    pre_open_proxy_qqq_symbol: str = "QQQ.US"
+    pre_open_proxy_semis_symbol: str = "SOXX.US"
+    pre_open_proxy_oil_symbol: str = "USO.US"
+    pre_open_proxy_rates_symbol: str = "TLT.US"
+    pre_open_put_min_dte: int = Field(default=3, ge=0)
+    pre_open_put_max_dte: int = Field(default=10, ge=1)
     contracts_per_trade: int = Field(default=1, ge=1)
     per_trade_max_account_risk_pct: Decimal = Field(default=Decimal("0.01"), gt=0)
     architecture_max_account_risk_pct: Decimal = Field(default=Decimal("0.02"), gt=0)
@@ -53,11 +66,18 @@ class BullPutSpreadStrategySettings(BaseModel):
     def validate_thresholds(self) -> "BullPutSpreadStrategySettings":
         if self.min_dte > self.max_dte:
             raise ValueError("Bull put spread min_dte must be less than or equal to max_dte.")
+        if (self.entry_session_end_hour_et, self.entry_session_end_minute_et) <= (
+            self.entry_session_start_hour_et,
+            self.entry_session_start_minute_et,
+        ):
+            raise ValueError("Bull put spread entry session end must be after the entry session start.")
         if (self.scan_window_end_hour_et, self.scan_window_end_minute_et) < (
             self.scan_window_start_hour_et,
             self.scan_window_start_minute_et,
         ):
             raise ValueError("Bull put spread scan window end must be after the scan window start.")
+        if self.pre_open_put_min_dte > self.pre_open_put_max_dte:
+            raise ValueError("Bull put pre-open put min_dte must be less than or equal to max_dte.")
         if self.short_delta_min > self.short_delta_target:
             raise ValueError("Bull put spread short_delta_min cannot exceed short_delta_target.")
         if self.short_delta_target > self.short_delta_max:

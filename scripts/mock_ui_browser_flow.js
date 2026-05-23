@@ -14,16 +14,24 @@ async function main() {
   let journalPanelText = "";
   let strategySkipText = "";
   let strategyReviewText = "";
+  let preOpenAssessmentText = "";
 
   try {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
     await page.waitForSelector("#account-select");
     await page.waitForSelector("#spreads-body tr");
+    await expectText(page.locator("body"), "Pre-open Risk Board");
+    await expectText(page.locator("body"), "Risk Proxies");
+    await expectText(page.locator("body"), "QQQ / SPY Put Check");
     await expectText(page.locator("body"), "Bull Put Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Bull Put Spreads");
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
+    await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
+    await expectText(page.locator("#preopen-signals"), "Nasdaq 100 ETF");
+    await expectText(page.locator("#preopen-puts"), "QQQ260530P498000.US");
+    preOpenAssessmentText = await page.locator("#preopen-assessment-card").innerText();
 
     await clickRowButton(page, "#spreads-body tr", "QQQ.US", "Monitor");
     await page.waitForFunction(
@@ -109,6 +117,10 @@ async function main() {
     process.stdout.write(
       JSON.stringify(
         {
+          preOpen: {
+            rendered: preOpenAssessmentText.includes("QQQ cleaner than SPY"),
+            summary: preOpenAssessmentText,
+          },
           spread: {
             monitorTriggered:
               summary.statusBanner.includes("canceled") || summary.spreadTable.toLowerCase().includes("closed"),

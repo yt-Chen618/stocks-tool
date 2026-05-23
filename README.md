@@ -91,6 +91,7 @@ Then open:
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
+- `GET /strategies/pre-open-risk`
 - `GET /strategies/bull-put/spreads`
 - `GET /strategies/bull-put/spreads/{spread_id}`
 - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
@@ -132,7 +133,9 @@ The bull put spread workflow is currently paper-only:
 - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
 - trend filter: price above `20 DMA`, `20 DMA > 50 DMA`, not more than `0.5%` below prior close, and not more than `2%` below the open
 - risk model: conservative credit and per-trade account risk cap are enforced before the spread is marked eligible
+- entry session gate: new spread entries only execute during regular U.S. options hours (`09:30-16:00 ET`)
 - entry workflow: preview the candidate, buy the protective long put first, then sell the short put
+- repricing ladder: long-leg entry now starts at the current ask and can step higher by the configured increment; short-leg entry starts at bid and can reprice lower before the spread is abandoned and the hedge is rolled back
 - exit monitor: manual or scripted `monitor` calls evaluate `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
 - close workflow: buy back the short put first, then flatten the long put; if the long-leg close does not fill, the spread remains `exit_pending_long`
 - scheduler: the existing background reconciliation loop now checks the bull put entry window once per loop and also monitors open or exit-pending bull put spreads on the configured monitor interval
@@ -141,7 +144,7 @@ The bull put spread workflow is currently paper-only:
 - persistence: spread lifecycle, order ids, entry credit, and risk summary are stored in `bull_put_spreads`
 - runtime state: daily entry count, daily realized PnL, last scan result, last skip reason, last review summary, last action, and paused symbols are stored in `bull_put_strategy_runtime`
 - journaling: the strategy now writes entry, close, scan-skip, and parameter-review notes into the existing journal workflow
-- dashboard: the `/` workbench now shows bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
+- dashboard: the `/` workbench now shows a pre-open risk board for QQQ / SPY downside checks, bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 
 ## Regression scripts
 
@@ -158,7 +161,7 @@ Available workflows:
 
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
-- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
+- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the pre-open risk board, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 
 Both scripts now emit the same JSON envelope shape:

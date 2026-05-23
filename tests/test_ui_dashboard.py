@@ -13,6 +13,9 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Orders Sync" in response.text
     assert "Holdings Overview" in response.text
     assert "Current Holdings" in response.text
+    assert "Pre-open Risk Board" in response.text
+    assert "Risk Proxies" in response.text
+    assert "QQQ / SPY Put Check" in response.text
     assert "Order Ticket" in response.text
     assert "Selected Order" in response.text
     assert "Execution Summary" in response.text

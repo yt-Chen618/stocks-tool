@@ -35,11 +35,14 @@ from stocks_tool.domain.models import (
     BullPutStrategyScanRunResult,
     CreateOrderRequest,
     CreateJournalEntryRequest,
+    DirectionalPutSnapshot,
     ExecuteBullPutSpreadRequest,
     HistoricalPriceBar,
     OptionMarketSnapshot,
     OptionContractRef,
     Order,
+    PreOpenDownsideAssessment,
+    PreOpenProxySignal,
     UpdateBullPutStrategyRuntimeRequest,
 )
 from stocks_tool.ports.repository import (
@@ -374,6 +377,104 @@ class BullPutStrategyService:
             reviewed_spread_ids=spread_ids,
         )
 
+    def get_pre_open_downside_assessment(
+        self,
+        *,
+        as_of: datetime | None = None,
+    ) -> PreOpenDownsideAssessment:
+        evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        session = self._market_session_label(evaluated_at)
+        signal_specs = [
+            ("spy", "S&P 500 ETF", self.settings.bull_put_strategy.pre_open_proxy_spy_symbol),
+            ("qqq", "Nasdaq 100 ETF", self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol),
+            ("semis", "Semiconductor Proxy", self.settings.bull_put_strategy.pre_open_proxy_semis_symbol),
+            ("oil", "Oil Proxy", self.settings.bull_put_strategy.pre_open_proxy_oil_symbol),
+            ("rates", "Rates Proxy", self.settings.bull_put_strategy.pre_open_proxy_rates_symbol),
+        ]
+
+        signals: list[PreOpenProxySignal] = []
+        signal_by_key: dict[str, PreOpenProxySignal] = {}
+        for key, label, symbol in signal_specs:
+            quote = self.longbridge_adapter.get_quote(symbol=symbol, mode=ExecutionMode.PAPER)
+            signal = self._build_pre_open_signal(
+                key=key,
+                label=label,
+                quote=quote,
+                session=session,
+            )
+            signals.append(signal)
+            signal_by_key[key] = signal
+
+        score = 0
+        reasons: list[str] = []
+        spy_change = signal_by_key["spy"].change_pct
+        qqq_change = signal_by_key["qqq"].change_pct
+        semis_change = signal_by_key["semis"].change_pct
+        oil_change = signal_by_key["oil"].change_pct
+        rates_change = signal_by_key["rates"].change_pct
+
+        if qqq_change <= Decimal("-0.60"):
+            score += 2
+            reasons.append("QQQ is trading meaningfully below its reference level.")
+        if spy_change <= Decimal("-0.45"):
+            score += 1
+            reasons.append("SPY is leaning lower before the regular session.")
+        if semis_change <= Decimal("-0.90"):
+            score += 2
+            reasons.append("Semiconductor leadership is weakening faster than the broad market.")
+        if oil_change >= Decimal("1.25"):
+            score += 1
+            reasons.append("Oil proxy strength points to fresh inflation and geopolitical pressure.")
+        if rates_change <= Decimal("-0.60"):
+            score += 1
+            reasons.append("Long-duration Treasuries are slipping, which implies higher yield pressure.")
+        if (qqq_change - spy_change) <= Decimal("-0.30"):
+            score += 1
+            reasons.append("QQQ is underperforming SPY, which tilts downside risk toward tech.")
+
+        if score >= 5:
+            regime = "broad_downside_risk"
+            plain_put_view = "reasonable"
+            summary = "Multiple macro and tech proxies are aligned for a weaker U.S. open."
+        elif score >= 3:
+            regime = "selective_downside_risk"
+            plain_put_view = "selective"
+            summary = "Downside risk is building, but the setup is not broad-based enough to assume a full risk-off open."
+        else:
+            regime = "mixed_to_firm"
+            plain_put_view = "not_favored"
+            summary = "The proxy set is mixed, so plain downside puts do not have a strong pre-open edge."
+
+        preferred_vehicle = None
+        if score >= 3:
+            preferred_vehicle = "QQQ" if semis_change <= spy_change or qqq_change < spy_change else "SPY"
+        if not reasons:
+            reasons.append("No broad bearish proxy cluster is present right now.")
+
+        put_snapshots = self._build_directional_put_snapshots(
+            evaluated_at=evaluated_at,
+            spy_signal=signal_by_key["spy"],
+            qqq_signal=signal_by_key["qqq"],
+        )
+
+        return PreOpenDownsideAssessment(
+            analyzed_at=evaluated_at,
+            session=session,
+            market_open=session == "regular",
+            minutes_to_regular_open=self._minutes_to_regular_open(evaluated_at, session),
+            downside_score=score,
+            regime=regime,
+            plain_put_view=plain_put_view,
+            preferred_vehicle=preferred_vehicle,
+            summary=summary,
+            reasons=reasons,
+            signals=signals,
+            put_snapshots=put_snapshots,
+        )
+
     def preview_spread(
         self,
         *,
@@ -593,6 +694,9 @@ class BullPutStrategyService:
                 else "Bull put spread preview did not produce an eligible candidate."
             )
             raise ValueError(failure_reason)
+        session_reason = self._entry_session_gate_reason(preview.scanned_at)
+        if session_reason is not None:
+            raise ValueError(session_reason)
 
         runtime_state = self._prepare_runtime_state(
             external_account_id=request.external_account_id,
@@ -633,32 +737,26 @@ class BullPutStrategyService:
         spread = self.spreads.create_spread(spread)
         entry_long_leg = self._with_top_of_book(preview.candidate.long_put, mode=request.mode)
         entry_short_leg = self._with_top_of_book(preview.candidate.short_put, mode=request.mode)
-        long_entry_limit = self._entry_long_limit_price(
+        long_entry_cap = self._entry_long_limit_price(
             long_leg=entry_long_leg,
             short_leg=entry_short_leg,
             width=preview.candidate.width,
         )
-
-        long_entry_order = self.order_service.submit_order(
-            self._build_leg_order_request(
-                external_account_id=request.external_account_id,
-                leg=entry_long_leg,
-                side=OrderSide.BUY,
-                quantity=spread.contracts,
-                mode=request.mode,
-                order_type=OrderType.LIMIT,
-                limit_price=long_entry_limit,
-                remark=request.remark,
-            )
+        spread, long_entry_order = self._submit_entry_leg_with_repricing(
+            spread=spread,
+            external_account_id=request.external_account_id,
+            leg=entry_long_leg,
+            side=OrderSide.BUY,
+            quantity=spread.contracts,
+            mode=request.mode,
+            remark=request.remark,
+            price_ladder=self._entry_long_price_ladder(
+                ask_price=entry_long_leg.ask,
+                capped_price=long_entry_cap,
+            ),
+            order_id_field="long_entry_order_id",
         )
-        spread = self._update_spread(
-            spread,
-            long_entry_order_id=long_entry_order.id,
-            updated_at=datetime.now(timezone.utc),
-        )
-        long_entry_order = self._await_terminal_or_fill(long_entry_order)
         if not self._is_filled(long_entry_order):
-            self._cancel_if_working(long_entry_order)
             failed = self._update_spread(
                 spread,
                 status=SpreadStatus.ENTRY_FAILED,
@@ -678,31 +776,26 @@ class BullPutStrategyService:
         )
 
         try:
-            short_entry_order = self.order_service.submit_order(
-                self._build_leg_order_request(
-                    external_account_id=request.external_account_id,
-                    leg=entry_short_leg,
-                    side=OrderSide.SELL,
-                    quantity=spread.contracts,
-                    mode=request.mode,
-                    order_type=OrderType.LIMIT,
-                    limit_price=entry_short_leg.bid,
-                    remark=request.remark,
-                )
+            spread, short_entry_order = self._submit_entry_leg_with_repricing(
+                spread=spread,
+                external_account_id=request.external_account_id,
+                leg=entry_short_leg,
+                side=OrderSide.SELL,
+                quantity=spread.contracts,
+                mode=request.mode,
+                remark=request.remark,
+                price_ladder=self._entry_short_price_ladder(
+                    bid_price=entry_short_leg.bid,
+                    filled_long_price=self._effective_fill_price(long_entry_order),
+                    width=preview.candidate.width,
+                ),
+                order_id_field="short_entry_order_id",
             )
         except Exception:
             rolled_back = self._rollback_long_leg(spread, reason="short_entry_submit_failed")
             self._log_spread_entry_failure(rolled_back, reason="short_entry_submit_failed")
             return rolled_back
-
-        spread = self._update_spread(
-            spread,
-            short_entry_order_id=short_entry_order.id,
-            updated_at=datetime.now(timezone.utc),
-        )
-        short_entry_order = self._await_terminal_or_fill(short_entry_order)
         if not self._is_filled(short_entry_order):
-            self._cancel_if_working(short_entry_order)
             rolled_back = self._rollback_long_leg(spread, reason="short_entry_unfilled")
             self._log_spread_entry_failure(rolled_back, reason="short_entry_unfilled")
             return rolled_back
@@ -1021,6 +1114,18 @@ class BullPutStrategyService:
             return None
         if state.last_scan_at.astimezone(self.new_york).date() == local_time.date():
             return "Automatic bull put scan already ran for this account today."
+        return None
+
+    def _entry_session_gate_reason(self, as_of: datetime) -> str | None:
+        local_time = as_of.astimezone(self.new_york)
+        if local_time.weekday() >= 5:
+            return "Bull put entries only execute during the regular U.S. options week."
+        strategy = self.settings.bull_put_strategy
+        session_minutes = (local_time.hour * 60) + local_time.minute
+        start_minutes = (strategy.entry_session_start_hour_et * 60) + strategy.entry_session_start_minute_et
+        end_minutes = (strategy.entry_session_end_hour_et * 60) + strategy.entry_session_end_minute_et
+        if session_minutes < start_minutes or session_minutes >= end_minutes:
+            return "Bull put entries only execute during regular U.S. options hours (09:30-16:00 ET)."
         return None
 
     def _review_not_due_reason(
@@ -1435,6 +1540,157 @@ class BullPutStrategyService:
     def _session_date(self, as_of: datetime) -> date:
         return as_of.astimezone(self.new_york).date()
 
+    def _market_session_label(self, as_of: datetime) -> str:
+        local_time = as_of.astimezone(self.new_york)
+        if local_time.weekday() >= 5:
+            return "weekend"
+        session_minutes = (local_time.hour * 60) + local_time.minute
+        if session_minutes < 570:
+            return "premarket"
+        if session_minutes < 960:
+            return "regular"
+        return "postmarket"
+
+    def _minutes_to_regular_open(self, as_of: datetime, session: str) -> int | None:
+        if session != "premarket":
+            return None
+        local_time = as_of.astimezone(self.new_york)
+        open_minutes = (9 * 60) + 30
+        session_minutes = (local_time.hour * 60) + local_time.minute
+        return max(open_minutes - session_minutes, 0)
+
+    def _build_pre_open_signal(
+        self,
+        *,
+        key: str,
+        label: str,
+        quote: SecurityQuoteSnapshot,
+        session: str,
+    ) -> PreOpenProxySignal:
+        session_price = self._quote_session_price(quote=quote, session=session)
+        reference_price = quote.prev_close
+        change_pct = Decimal("0")
+        if reference_price not in {Decimal("0"), None}:
+            change_pct = ((session_price - reference_price) / reference_price) * Decimal("100")
+        signal = "neutral"
+        note = None
+        if key == "oil":
+            if change_pct >= Decimal("1.25"):
+                signal = "bearish"
+                note = "Higher oil tends to pressure inflation expectations."
+            elif change_pct <= Decimal("-1.25"):
+                signal = "supportive"
+                note = "Lower oil tends to relieve inflation pressure."
+        elif key == "rates":
+            if change_pct <= Decimal("-0.60"):
+                signal = "bearish"
+                note = "Long Treasuries lower implies higher yield pressure."
+            elif change_pct >= Decimal("0.60"):
+                signal = "supportive"
+                note = "Long Treasuries firmer implies some rate relief."
+        else:
+            if change_pct <= Decimal("-0.60"):
+                signal = "bearish"
+            elif change_pct >= Decimal("0.60"):
+                signal = "supportive"
+
+        return PreOpenProxySignal(
+            key=key,
+            label=label,
+            symbol=quote.symbol,
+            session_price=session_price,
+            reference_price=reference_price,
+            change_pct=change_pct.quantize(Decimal("0.01")),
+            signal=signal,
+            note=note,
+        )
+
+    def _quote_session_price(self, *, quote: SecurityQuoteSnapshot, session: str) -> Decimal:
+        if session == "premarket" and quote.pre_market_quote is not None:
+            return quote.pre_market_quote.last_done
+        if session == "postmarket" and quote.post_market_quote is not None:
+            return quote.post_market_quote.last_done
+        return quote.last_done
+
+    def _build_directional_put_snapshots(
+        self,
+        *,
+        evaluated_at: datetime,
+        spy_signal: PreOpenProxySignal,
+        qqq_signal: PreOpenProxySignal,
+    ) -> list[DirectionalPutSnapshot]:
+        snapshots: list[DirectionalPutSnapshot] = []
+        for signal in (spy_signal, qqq_signal):
+            snapshot = self._nearest_directional_put_snapshot(
+                symbol=signal.symbol,
+                underlying_price=signal.session_price,
+                evaluated_at=evaluated_at,
+            )
+            if snapshot is not None:
+                snapshots.append(snapshot)
+        return snapshots
+
+    def _nearest_directional_put_snapshot(
+        self,
+        *,
+        symbol: str,
+        underlying_price: Decimal,
+        evaluated_at: datetime,
+    ) -> DirectionalPutSnapshot | None:
+        expiry_dates = self.longbridge_adapter.list_option_expiry_dates(
+            symbol=symbol,
+            mode=ExecutionMode.PAPER,
+        )
+        expiry_date = self._select_pre_open_put_expiration(expiry_dates, evaluated_at)
+        if expiry_date is None:
+            return None
+        chain = self.longbridge_adapter.list_option_chain(
+            symbol=symbol,
+            expiry_date=expiry_date,
+            mode=ExecutionMode.PAPER,
+        )
+        put_symbols = [entry.put_symbol for entry in chain if entry.standard and entry.put_symbol]
+        if not put_symbols:
+            return None
+        put_quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=put_symbols,
+            mode=ExecutionMode.PAPER,
+        )
+        if not put_quotes:
+            return None
+        selected = min(
+            put_quotes,
+            key=lambda quote: (abs(quote.strike - underlying_price), quote.expiration_date),
+        )
+        selected = self._with_top_of_book(selected, mode=ExecutionMode.PAPER)
+        return DirectionalPutSnapshot(
+            underlying_symbol=symbol,
+            expiration_date=selected.expiration_date,
+            days_to_expiration=self._days_to_expiration(selected.expiration_date, evaluated_at),
+            strike=selected.strike,
+            put_symbol=selected.symbol,
+            bid=selected.bid,
+            ask=selected.ask,
+            delta=selected.delta,
+            implied_volatility=selected.implied_volatility,
+        )
+
+    def _select_pre_open_put_expiration(
+        self,
+        expiry_dates: list[date],
+        evaluated_at: datetime,
+    ) -> date | None:
+        strategy = self.settings.bull_put_strategy
+        evaluated_date = evaluated_at.astimezone(self.new_york).date()
+        candidates = [
+            expiry_date
+            for expiry_date in expiry_dates
+            if strategy.pre_open_put_min_dte <= (expiry_date - evaluated_date).days <= strategy.pre_open_put_max_dte
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda expiry_date: (expiry_date - evaluated_date).days)
+
     def _safe_create_journal_entry(self, request: CreateJournalEntryRequest, *, context: str) -> None:
         try:
             self.journal_service.create_entry(request)
@@ -1519,6 +1775,50 @@ class BullPutStrategyService:
             ),
             remark=remark,
         )
+
+    def _submit_entry_leg_with_repricing(
+        self,
+        *,
+        spread: BullPutSpread,
+        external_account_id: str,
+        leg: OptionMarketSnapshot,
+        side: OrderSide,
+        quantity: int,
+        mode: ExecutionMode,
+        remark: str | None,
+        price_ladder: list[Decimal | None],
+        order_id_field: str,
+    ) -> tuple[BullPutSpread, Order]:
+        if not price_ladder:
+            raise ValueError(f"No valid repricing ladder was available for {leg.symbol}.")
+        last_order: Order | None = None
+        for limit_price in price_ladder:
+            submitted = self.order_service.submit_order(
+                self._build_leg_order_request(
+                    external_account_id=external_account_id,
+                    leg=leg,
+                    side=side,
+                    quantity=quantity,
+                    mode=mode,
+                    order_type=OrderType.LIMIT,
+                    limit_price=limit_price,
+                    remark=remark,
+                )
+            )
+            spread = self._update_spread(
+                spread,
+                **{
+                    order_id_field: submitted.id,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+            current = self._await_terminal_or_fill(submitted)
+            if self._is_filled(current):
+                return spread, current
+            last_order = self._cancel_if_working(current) or current
+        if last_order is None:
+            raise ValueError(f"Unable to submit any repricing attempt for {leg.symbol}.")
+        return spread, last_order
 
     def _build_spread_leg_snapshot(
         self,
@@ -1896,6 +2196,68 @@ class BullPutStrategyService:
         if max_price_for_credit <= long_leg.ask:
             return long_leg.ask
         return min(buffered_price, max_price_for_credit)
+
+    def _entry_long_price_ladder(
+        self,
+        *,
+        ask_price: Decimal | None,
+        capped_price: Decimal | None,
+    ) -> list[Decimal | None]:
+        if ask_price is None:
+            return []
+        limit_cap = capped_price or ask_price
+        return self._price_ladder(
+            start=ask_price,
+            end=max(ask_price, limit_cap),
+            ascending=True,
+        )
+
+    def _entry_short_price_ladder(
+        self,
+        *,
+        bid_price: Decimal | None,
+        filled_long_price: Decimal | None,
+        width: Decimal,
+    ) -> list[Decimal | None]:
+        if bid_price is None:
+            return []
+        floor = bid_price
+        if filled_long_price is not None:
+            min_credit_floor = width * self.settings.bull_put_strategy.min_conservative_credit_per_width_ratio
+            floor = max(floor - (self.settings.bull_put_strategy.entry_reprice_increment * self.settings.bull_put_strategy.entry_reprice_max_steps), filled_long_price + min_credit_floor)
+        return self._price_ladder(
+            start=bid_price,
+            end=min(bid_price, floor),
+            ascending=False,
+        )
+
+    def _price_ladder(
+        self,
+        *,
+        start: Decimal,
+        end: Decimal,
+        ascending: bool,
+    ) -> list[Decimal]:
+        strategy = self.settings.bull_put_strategy
+        step = strategy.entry_reprice_increment
+        prices: list[Decimal] = [self._quantize_price(start)]
+        current = start
+        for _ in range(strategy.entry_reprice_max_steps):
+            candidate = current + step if ascending else current - step
+            if ascending and candidate >= end:
+                break
+            if not ascending and candidate <= end:
+                break
+            prices.append(self._quantize_price(candidate))
+            current = candidate
+        end_price = self._quantize_price(end)
+        if prices[-1] != end_price:
+            prices.append(end_price)
+        return prices
+
+    @staticmethod
+    def _quantize_price(value: Decimal) -> Decimal:
+        return value.quantize(Decimal("0.01"))
 
     @staticmethod
     def _mid_price(quote: OptionMarketSnapshot) -> Decimal | None:

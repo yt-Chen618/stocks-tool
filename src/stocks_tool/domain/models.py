@@ -590,6 +590,44 @@ class BullPutStrategyReviewResult(BaseModel):
     reason: str | None = None
 
 
+class PreOpenProxySignal(BaseModel):
+    key: str
+    label: str
+    symbol: str
+    session_price: Decimal
+    reference_price: Decimal
+    change_pct: Decimal
+    signal: str
+    note: str | None = None
+
+
+class DirectionalPutSnapshot(BaseModel):
+    underlying_symbol: str
+    expiration_date: date
+    days_to_expiration: int
+    strike: Decimal
+    put_symbol: str
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    delta: Decimal | None = None
+    implied_volatility: Decimal | None = None
+
+
+class PreOpenDownsideAssessment(BaseModel):
+    analyzed_at: datetime
+    session: str
+    market_open: bool
+    minutes_to_regular_open: int | None = None
+    downside_score: int
+    regime: str
+    plain_put_view: str
+    preferred_vehicle: str | None = None
+    summary: str
+    reasons: list[str] = Field(default_factory=list)
+    signals: list[PreOpenProxySignal] = Field(default_factory=list)
+    put_snapshots: list[DirectionalPutSnapshot] = Field(default_factory=list)
+
+
 class BrokerAccountSyncResult(BaseModel):
     broker: BrokerName
     mode: ExecutionMode

@@ -87,6 +87,98 @@ class MockDashboardState:
             "post_market_quote": None,
             "overnight_quote": None,
         }
+        self.pre_open_assessment = {
+            "analyzed_at": "2026-05-23T12:20:00Z",
+            "session": "premarket",
+            "market_open": False,
+            "minutes_to_regular_open": 70,
+            "downside_score": 5,
+            "regime": "broad_downside_risk",
+            "plain_put_view": "reasonable",
+            "preferred_vehicle": "QQQ",
+            "summary": "Premarket tape is weak enough to justify a cautious long-put bias, with QQQ cleaner than SPY.",
+            "reasons": [
+                "QQQ is weaker than the previous close by more than 0.60%.",
+                "Semiconductor beta is leading the weakness, which leans toward QQQ over SPY.",
+                "Oil is firmer enough to keep inflation pressure on the tape.",
+            ],
+            "signals": [
+                {
+                    "key": "spy",
+                    "label": "S&P 500 ETF",
+                    "symbol": "SPY.US",
+                    "session_price": "576.4000",
+                    "reference_price": "579.3000",
+                    "change_pct": "-0.5006",
+                    "signal": "bearish",
+                    "note": "Broad index proxy is trading below the previous close.",
+                },
+                {
+                    "key": "qqq",
+                    "label": "Nasdaq 100 ETF",
+                    "symbol": "QQQ.US",
+                    "session_price": "497.1000",
+                    "reference_price": "501.1000",
+                    "change_pct": "-0.7982",
+                    "signal": "bearish",
+                    "note": "QQQ is underperforming SPY in the pre-open tape.",
+                },
+                {
+                    "key": "semis",
+                    "label": "Semiconductor Proxy",
+                    "symbol": "SOXX.US",
+                    "session_price": "240.2000",
+                    "reference_price": "243.1000",
+                    "change_pct": "-1.1930",
+                    "signal": "bearish",
+                    "note": "Semi proxy is weaker than both SPY and QQQ.",
+                },
+                {
+                    "key": "oil",
+                    "label": "Oil Proxy",
+                    "symbol": "USO.US",
+                    "session_price": "81.4500",
+                    "reference_price": "80.1000",
+                    "change_pct": "1.6854",
+                    "signal": "bearish",
+                    "note": "Higher oil tends to pressure inflation expectations.",
+                },
+                {
+                    "key": "rates",
+                    "label": "Rates Proxy",
+                    "symbol": "TLT.US",
+                    "session_price": "88.6000",
+                    "reference_price": "89.0000",
+                    "change_pct": "-0.4494",
+                    "signal": "neutral",
+                    "note": "Rates are not moving enough to add a separate warning.",
+                },
+            ],
+            "put_snapshots": [
+                {
+                    "underlying_symbol": "SPY.US",
+                    "expiration_date": "2026-05-30",
+                    "days_to_expiration": 7,
+                    "strike": "578.0000",
+                    "put_symbol": "SPY260530P578000.US",
+                    "bid": "2.1800",
+                    "ask": "2.3200",
+                    "delta": "-0.2700",
+                    "implied_volatility": "0.2120",
+                },
+                {
+                    "underlying_symbol": "QQQ.US",
+                    "expiration_date": "2026-05-30",
+                    "days_to_expiration": 7,
+                    "strike": "498.0000",
+                    "put_symbol": "QQQ260530P498000.US",
+                    "bid": "3.6400",
+                    "ask": "3.8400",
+                    "delta": "-0.2900",
+                    "implied_volatility": "0.2480",
+                },
+            ],
+        }
         self.snapshot = {
             "id": "mock-snapshot-1",
             "broker_account_id": "mock-account-1",
@@ -673,6 +765,10 @@ def create_app() -> FastAPI:
         data["symbol"] = symbol.upper()
         data["mode"] = mode
         return data
+
+    @app.get("/strategies/pre-open-risk")
+    def pre_open_risk() -> dict[str, Any]:
+        return deepcopy(state.pre_open_assessment)
 
     @app.get("/account-snapshots")
     def account_snapshots(external_account_id: str = Query(...)) -> list[dict[str, Any]]:

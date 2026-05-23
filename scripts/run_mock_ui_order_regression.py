@@ -163,6 +163,9 @@ def main() -> None:
             dashboard.raise_for_status()
             assert "Holdings Overview" in dashboard.text
             assert "Current Holdings" in dashboard.text
+            assert "Pre-open Risk Board" in dashboard.text
+            assert "Risk Proxies" in dashboard.text
+            assert "QQQ / SPY Put Check" in dashboard.text
             assert "Bull Put Strategy" in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
@@ -184,6 +187,10 @@ def main() -> None:
                 "journal-entry-form",
                 "selected-order-journal",
                 "strategy-runtime-strip",
+                "preopen-summary-strip",
+                "preopen-assessment-card",
+                "loadPreOpenAssessment()",
+                "renderPreOpenAssessment(",
                 "strategy-controls-form",
                 "runStrategyScan()",
                 "runStrategyReview()",
@@ -204,6 +211,9 @@ def main() -> None:
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
             assert accounts[0]["auto_reconcile_enabled"] is True
+            pre_open = require_ok(client.get("/strategies/pre-open-risk"))
+            assert pre_open["preferred_vehicle"] == "QQQ"
+            assert pre_open["plain_put_view"] == "reasonable"
 
             snapshots = require_ok(client.get("/account-snapshots", params={"external_account_id": "LBPT10087357"}))
             assert snapshots[0]["positions"][0]["symbol"] == "MOCK.US"
@@ -237,8 +247,10 @@ def main() -> None:
                     payload={
                         "checks": {
                             "dashboard_shell": True,
+                            "pre_open_shell": True,
                             "bull_put_shell": True,
                             "execution_summary_shell": True,
+                            "pre_open_seed": True,
                             "app_js_markers": True,
                             "account_seed": True,
                             "snapshot_seed": True,

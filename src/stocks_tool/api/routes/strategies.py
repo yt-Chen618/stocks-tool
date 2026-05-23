@@ -14,6 +14,7 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    PreOpenDownsideAssessment,
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
@@ -22,6 +23,28 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+
+@router.get("/pre-open-risk", response_model=PreOpenDownsideAssessment)
+def get_pre_open_risk_assessment(
+    as_of: datetime | None = Query(
+        default=None,
+        description="Optional UTC timestamp for deterministic pre-open checks, e.g. 2026-05-26T12:35:00Z",
+    ),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> PreOpenDownsideAssessment:
+    try:
+        return service.get_pre_open_downside_assessment(as_of=as_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/bull-put/preview", response_model=BullPutSpreadScanResult)

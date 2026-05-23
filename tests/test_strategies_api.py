@@ -10,6 +10,9 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
+    DirectionalPutSnapshot,
+    PreOpenDownsideAssessment,
+    PreOpenProxySignal,
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
@@ -59,6 +62,58 @@ def test_preview_bull_put_strategy_returns_scan_result() -> None:
     assert body["moving_average_20"] == "450.50"
     request = service.preview_spread.call_args.kwargs
     assert request["external_account_id"] == "LBPT10087357"
+
+
+def test_pre_open_risk_route_returns_assessment() -> None:
+    service = Mock()
+    service.get_pre_open_downside_assessment.return_value = PreOpenDownsideAssessment(
+        analyzed_at=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+        session="premarket",
+        market_open=False,
+        minutes_to_regular_open=55,
+        downside_score=5,
+        regime="broad_downside_risk",
+        plain_put_view="reasonable",
+        preferred_vehicle="QQQ",
+        summary="Multiple macro and tech proxies are aligned for a weaker U.S. open.",
+        reasons=["QQQ is trading meaningfully below its reference level."],
+        signals=[
+            PreOpenProxySignal(
+                key="qqq",
+                label="Nasdaq 100 ETF",
+                symbol="QQQ.US",
+                session_price=Decimal("710.00"),
+                reference_price=Decimal("717.00"),
+                change_pct=Decimal("-0.98"),
+                signal="bearish",
+            )
+        ],
+        put_snapshots=[
+            DirectionalPutSnapshot(
+                underlying_symbol="QQQ.US",
+                expiration_date=datetime(2026, 5, 29, tzinfo=timezone.utc).date(),
+                days_to_expiration=3,
+                strike=Decimal("710"),
+                put_symbol="QQQ260529P710000.US",
+                bid=Decimal("6.10"),
+                ask=Decimal("6.30"),
+                delta=Decimal("-0.41"),
+                implied_volatility=Decimal("0.24"),
+            )
+        ],
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.get("/strategies/pre-open-risk")
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["preferred_vehicle"] == "QQQ"
+    assert body["plain_put_view"] == "reasonable"
+    assert body["signals"][0]["symbol"] == "QQQ.US"
 
 
 def test_preview_bull_put_strategy_maps_lookup_error_to_404() -> None:

@@ -65,10 +65,11 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
   - `POST /strategies/bull-put/execute`
   - `POST /strategies/bull-put/spreads/{spread_id}/refresh`
-  - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
-  - `POST /strategies/bull-put/runtime/{external_account_id}`
-  - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
-  - `POST /strategies/bull-put/runtime/{external_account_id}/review`
+- `POST /strategies/bull-put/spreads/{spread_id}/monitor`
+- `POST /strategies/bull-put/runtime/{external_account_id}`
+- `POST /strategies/bull-put/runtime/{external_account_id}/scan`
+- `POST /strategies/bull-put/runtime/{external_account_id}/review`
+- `GET /strategies/pre-open-risk`
 - Current scope:
   - paper-only
   - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
@@ -81,7 +82,9 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - short leg selection uses `abs(delta) 0.18-0.28` plus `open_interest >= 200`
   - trend filter uses price vs `20 DMA / 50 DMA`, prior-close drift, and gap-down guard
   - risk preview computes spread credit, max profit, max loss, break-even, and account risk percentage
+  - new entries are hard-gated to regular U.S. options hours: `09:30-16:00 ET`
   - execution buys the long put first, then sells the short put
+  - long-leg and short-leg entries now use a bounded repricing ladder instead of a single static limit price
   - automatic entry scan can now run once per trading day during the configured `10:45-11:15 ET` window
   - exit monitor checks `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
   - close sequencing buys back the short put first, then sells the long put
@@ -92,7 +95,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - strategy-driven journal entries are now written automatically for spread opens, spread closes, scan skips, and periodic parameter reviews
   - periodic review now generates at most one parameter suggestion at a time and never changes runtime strategy parameters automatically
 - Current limitations:
-  - the new `bull-put-real-paper` smoke script still needs to be run against a live local API session with working Longbridge connectivity to complete real-broker validation
+  - the workflow still coordinates two separate option orders rather than a broker-native combo order
+  - real Longbridge paper preview now works, but the latest execute attempts on `QQQ.US` still ended `long_entry_unfilled`, so no bull put spread has opened end to end yet
 
 ### Automatic reconciliation
 
@@ -226,6 +230,7 @@ Current dashboard capabilities:
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
+- View a pre-open risk board with macro proxies plus `QQQ / SPY` directional put checks
 - View Longbridge configuration status
 - Load quick quote
 - Submit `market`, `limit`, and `stop` paper orders
@@ -273,9 +278,11 @@ Frontend files:
 - Added bull put review state persistence through Alembic migration `20260523_0007_bull_put_strategy_review_state`.
 - Added dashboard spread-monitor visibility with bull put summary cards, latest exit action, and per-spread refresh / monitor actions.
 - Added dashboard bull put runtime cards, control form, last skip reason, latest review, and recent strategy-note feed.
+- Added `GET /strategies/pre-open-risk` plus a dashboard pre-open risk board that summarizes proxy tape weakness and short-dated `QQQ / SPY` reference puts.
+- Added regular-session entry gating and bounded repricing ladders for bull put entry legs.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
 - Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
-- Added a headless browser-driven `mock-ui` regression that exercises strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
+- Added a headless browser-driven `mock-ui` regression that now also checks the pre-open risk board, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
@@ -284,7 +291,7 @@ Frontend files:
 - Added `tests/test_journal_service.py` for order / execution linkage validation.
 - Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, exit-monitor flows, and strategy review suggestions.
 - Added `tests/test_strategies_api.py` for strategy preview, execute, monitor, and runtime-review route coverage.
-- Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, and bull put strategy sections.
+- Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
 - Latest local verification run after the bull put review and smoke additions:
 
@@ -292,14 +299,14 @@ Frontend files:
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `42 passed`
+- Result: `47 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes bull put strategy controls, skip-reason rendering, and latest-review rendering
+- Result: `passed` and now includes the pre-open risk board, bull put strategy controls, skip-reason rendering, and latest-review rendering
 - Latest bull put service-regression run:
 
 ```powershell
@@ -313,17 +320,20 @@ Frontend files:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
 ```
 
-- Result in the current assistant sandbox: `failed` because `127.0.0.1:8000` was not listening inside the sandboxed run, and sandbox-started API processes also could not reach `openapi.longbridge.com`
+- Result from the live local API session: `passed` in dry-run mode after `OPRA US Options Quotes (OpenAPI)` was enabled
+- Latest real execute attempts:
+  - selected candidate remained `QQQ.US` bull put
+  - no naked short was left behind
+  - latest spread execute ended `entry_failed` with `long_entry_unfilled`
 
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
-- The real broker-backed bull put smoke script exists, but it still needs to be executed from a live local API session with working Longbridge connectivity.
 - The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
 
 ## Recommended next steps
 
-1. Run `scripts/run_regression.py bull-put-real-paper` from a live local API session and confirm Longbridge preview or execute behavior end to end.
+1. Improve real paper bull put entry quality so the first protective long leg can fill more reliably during regular hours.
 2. Add runtime controls and strategy activity views to any future authenticated user/session layer.

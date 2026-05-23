@@ -218,6 +218,52 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
+                    <section class="band preopen-band">
+                      <div class="panel-grid preopen-grid">
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Macro</span>
+                              <h2>Pre-open Risk Board</h2>
+                            </div>
+                          </div>
+                          <div id="preopen-summary-strip" class="mini-metric-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Downside Score</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                          </div>
+                          <div id="preopen-assessment-card" class="strategy-note-body empty">
+                            Loading pre-open assessment...
+                          </div>
+                        </section>
+
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Signals</span>
+                              <h2>Risk Proxies</h2>
+                            </div>
+                          </div>
+                          <div id="preopen-signals" class="holdings-focus">
+                            <div class="holding-empty">Waiting for market proxy signals.</div>
+                          </div>
+                        </section>
+
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Options</span>
+                              <h2>QQQ / SPY Put Check</h2>
+                            </div>
+                          </div>
+                          <div id="preopen-puts" class="holdings-focus">
+                            <div class="holding-empty">Waiting for directional put snapshots.</div>
+                          </div>
+                        </section>
+                      </div>
+                    </section>
+
                     <section class="band trade-band">
                       <div class="trade-grid">
                         <section class="panel">

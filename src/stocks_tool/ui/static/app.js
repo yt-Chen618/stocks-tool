@@ -11,6 +11,7 @@ const state = {
   brokerStatus: null,
   latestSnapshot: null,
   selectedOrderId: "",
+  preOpenAssessment: null,
 };
 
 const els = {};
@@ -52,6 +53,10 @@ function bindElements() {
   els.quoteForm = document.getElementById("quote-form");
   els.quoteSymbol = document.getElementById("quote-symbol");
   els.quoteCard = document.getElementById("quote-card");
+  els.preOpenSummaryStrip = document.getElementById("preopen-summary-strip");
+  els.preOpenAssessmentCard = document.getElementById("preopen-assessment-card");
+  els.preOpenSignals = document.getElementById("preopen-signals");
+  els.preOpenPuts = document.getElementById("preopen-puts");
   els.refreshDashboard = document.getElementById("refresh-dashboard");
   els.syncAccount = document.getElementById("sync-account");
   els.syncOrders = document.getElementById("sync-orders");
@@ -236,6 +241,7 @@ async function loadDashboard() {
     renderBrokerStatus();
     await loadAccountData();
     await loadQuote();
+    await loadPreOpenAssessment();
     setStatus("Dashboard updated.", "success");
   } catch (error) {
     console.error(error);
@@ -318,6 +324,17 @@ async function loadQuote() {
     console.error(error);
     els.quoteCard.className = "quote-card";
     els.quoteCard.innerHTML = `<div class="pill error">Quote Error</div><div>${escapeHtml(error.message || "Unable to load quote.")}</div>`;
+  }
+}
+
+async function loadPreOpenAssessment() {
+  try {
+    state.preOpenAssessment = await fetchJson("/strategies/pre-open-risk");
+    renderPreOpenAssessment();
+  } catch (error) {
+    console.error(error);
+    state.preOpenAssessment = null;
+    renderPreOpenAssessment(error.message || "Unable to load pre-open assessment.");
   }
 }
 
@@ -1219,6 +1236,206 @@ function renderQuote(quote) {
   `;
 }
 
+function renderPreOpenAssessment(errorMessage = "") {
+  const assessment = state.preOpenAssessment;
+  if (!assessment) {
+    const detail = errorMessage || "Waiting for the latest macro proxy snapshot.";
+    const summaryValues = [
+      {
+        label: "Downside Score",
+        value: "--",
+        tone: "",
+        detail,
+      },
+      {
+        label: "Regime",
+        value: "--",
+        tone: "",
+        detail: "Load the pre-open board to classify market tone.",
+      },
+      {
+        label: "Plain Put View",
+        value: "--",
+        tone: "",
+        detail: "QQQ / SPY directional put bias will render here.",
+      },
+      {
+        label: "Preferred Vehicle",
+        value: "--",
+        tone: "",
+        detail: "Waiting for proxy dispersion.",
+      },
+    ];
+
+    els.preOpenSummaryStrip.innerHTML = summaryValues
+      .map(
+        (item) => `
+          <article class="mini-metric-tile">
+            <span class="metric-label">${escapeHtml(item.label)}</span>
+            <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+            <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+          </article>
+        `
+      )
+      .join("");
+
+    els.preOpenAssessmentCard.className = `strategy-note-body ${errorMessage ? "" : "empty"}`;
+    els.preOpenAssessmentCard.textContent = detail;
+    els.preOpenSignals.innerHTML = '<div class="holding-empty">Waiting for market proxy signals.</div>';
+    els.preOpenPuts.innerHTML = '<div class="holding-empty">Waiting for directional put snapshots.</div>';
+    return;
+  }
+
+  const summaryValues = [
+    {
+      label: "Downside Score",
+      value: String(assessment.downside_score),
+      tone: preOpenScoreTone(assessment.downside_score),
+      detail: assessment.reasons.length
+        ? `${assessment.reasons.length} bearish trigger${assessment.reasons.length === 1 ? "" : "s"} in play`
+        : "No major bearish trigger is active",
+    },
+    {
+      label: "Regime",
+      value: formatPreOpenLabel(assessment.regime),
+      tone: preOpenRegimeTone(assessment.regime),
+      detail: `Session: ${formatPreOpenLabel(assessment.session)}`,
+    },
+    {
+      label: "Plain Put View",
+      value: formatPreOpenLabel(assessment.plain_put_view),
+      tone: preOpenViewTone(assessment.plain_put_view),
+      detail: assessment.market_open ? "Regular U.S. session is live." : formatPreOpenTimingDetail(assessment),
+    },
+    {
+      label: "Preferred Vehicle",
+      value: assessment.preferred_vehicle || "--",
+      tone: assessment.preferred_vehicle ? "warning" : "",
+      detail: assessment.preferred_vehicle
+        ? `${assessment.preferred_vehicle} currently has the cleaner downside read.`
+        : "No clear SPY / QQQ downside edge.",
+    },
+  ];
+
+  els.preOpenSummaryStrip.innerHTML = summaryValues
+    .map(
+      (item) => `
+        <article class="mini-metric-tile">
+          <span class="metric-label">${escapeHtml(item.label)}</span>
+          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
+
+  const reasonsMarkup = assessment.reasons.length
+    ? assessment.reasons
+        .map(
+          (reason) => `
+            <article class="strategy-journal-entry">
+              <p>${escapeHtml(reason)}</p>
+            </article>
+          `
+        )
+        .join("")
+    : '<div class="strategy-note-body empty">No bearish trigger is strong enough to favor plain index puts right now.</div>';
+
+  els.preOpenAssessmentCard.className = "strategy-note-body";
+  els.preOpenAssessmentCard.innerHTML = `
+    <div class="strategy-journal-head">
+      <strong>${escapeHtml(assessment.summary)}</strong>
+      <span>${escapeHtml(formatDateTime(assessment.analyzed_at))}</span>
+    </div>
+    <p>${escapeHtml(formatPreOpenNarrative(assessment))}</p>
+    ${reasonsMarkup}
+  `;
+
+  if (!assessment.signals.length) {
+    els.preOpenSignals.innerHTML = '<div class="holding-empty">No market proxy signals are available.</div>';
+  } else {
+    els.preOpenSignals.innerHTML = assessment.signals
+      .map(
+        (signal) => `
+          <article class="holding-card">
+            <div class="holding-head">
+              <div class="symbol-block">
+                <strong>${escapeHtml(signal.label)}</strong>
+                <span>${escapeHtml(signal.symbol)}</span>
+              </div>
+              <span class="pill ${preOpenSignalTone(signal.signal)}">${escapeHtml(formatPreOpenLabel(signal.signal))}</span>
+            </div>
+            <div class="holding-stats">
+              <div>
+                <span>Session Px</span>
+                <strong>${escapeHtml(formatNumber(signal.session_price))}</strong>
+              </div>
+              <div>
+                <span>Prev Close</span>
+                <strong>${escapeHtml(formatNumber(signal.reference_price))}</strong>
+              </div>
+              <div>
+                <span>Change</span>
+                <strong>${escapeHtml(formatSignedPercentValue(signal.change_pct))}</strong>
+              </div>
+            </div>
+            <span class="mini-metric-detail">${escapeHtml(signal.note || "No extra context for this proxy move.")}</span>
+          </article>
+        `
+      )
+      .join("");
+  }
+
+  if (!assessment.put_snapshots.length) {
+    els.preOpenPuts.innerHTML = '<div class="holding-empty">No short-dated reference puts were found.</div>';
+    return;
+  }
+
+  els.preOpenPuts.innerHTML = assessment.put_snapshots
+    .map((snapshot) => {
+      const preferred =
+        assessment.preferred_vehicle && snapshot.underlying_symbol.startsWith(assessment.preferred_vehicle);
+      return `
+        <article class="holding-card">
+          <div class="holding-head">
+            <div class="symbol-block">
+              <strong>${escapeHtml(snapshot.underlying_symbol)}</strong>
+              <span>${escapeHtml(snapshot.put_symbol)}</span>
+            </div>
+            <span class="pill ${preferred ? "warning" : "neutral"}">${escapeHtml(preferred ? "Preferred" : "Reference")}</span>
+          </div>
+          <div class="holding-stats">
+            <div>
+              <span>Expiry</span>
+              <strong>${escapeHtml(formatSpreadDate(snapshot.expiration_date))}</strong>
+            </div>
+            <div>
+              <span>Strike</span>
+              <strong>${escapeHtml(formatSpreadStrike(snapshot.strike))}</strong>
+            </div>
+            <div>
+              <span>DTE</span>
+              <strong>${escapeHtml(String(snapshot.days_to_expiration))}</strong>
+            </div>
+            <div>
+              <span>Bid / Ask</span>
+              <strong>${escapeHtml(`${formatNumber(snapshot.bid)} / ${formatNumber(snapshot.ask)}`)}</strong>
+            </div>
+            <div>
+              <span>Delta</span>
+              <strong>${escapeHtml(formatSignedDecimal(snapshot.delta, 2))}</strong>
+            </div>
+            <div>
+              <span>IV</span>
+              <strong>${escapeHtml(formatImpliedVolatility(snapshot.implied_volatility))}</strong>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
 function renderSelectedOrder() {
   const order = getSelectedOrder();
   if (!order) {
@@ -1760,6 +1977,74 @@ function describeStrategyStatus(runtime) {
   };
 }
 
+function preOpenScoreTone(score) {
+  const number = toFiniteNumber(score);
+  if (number >= 5) {
+    return "error";
+  }
+  if (number >= 3) {
+    return "warning";
+  }
+  return "success";
+}
+
+function preOpenRegimeTone(regime) {
+  if (regime === "broad_downside_risk") {
+    return "error";
+  }
+  if (regime === "selective_downside_risk") {
+    return "warning";
+  }
+  return "success";
+}
+
+function preOpenViewTone(view) {
+  if (view === "reasonable") {
+    return "warning";
+  }
+  if (view === "selective") {
+    return "neutral";
+  }
+  return "success";
+}
+
+function preOpenSignalTone(signal) {
+  if (signal === "bearish") {
+    return "error";
+  }
+  if (signal === "supportive") {
+    return "success";
+  }
+  return "neutral";
+}
+
+function formatPreOpenLabel(value) {
+  return String(value || "--")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatPreOpenTimingDetail(assessment) {
+  if (assessment.market_open) {
+    return "Regular U.S. session is live.";
+  }
+  if (assessment.minutes_to_regular_open !== null && assessment.minutes_to_regular_open !== undefined) {
+    return `${assessment.minutes_to_regular_open} min to 09:30 ET regular open.`;
+  }
+  if (assessment.session === "weekend") {
+    return "U.S. equity options are closed for the weekend.";
+  }
+  return `${formatPreOpenLabel(assessment.session)} session snapshot.`;
+}
+
+function formatPreOpenNarrative(assessment) {
+  const timing = formatPreOpenTimingDetail(assessment);
+  if (!assessment.preferred_vehicle) {
+    return `${assessment.summary} ${timing}`;
+  }
+  return `${assessment.summary} ${assessment.preferred_vehicle} is the cleaner plain-put expression for now. ${timing}`;
+}
+
 function formatRuntimeScanResult(value) {
   return String(value || "--")
     .replaceAll("_", " ")
@@ -1793,6 +2078,33 @@ function formatPercent(value, base) {
   const percent = (numerator / denominator) * 100;
   const prefix = percent > 0 ? "+" : "";
   return `${prefix}${percent.toFixed(2)}% of book`;
+}
+
+function formatSignedPercentValue(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const prefix = number > 0 ? "+" : "";
+  return `${prefix}${number.toFixed(2)}%`;
+}
+
+function formatSignedDecimal(value, decimals = 2) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const prefix = number > 0 ? "+" : "";
+  return `${prefix}${number.toFixed(decimals)}`;
+}
+
+function formatImpliedVolatility(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const percent = Math.abs(number) <= 1 ? number * 100 : number;
+  return `${percent.toFixed(1)}%`;
 }
 
 function formatPositionQuantity(value) {

@@ -82,6 +82,39 @@ def build_underlying_quote(*, last_done: Decimal = Decimal("500")) -> SecurityQu
     )
 
 
+def build_market_quote(
+    *,
+    symbol: str,
+    last_done: Decimal,
+    prev_close: Decimal,
+    pre_market_last_done: Decimal | None = None,
+) -> SecurityQuoteSnapshot:
+    pre_market_quote = None
+    if pre_market_last_done is not None:
+        pre_market_quote = {
+            "last_done": pre_market_last_done,
+            "timestamp": datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+            "volume": 1000,
+            "turnover": pre_market_last_done * Decimal("1000"),
+            "high": pre_market_last_done,
+            "low": pre_market_last_done,
+            "prev_close": prev_close,
+        }
+    return SecurityQuoteSnapshot(
+        symbol=symbol,
+        last_done=last_done,
+        prev_close=prev_close,
+        open=prev_close,
+        high=max(last_done, prev_close),
+        low=min(last_done, prev_close),
+        timestamp=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+        volume=1_000_000,
+        turnover=last_done * Decimal("1000000"),
+        trade_status="Normal",
+        pre_market_quote=pre_market_quote,
+    )
+
+
 def build_bars() -> list[HistoricalPriceBar]:
     start = datetime(2026, 3, 1, tzinfo=timezone.utc)
     bars: list[HistoricalPriceBar] = []
@@ -120,6 +153,23 @@ def build_option_chain() -> list[OptionChainEntry]:
             strike=Decimal("464"),
             call_symbol="QQQ260619C464000.US",
             put_symbol="QQQ260619P464000.US",
+            standard=True,
+        ),
+    ]
+
+
+def build_spy_option_chain() -> list[OptionChainEntry]:
+    return [
+        OptionChainEntry(
+            strike=Decimal("610"),
+            call_symbol="SPY260529C610000.US",
+            put_symbol="SPY260529P610000.US",
+            standard=True,
+        ),
+        OptionChainEntry(
+            strike=Decimal("600"),
+            call_symbol="SPY260529C600000.US",
+            put_symbol="SPY260529P600000.US",
             standard=True,
         ),
     ]
@@ -200,6 +250,127 @@ def build_option_quotes() -> list[OptionMarketSnapshot]:
     ]
 
 
+def build_spy_option_quotes() -> list[OptionMarketSnapshot]:
+    timestamp = datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc)
+    return [
+        OptionMarketSnapshot(
+            symbol="SPY260529P610000.US",
+            underlying_symbol="SPY.US",
+            expiration_date=date(2026, 5, 29),
+            strike=Decimal("610"),
+            right=OptionRight.PUT,
+            last_done=Decimal("7.20"),
+            prev_close=Decimal("6.90"),
+            open=Decimal("7.10"),
+            high=Decimal("7.35"),
+            low=Decimal("6.80"),
+            timestamp=timestamp,
+            volume=5000,
+            turnover=Decimal("360000"),
+            trade_status="Normal",
+            open_interest=1200,
+            implied_volatility=Decimal("0.19"),
+            historical_volatility=Decimal("0.16"),
+            delta=Decimal("-0.44"),
+            gamma=Decimal("0.02"),
+            theta=Decimal("-0.03"),
+            vega=Decimal("0.07"),
+        ),
+        OptionMarketSnapshot(
+            symbol="SPY260529P600000.US",
+            underlying_symbol="SPY.US",
+            expiration_date=date(2026, 5, 29),
+            strike=Decimal("600"),
+            right=OptionRight.PUT,
+            last_done=Decimal("3.40"),
+            prev_close=Decimal("3.20"),
+            open=Decimal("3.30"),
+            high=Decimal("3.55"),
+            low=Decimal("3.10"),
+            timestamp=timestamp,
+            volume=4200,
+            turnover=Decimal("145000"),
+            trade_status="Normal",
+            open_interest=1500,
+            implied_volatility=Decimal("0.18"),
+            historical_volatility=Decimal("0.16"),
+            delta=Decimal("-0.27"),
+            gamma=Decimal("0.01"),
+            theta=Decimal("-0.02"),
+            vega=Decimal("0.05"),
+        ),
+    ]
+
+
+def build_qqq_shortdated_option_chain() -> list[OptionChainEntry]:
+    return [
+        OptionChainEntry(
+            strike=Decimal("498"),
+            call_symbol="QQQ260529C498000.US",
+            put_symbol="QQQ260529P498000.US",
+            standard=True,
+        ),
+        OptionChainEntry(
+            strike=Decimal("490"),
+            call_symbol="QQQ260529C490000.US",
+            put_symbol="QQQ260529P490000.US",
+            standard=True,
+        ),
+    ]
+
+
+def build_qqq_shortdated_option_quotes() -> list[OptionMarketSnapshot]:
+    timestamp = datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc)
+    return [
+        OptionMarketSnapshot(
+            symbol="QQQ260529P498000.US",
+            underlying_symbol="QQQ.US",
+            expiration_date=date(2026, 5, 29),
+            strike=Decimal("498"),
+            right=OptionRight.PUT,
+            last_done=Decimal("3.70"),
+            prev_close=Decimal("3.40"),
+            open=Decimal("3.55"),
+            high=Decimal("3.90"),
+            low=Decimal("3.30"),
+            timestamp=timestamp,
+            volume=6500,
+            turnover=Decimal("480000"),
+            trade_status="Normal",
+            open_interest=2200,
+            implied_volatility=Decimal("0.25"),
+            historical_volatility=Decimal("0.20"),
+            delta=Decimal("-0.29"),
+            gamma=Decimal("0.02"),
+            theta=Decimal("-0.03"),
+            vega=Decimal("0.08"),
+        ),
+        OptionMarketSnapshot(
+            symbol="QQQ260529P490000.US",
+            underlying_symbol="QQQ.US",
+            expiration_date=date(2026, 5, 29),
+            strike=Decimal("490"),
+            right=OptionRight.PUT,
+            last_done=Decimal("1.90"),
+            prev_close=Decimal("1.75"),
+            open=Decimal("1.82"),
+            high=Decimal("2.05"),
+            low=Decimal("1.70"),
+            timestamp=timestamp,
+            volume=5400,
+            turnover=Decimal("215000"),
+            trade_status="Normal",
+            open_interest=2500,
+            implied_volatility=Decimal("0.23"),
+            historical_volatility=Decimal("0.19"),
+            delta=Decimal("-0.18"),
+            gamma=Decimal("0.01"),
+            theta=Decimal("-0.02"),
+            vega=Decimal("0.05"),
+        ),
+    ]
+
+
 def build_open_spread(
     *,
     status: SpreadStatus = SpreadStatus.OPEN,
@@ -269,18 +440,76 @@ def build_service(
     broker_accounts.get_by_external_account_id.return_value = build_broker_account()
     account_snapshots.list_account_snapshots.return_value = [account_snapshot or build_account_snapshot()]
     adapter.get_quote.return_value = underlying_quote or build_underlying_quote()
+    adapter.get_quote.side_effect = lambda symbol, mode: {
+        "QQQ.US": underlying_quote or build_underlying_quote(),
+        "SMH.US": build_market_quote(
+            symbol="SMH.US",
+            last_done=Decimal("500"),
+            prev_close=Decimal("498"),
+        ),
+        "SOXL.US": build_market_quote(
+            symbol="SOXL.US",
+            last_done=Decimal("500"),
+            prev_close=Decimal("498"),
+        ),
+        "EWY.US": build_market_quote(
+            symbol="EWY.US",
+            last_done=Decimal("500"),
+            prev_close=Decimal("498"),
+        ),
+        "SPY.US": build_market_quote(
+            symbol="SPY.US",
+            last_done=Decimal("612"),
+            prev_close=Decimal("615"),
+            pre_market_last_done=Decimal("611.5"),
+        ),
+        "SOXX.US": build_market_quote(
+            symbol="SOXX.US",
+            last_done=Decimal("245"),
+            prev_close=Decimal("249"),
+            pre_market_last_done=Decimal("244.5"),
+        ),
+        "USO.US": build_market_quote(
+            symbol="USO.US",
+            last_done=Decimal("84"),
+            prev_close=Decimal("82.5"),
+            pre_market_last_done=Decimal("84.2"),
+        ),
+        "TLT.US": build_market_quote(
+            symbol="TLT.US",
+            last_done=Decimal("92"),
+            prev_close=Decimal("92.8"),
+            pre_market_last_done=Decimal("91.9"),
+        ),
+    }[symbol]
     adapter.get_recent_daily_bars.return_value = build_bars()
-    adapter.list_option_expiry_dates.return_value = [
-        date(2026, 6, 12),
-        date(2026, 6, 19),
-        date(2026, 7, 17),
-    ]
-    adapter.list_option_chain.return_value = build_option_chain()
-    adapter.get_option_market_snapshots.return_value = build_option_quotes()
+    adapter.list_option_expiry_dates.side_effect = lambda symbol, mode: (
+        [date(2026, 5, 29), date(2026, 6, 5), date(2026, 6, 12)]
+        if symbol == "SPY.US"
+        else [date(2026, 5, 29), date(2026, 6, 12), date(2026, 6, 19), date(2026, 7, 17)]
+    )
+    adapter.list_option_chain.side_effect = lambda symbol, expiry_date, mode: (
+        build_spy_option_chain()
+        if symbol == "SPY.US"
+        else build_qqq_shortdated_option_chain()
+        if symbol == "QQQ.US" and expiry_date == date(2026, 5, 29)
+        else build_option_chain()
+    )
+    adapter.get_option_market_snapshots.side_effect = lambda symbols, mode: (
+        build_spy_option_quotes()
+        if symbols and str(symbols[0]).startswith("SPY")
+        else build_qqq_shortdated_option_quotes()
+        if symbols and str(symbols[0]).startswith("QQQ260529")
+        else build_option_quotes()
+    )
     adapter.get_best_bid_ask.side_effect = lambda symbol, mode: {
         "QQQ260619P470000.US": (Decimal("2.40"), Decimal("2.60")),
         "QQQ260619P467000.US": (Decimal("1.00"), Decimal("1.10")),
         "QQQ260619P464000.US": (Decimal("0.60"), Decimal("0.70")),
+        "QQQ260529P498000.US": (Decimal("3.64"), Decimal("3.84")),
+        "QQQ260529P490000.US": (Decimal("1.88"), Decimal("2.00")),
+        "SPY260529P610000.US": (Decimal("7.10"), Decimal("7.30")),
+        "SPY260529P600000.US": (Decimal("3.30"), Decimal("3.45")),
     }[symbol]
     spreads.list_spreads.return_value = []
     spreads.create_spread.side_effect = lambda spread: spread
@@ -496,41 +725,53 @@ def test_execute_spread_uses_buffered_long_limit_and_waits_for_fill() -> None:
         )
 
     assert spread.status == SpreadStatus.OPEN
-    assert order_service.submit_order.call_args_list[0].args[0].limit_price == Decimal("1.20")
+    assert order_service.submit_order.call_args_list[0].args[0].limit_price == Decimal("1.10")
     assert order_service.refresh_order.call_count == 2
 
 
-def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
+def test_execute_spread_reprices_long_leg_before_fill() -> None:
     service, _, _, order_service = build_service()
+    service.settings.bull_put_strategy.entry_fill_timeout_seconds = 0
+    service.settings.bull_put_strategy.entry_reprice_increment = Decimal("0.05")
+    service.settings.bull_put_strategy.entry_reprice_max_steps = 2
     order_service.submit_order.side_effect = [
         build_option_order(
-            order_id="long-entry",
+            order_id="long-entry-1",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.10"),
+        ),
+        build_option_order(
+            order_id="long-entry-2",
             symbol="QQQ260619P467000.US",
             side=OrderSide.BUY,
             status=OrderStatus.FILLED,
-            limit_price=Decimal("1.10"),
+            limit_price=Decimal("1.15"),
         ),
         build_option_order(
             order_id="short-entry",
             symbol="QQQ260619P470000.US",
             side=OrderSide.SELL,
-            status=OrderStatus.SUBMITTED,
+            status=OrderStatus.FILLED,
             limit_price=Decimal("2.40"),
         ),
-        build_option_order(
-            order_id="long-exit",
-            symbol="QQQ260619P467000.US",
-            side=OrderSide.SELL,
-            status=OrderStatus.FILLED,
-            limit_price=None,
-        ),
     ]
-    order_service.refresh_order.return_value = build_option_order(
-        order_id="short-entry",
-        symbol="QQQ260619P470000.US",
-        side=OrderSide.SELL,
+    order_service.refresh_order.side_effect = [
+        build_option_order(
+            order_id="long-entry-1",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.10"),
+        )
+    ]
+    order_service.cancel_order.return_value = build_option_order(
+        order_id="long-entry-1",
+        symbol="QQQ260619P467000.US",
+        side=OrderSide.BUY,
         status=OrderStatus.CANCELED,
-        limit_price=Decimal("2.40"),
+        limit_price=Decimal("1.10"),
     )
 
     spread = service.execute_spread(
@@ -542,8 +783,91 @@ def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
         )
     )
 
+    assert spread.status == SpreadStatus.OPEN
+    assert order_service.submit_order.call_args_list[0].args[0].limit_price == Decimal("1.10")
+    assert order_service.submit_order.call_args_list[1].args[0].limit_price == Decimal("1.15")
+
+
+def test_execute_spread_blocks_outside_regular_session() -> None:
+    service, _, _, _ = build_service()
+
+    try:
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=datetime(2026, 5, 22, 12, 15, tzinfo=timezone.utc),
+            )
+        )
+    except ValueError as exc:
+        assert str(exc) == "Bull put entries only execute during regular U.S. options hours (09:30-16:00 ET)."
+    else:
+        raise AssertionError("Expected execute_spread to block outside regular U.S. options hours.")
+
+
+def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
+    service, _, _, order_service = build_service()
+    service.settings.bull_put_strategy.entry_fill_timeout_seconds = 0
+    service.settings.bull_put_strategy.entry_reprice_max_steps = 1
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+        ),
+        build_option_order(
+            order_id="short-entry-1",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("2.40"),
+        ),
+        build_option_order(
+            order_id="short-entry-2",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("2.35"),
+        ),
+        build_option_order(
+            order_id="long-exit",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=None,
+        ),
+    ]
+    order_service.refresh_order.side_effect = [
+        build_option_order(
+            order_id="short-entry-1",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.CANCELED,
+            limit_price=Decimal("2.40"),
+        ),
+        build_option_order(
+            order_id="short-entry-2",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.CANCELED,
+            limit_price=Decimal("2.35"),
+        ),
+    ]
+
+    spread = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
     assert spread.status == SpreadStatus.ROLLED_BACK
-    assert spread.short_entry_order_id == "short-entry"
+    assert spread.short_entry_order_id == "short-entry-2"
     assert spread.long_exit_order_id == "long-exit"
     assert spread.exit_reason == "short_entry_unfilled"
 
@@ -706,6 +1030,21 @@ def test_run_review_returns_not_due_before_threshold() -> None:
 
     assert result.review_status == "not_due"
     assert result.reason == "Bull put review is not due yet."
+
+
+def test_pre_open_downside_assessment_prefers_qqq_puts_when_semis_and_qqq_are_weaker() -> None:
+    service, _, _, _ = build_service()
+
+    result = service.get_pre_open_downside_assessment(
+        as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+    )
+
+    assert result.session == "premarket"
+    assert result.market_open is False
+    assert result.downside_score >= 5
+    assert result.preferred_vehicle == "QQQ"
+    assert result.plain_put_view == "reasonable"
+    assert {snapshot.underlying_symbol for snapshot in result.put_snapshots} == {"SPY.US", "QQQ.US"}
 
 
 def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:
