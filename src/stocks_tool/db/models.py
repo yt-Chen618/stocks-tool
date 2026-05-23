@@ -280,6 +280,54 @@ class ExecutionRecord(TimestampMixin, Base):
     order: Mapped[OrderRecord] = relationship(back_populates="executions")
 
 
+class BullPutSpreadRecord(TimestampMixin, Base):
+    __tablename__ = "bull_put_spreads"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    strategy_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+        default="paper_bull_put_v1",
+        server_default="paper_bull_put_v1",
+    )
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    underlying_symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    expiration_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    contracts: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    long_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    long_strike: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    short_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
+    short_strike: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    long_entry_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    short_entry_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    long_exit_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    short_exit_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    entry_long_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_short_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    entry_net_credit: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    max_profit: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    max_loss: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    break_even: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    account_risk_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    exit_reason: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+    entry_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
 class JournalEntryRecord(TimestampMixin, Base):
     __tablename__ = "journal_entries"
 

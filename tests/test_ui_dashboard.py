@@ -19,5 +19,8 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Latest Fill Snapshot" in response.text
     assert "Review Workflow" in response.text
     assert "Save Entry" in response.text
+    assert "Bull Put Monitor" in response.text
+    assert "Bull Put Spreads" in response.text
+    assert "Latest Exit Action" in response.text
     assert "Orders" in response.text
     assert "Positions" in response.text

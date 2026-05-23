@@ -4,6 +4,7 @@ from fastapi import Depends
 from sqlalchemy.orm import Session
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
@@ -15,14 +16,18 @@ from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.core.config import Settings, get_settings
 from stocks_tool.db.session import get_db_session
-from stocks_tool.ports.repository import TradePlanRepository
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
+    BullPutSpreadRepository,
     ExecutionRepository,
     JournalRepository,
     OrderRepository,
+    TradePlanRepository,
     WatchlistRepository,
+)
+from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import (
+    SQLAlchemyBullPutSpreadRepository,
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
@@ -110,6 +115,12 @@ def get_journal_repository(
     return SQLAlchemyJournalRepository(session)
 
 
+def get_bull_put_spread_repository(
+    session: Session = Depends(get_db_session),
+) -> BullPutSpreadRepository:
+    return SQLAlchemyBullPutSpreadRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -143,6 +154,26 @@ def get_order_service(
         orders=orders,
         executions=executions,
         longbridge_adapter=adapter,
+    )
+
+
+def get_bull_put_strategy_service(
+    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
+    spreads: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
+    order_service: OrderService = Depends(get_order_service),
+    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    risk_service: RiskService = Depends(get_risk_service),
+) -> BullPutStrategyService:
+    settings: Settings = get_settings()
+    return BullPutStrategyService(
+        settings=settings,
+        broker_accounts=broker_accounts,
+        account_snapshots=account_snapshots,
+        spreads=spreads,
+        order_service=order_service,
+        longbridge_adapter=adapter,
+        risk_service=risk_service,
     )
 
 

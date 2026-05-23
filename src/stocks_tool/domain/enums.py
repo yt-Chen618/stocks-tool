@@ -92,3 +92,16 @@ class TradeStructure(str, Enum):
     STOCK = "stock"
     LONG_CALL = "long_call"
     LONG_PUT = "long_put"
+    BULL_PUT_SPREAD = "bull_put_spread"
+
+
+class SpreadStatus(str, Enum):
+    ENTRY_PENDING_LONG = "entry_pending_long"
+    ENTRY_PENDING_SHORT = "entry_pending_short"
+    OPEN = "open"
+    EXIT_PENDING_SHORT = "exit_pending_short"
+    EXIT_PENDING_LONG = "exit_pending_long"
+    CLOSED = "closed"
+    ENTRY_FAILED = "entry_failed"
+    ROLLED_BACK = "rolled_back"
+    ROLLBACK_FAILED = "rollback_failed"

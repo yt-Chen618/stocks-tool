@@ -399,6 +399,65 @@ def render_dashboard() -> HTMLResponse:
                         <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
+                              <span class="section-kicker">Strategy</span>
+                              <h2>Bull Put Monitor</h2>
+                            </div>
+                          </div>
+                          <div id="spread-summary-strip" class="mini-metric-strip strategy-summary-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Active Spreads</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread data loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Exit Pending</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread data loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Latest Exit Action</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread exits recorded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Last Monitor</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first spread check.</span>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Strategy</span>
+                              <h2>Bull Put Spreads</h2>
+                            </div>
+                          </div>
+                          <div class="table-shell">
+                            <table class="data-table">
+                              <thead>
+                                <tr>
+                                  <th>Underlying</th>
+                                  <th>Expiry</th>
+                                  <th>Width</th>
+                                  <th>Status</th>
+                                  <th>Entry Credit</th>
+                                  <th>Last Monitor</th>
+                                  <th>Latest Action</th>
+                                  <th>Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody id="spreads-body">
+                                <tr><td colspan="8" class="empty-row">No bull put spreads loaded.</td></tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
                               <span class="section-kicker">Execution</span>
                               <h2>Orders</h2>
                             </div>

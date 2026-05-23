@@ -1,11 +1,17 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from stocks_tool.domain.enums import JournalEntryType, OrderStatus, ReconciliationStatus
+from stocks_tool.domain.enums import (
+    JournalEntryType,
+    OrderStatus,
+    ReconciliationStatus,
+    SpreadStatus,
+)
 from stocks_tool.domain.models import (
     AccountSnapshot,
     AddWatchlistItemRequest,
     BrokerAccount,
+    BullPutSpread,
     Execution,
     CreateWatchlistRequest,
     CreateBrokerAccountRequest,
@@ -159,4 +165,26 @@ class JournalRepository(ABC):
         trade_plan_id: str | None = None,
         entry_type: JournalEntryType | None = None,
     ) -> list[JournalEntry]:
+        raise NotImplementedError
+
+
+class BullPutSpreadRepository(ABC):
+    @abstractmethod
+    def create_spread(self, spread: BullPutSpread) -> BullPutSpread:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_spread(self, spread_id: str) -> BullPutSpread | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_spreads(
+        self,
+        external_account_id: str | None = None,
+        status: SpreadStatus | None = None,
+    ) -> list[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_spread(self, spread: BullPutSpread) -> BullPutSpread:
         raise NotImplementedError

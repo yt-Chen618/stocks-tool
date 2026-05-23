@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-05-22
+Last updated: 2026-05-23
 
 ## Project
 
@@ -26,6 +26,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `broker-accounts`
 - `account-snapshots`
 - `brokers/longbridge`
+- `strategies`
 - `executions`
 - `journals`
 - `orders`
@@ -47,16 +48,53 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /brokers/longbridge/quote?symbol=...&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
 - `POST /orders/sync/longbridge/{external_account_id}`
+- internal option-market access for:
+  - option expiry dates
+  - option chain by expiry
+  - option market snapshots with IV / OI / greeks
+  - top-of-book bid/ask lookup
+  - recent daily bars for moving-average filters
+
+### Bull put spread execution
+
+- A first-pass `paper_bull_put_v1` backend execution flow now exists.
+- Routes:
+  - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
+  - `GET /strategies/bull-put/spreads`
+  - `GET /strategies/bull-put/spreads/{spread_id}`
+  - `POST /strategies/bull-put/execute`
+  - `POST /strategies/bull-put/spreads/{spread_id}/refresh`
+  - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
+- Current scope:
+  - paper-only
+  - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
+  - entry caps: at most `2` active spreads per account, `1` active spread per symbol, and `1` active spread across the correlated `QQQ.US / SMH.US / SOXL.US` group
+  - target expiry window: `28-35 DTE`
+  - same-expiry bull put spread only
+  - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
+  - short leg selection uses `abs(delta) 0.18-0.28` plus `open_interest >= 200`
+  - trend filter uses price vs `20 DMA / 50 DMA`, prior-close drift, and gap-down guard
+  - risk preview computes spread credit, max profit, max loss, break-even, and account risk percentage
+  - execution buys the long put first, then sells the short put
+  - exit monitor checks `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
+  - close sequencing buys back the short put first, then sells the long put
+  - if the long close does not fill, the spread remains `exit_pending_long` for later cleanup
+  - entry failures are persisted locally as `entry_failed`, `rolled_back`, or `rollback_failed`
+  - spread lifecycle, linked local order ids, and entry metrics are stored in `bull_put_spreads`
+- Current limitations:
+  - no browser-level regression yet for the spread workflow
 
 ### Automatic reconciliation
 
 - A background reconciliation scheduler now starts with the FastAPI app.
 - Active Longbridge paper accounts with `auto_reconcile_enabled=true` are polled automatically.
+- The same background loop now also monitors open or exit-pending bull put spreads.
 - Default intervals:
   - scheduler poll loop: `15s`
   - account snapshot sync: `300s`
   - order sync: `300s`
   - working-order sync: `60s`
+  - bull put spread monitor: `300s`
 - Broker-account records now persist:
   - `account_sync_status`
   - `account_last_sync_attempt_at`
@@ -174,10 +212,12 @@ Current dashboard capabilities:
 - View automatic reconciliation state for the selected account
 - View account metrics
 - View holdings overview and current holdings cards
+- View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View Longbridge configuration status
 - Load quick quote
 - Submit `market`, `limit`, and `stop` paper orders
 - Refresh, manage, replace, and cancel eligible orders from the dashboard
+- Refresh and monitor bull put spreads from the dashboard
 - View selected order details and broker status transitions
 - View execution summary for the selected order
 - Save `plan`, `review`, and `note` journal entries for the selected order
@@ -204,31 +244,43 @@ Frontend files:
 - Added Alembic migration `20260522_0003_execution_ledger`.
 - Added journal persistence, `GET /journals`, `POST /journals`, and selected-order journal/review rendering.
 - Added Alembic migration `20260522_0004_journal_entries`.
+- Added `paper_bull_put_v1` strategy configuration in `Settings`.
+- Added Longbridge adapter support for option expiry dates, option chains, option market snapshots, option top-of-book lookup, and recent daily bars.
+- Added a bull put spread service with preview, `POST /strategies/bull-put/execute`, `GET /strategies/bull-put/spreads`, `POST /strategies/bull-put/spreads/{spread_id}/refresh`, and `POST /strategies/bull-put/spreads/{spread_id}/monitor`.
+- Added spread persistence through the new `bull_put_spreads` table and Alembic migration `20260522_0005_bull_put_spreads`.
+- Added two-leg paper entry coordination with long-leg-first execution and long-leg rollback when the short leg does not fill.
+- Added spread exit monitoring with take-profit / stop-loss / short-strike breach / DTE rules plus short-first close sequencing.
+- Wired the bull put exit monitor into the background reconciliation coordinator so open or exit-pending spreads are checked automatically.
+- Added account-level, per-symbol, and correlated-group entry caps for bull put spreads.
+- Added dashboard spread-monitor visibility with bull put summary cards, latest exit action, and per-spread refresh / monitor actions.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
 - Added `tests/test_executions_api.py` for execution route coverage.
 - Added `tests/test_journals_api.py` for journal route coverage.
 - Added `tests/test_journal_service.py` for order / execution linkage validation.
+- Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, and exit-monitor flows.
+- Added `tests/test_strategies_api.py` for strategy preview, execute, and monitor route coverage.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket and holdings sections.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local test run after these UI additions:
+- Latest local test run after the bull put dashboard additions:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `16 passed`
+- Result: `34 passed`
 
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
-- There is no automated browser regression yet for the cancel-confirmation or journal-submit flow.
+- There is no automated browser regression yet for the cancel-confirmation, bull put monitor, or journal-submit flow.
+- There are no per-day spread-entry caps yet.
+- The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
 
 ## Recommended next steps
 
-1. Add an automated browser regression for submit -> replace -> cancel, filled-order execution summary, and journal submit flow.
-2. Expand the execution ledger from per-order summary snapshots into broker-native per-fill records when the Longbridge adapter path is confirmed.
-3. Decide whether journal entries need edit/delete endpoints or a plan-first capture view outside the selected-order pane.
+1. Add automated browser regression for submit -> replace -> cancel, bull put monitor, filled-order execution summary, and journal submit flow.
+2. Add per-day spread-entry caps.

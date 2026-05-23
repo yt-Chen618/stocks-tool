@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
+import stocks_tool.application.services.reconciliation as reconciliation_module
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.reconciliation import ReconciliationCoordinator
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -15,12 +17,14 @@ from stocks_tool.domain.enums import (
     OrderStatus,
     OrderType,
     ReconciliationStatus,
+    SpreadStatus,
     TimeInForce,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
     BrokerOrderSnapshot,
+    BullPutSpread,
     Execution,
     PositionSnapshot,
 )
@@ -93,6 +97,30 @@ def build_remote_order() -> BrokerOrderSnapshot:
         submitted_at=submitted_at,
         updated_at=updated_at,
         raw_payload={"id": "1241940481017913344"},
+    )
+
+
+def build_open_spread(*, last_synced_at: datetime | None = None) -> BullPutSpread:
+    now = datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc)
+    return BullPutSpread(
+        id="spread-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        underlying_symbol="QQQ.US",
+        expiration_date=datetime(2026, 6, 19, tzinfo=timezone.utc).date(),
+        contracts=1,
+        width=Decimal("3"),
+        long_symbol="QQQ260619P467000.US",
+        long_strike=Decimal("467"),
+        short_symbol="QQQ260619P470000.US",
+        short_strike=Decimal("470"),
+        status=SpreadStatus.OPEN,
+        entry_net_credit=Decimal("1.30"),
+        last_synced_at=last_synced_at,
+        opened_at=now,
+        created_at=now,
+        updated_at=now,
     )
 
 
@@ -227,3 +255,157 @@ def test_sync_today_orders_marks_error_on_failure() -> None:
     second_call = broker_accounts.update_orders_sync_state.call_args_list[1]
     assert second_call.kwargs["status"] == ReconciliationStatus.ERROR
     assert second_call.kwargs["error"] == "trade bridge offline"
+
+
+def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    account_snapshots = Mock()
+    orders = Mock()
+    executions = Mock()
+    trade_plans = Mock()
+    spreads = Mock()
+    strategy_service = Mock()
+
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": datetime.now(timezone.utc),
+            "orders_last_sync_attempt_at": datetime.now(timezone.utc),
+        }
+    )
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders.list_orders.return_value = []
+    spreads.list_spreads.side_effect = [
+        [build_open_spread(last_synced_at=None)],
+        [],
+        [],
+    ]
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: account_snapshots,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: executions,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: trade_plans,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: spreads,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BullPutStrategyService",
+        lambda **kwargs: strategy_service,
+    )
+
+    settings = Settings()
+    coordinator = ReconciliationCoordinator(
+        settings=settings,
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+
+    strategy_service.monitor_spread.assert_called_once()
+    monitor_call = strategy_service.monitor_spread.call_args
+    assert monitor_call.args[0] == "spread-1"
+    assert monitor_call.kwargs["as_of"] is not None
+
+
+def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    account_snapshots = Mock()
+    orders = Mock()
+    executions = Mock()
+    trade_plans = Mock()
+    spreads = Mock()
+    strategy_service = Mock()
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders.list_orders.return_value = []
+    spreads.list_spreads.side_effect = [
+        [build_open_spread(last_synced_at=now)],
+        [],
+        [],
+    ]
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: account_snapshots,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: executions,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: trade_plans,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: spreads,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BullPutStrategyService",
+        lambda **kwargs: strategy_service,
+    )
+
+    settings = Settings()
+    coordinator = ReconciliationCoordinator(
+        settings=settings,
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+
+    strategy_service.monitor_spread.assert_not_called()

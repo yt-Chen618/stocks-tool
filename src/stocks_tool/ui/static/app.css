@@ -377,6 +377,10 @@ a {
   color: var(--danger-text);
 }
 
+.mini-metric-value.is-warning {
+  color: var(--warn-text);
+}
+
 .mini-metric-detail {
   color: var(--text-soft);
   font-size: 12px;
@@ -845,6 +849,21 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.strategy-action-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.strategy-action-cell strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.strategy-action-cell span {
+  color: var(--text-soft);
+  font-size: 12px;
 }
 
 .table-action {

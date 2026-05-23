@@ -3,6 +3,7 @@ const state = {
   selectedAccountId: "",
   watchlists: [],
   orders: [],
+  spreads: [],
   executions: [],
   journals: [],
   snapshots: [],
@@ -29,6 +30,8 @@ function bindElements() {
   els.positionsSummaryStrip = document.getElementById("positions-summary-strip");
   els.holdingsFocus = document.getElementById("holdings-focus");
   els.watchlistsBody = document.getElementById("watchlists-body");
+  els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
+  els.spreadsBody = document.getElementById("spreads-body");
   els.ordersBody = document.getElementById("orders-body");
   els.positionsBody = document.getElementById("positions-body");
   els.brokerStatus = document.getElementById("broker-status");
@@ -137,6 +140,27 @@ function wireEvents() {
     }
   });
 
+  els.spreadsBody.addEventListener("click", async (event) => {
+    const button = event.target.closest("button[data-spread-action]");
+    if (!button) {
+      return;
+    }
+
+    const { spreadAction, spreadId } = button.dataset;
+    if (!spreadAction || !spreadId) {
+      return;
+    }
+
+    if (spreadAction === "refresh") {
+      await refreshSpread(spreadId);
+      return;
+    }
+
+    if (spreadAction === "monitor") {
+      await monitorSpread(spreadId);
+    }
+  });
+
   els.selectedOrderCard.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-selected-action]");
     if (!button) {
@@ -196,6 +220,7 @@ async function loadAccountData() {
   if (!state.selectedAccountId) {
     state.snapshots = [];
     state.orders = [];
+    state.spreads = [];
     state.executions = [];
     state.journals = [];
     state.latestSnapshot = null;
@@ -203,6 +228,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderSpreads();
     renderOrders();
     renderPositions();
     renderSelectedOrder();
@@ -212,14 +238,16 @@ async function loadAccountData() {
   }
 
   try {
-    const [snapshots, orders, executions, journals] = await Promise.all([
+    const [snapshots, orders, spreads, executions, journals] = await Promise.all([
       fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
     ]);
     state.snapshots = snapshots;
     state.orders = orders;
+    state.spreads = spreads;
     state.executions = executions;
     state.journals = journals;
     state.latestSnapshot = snapshots[0] || null;
@@ -231,6 +259,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderSpreads();
     renderOrders();
     renderPositions();
     renderSelectedOrder();
@@ -358,6 +387,39 @@ async function refreshOrder(orderId) {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Order refresh failed.", "error");
+  }
+}
+
+async function refreshSpread(spreadId) {
+  const spread = state.spreads.find((item) => item.id === spreadId);
+  setStatus(`Refreshing spread ${spread?.underlying_symbol || spreadId}...`, "warning");
+  try {
+    const refreshed = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/refresh`, {
+      method: "POST",
+    });
+    await loadAccountData();
+    setStatus(`Spread ${refreshed.underlying_symbol} refreshed.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Spread refresh failed.", "error");
+  }
+}
+
+async function monitorSpread(spreadId) {
+  const spread = state.spreads.find((item) => item.id === spreadId);
+  setStatus(`Monitoring spread ${spread?.underlying_symbol || spreadId}...`, "warning");
+  try {
+    const result = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
+      method: "POST",
+    });
+    await loadAccountData();
+    const action = result.should_close
+      ? `Exit action ${formatSpreadExitReason(result.exit_reason)} evaluated for ${result.spread.underlying_symbol}.`
+      : `Spread ${result.spread.underlying_symbol} remains within thresholds.`;
+    setStatus(action, result.should_close ? "success" : "warning");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Spread monitor failed.", "error");
   }
 }
 
@@ -729,6 +791,110 @@ function renderWatchlists() {
           </div>
           <div class="watchlist-items">${items}</div>
         </section>
+      `;
+    })
+    .join("");
+}
+
+function renderSpreads() {
+  const spreads = [...state.spreads].sort(
+    (left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime()
+  );
+  const activeSpreads = spreads.filter(isActiveSpread);
+  const exitPendingSpreads = spreads.filter(isExitPendingSpread);
+  const latestActionSpread = spreads.find((spread) => spread.exit_reason) || null;
+  const lastMonitoredSpread = spreads.find((spread) => spread.last_synced_at) || null;
+
+  const summaryValues = [
+    {
+      label: "Active Spreads",
+      value: String(activeSpreads.length),
+      tone: "",
+      detail: activeSpreads.length
+        ? `${activeSpreads.filter((spread) => spread.status === "open").length} open / ${exitPendingSpreads.length} exit pending`
+        : "No active spreads",
+    },
+    {
+      label: "Exit Pending",
+      value: String(exitPendingSpreads.length),
+      tone: exitPendingSpreads.length ? "warning" : "",
+      detail: exitPendingSpreads.length
+        ? `${exitPendingSpreads.map((spread) => spread.underlying_symbol).slice(0, 3).join(", ")}`
+        : "No pending spread exits",
+    },
+    {
+      label: "Latest Exit Action",
+      value: latestActionSpread ? formatSpreadExitReason(latestActionSpread.exit_reason) : "--",
+      tone: latestActionSpread ? spreadStatusClass(latestActionSpread.status) : "",
+      detail: latestActionSpread
+        ? `${latestActionSpread.underlying_symbol} / ${formatDateTime(latestActionSpread.updated_at)}`
+        : "No exit actions recorded yet",
+    },
+    {
+      label: "Last Monitor",
+      value: lastMonitoredSpread ? formatDateTime(lastMonitoredSpread.last_synced_at) : "--",
+      tone: "",
+      detail: lastMonitoredSpread
+        ? `${lastMonitoredSpread.underlying_symbol} / ${formatSpreadStatusLabel(lastMonitoredSpread.status)}`
+        : "Waiting for first monitor run",
+    },
+  ];
+
+  els.spreadSummaryStrip.innerHTML = summaryValues
+    .map(
+      (item) => `
+        <article class="mini-metric-tile">
+          <span class="metric-label">${escapeHtml(item.label)}</span>
+          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
+
+  if (spreads.length === 0) {
+    els.spreadsBody.innerHTML = '<tr><td colspan="8" class="empty-row">No bull put spreads for this account.</td></tr>';
+    return;
+  }
+
+  els.spreadsBody.innerHTML = spreads
+    .map((spread) => {
+      const monitorable = isMonitorableSpread(spread);
+      const statusTone = spreadStatusClass(spread.status);
+      const actionText = spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--";
+      const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
+      return `
+        <tr>
+          <td>
+            <div class="symbol-cell">
+              <strong>${escapeHtml(spread.underlying_symbol)}</strong>
+              <span>${escapeHtml(legSummary)}</span>
+            </div>
+          </td>
+          <td>${escapeHtml(formatSpreadDate(spread.expiration_date))}</td>
+          <td>${escapeHtml(formatSpreadStrike(spread.width))}</td>
+          <td><span class="pill ${statusTone}">${escapeHtml(formatSpreadStatusLabel(spread.status))}</span></td>
+          <td>${escapeHtml(formatSpreadCredit(spread.entry_net_credit))}</td>
+          <td>${escapeHtml(formatDateTime(spread.last_synced_at))}</td>
+          <td>
+            <div class="strategy-action-cell">
+              <strong>${escapeHtml(actionText)}</strong>
+              <span>${escapeHtml(formatDateTime(spread.updated_at))}</span>
+            </div>
+          </td>
+          <td>
+            <div class="table-actions">
+              <button class="table-action" type="button" data-spread-action="refresh" data-spread-id="${escapeHtml(spread.id)}">
+                Refresh
+              </button>
+              ${
+                monitorable
+                  ? `<button class="table-action primary" type="button" data-spread-action="monitor" data-spread-id="${escapeHtml(spread.id)}">Monitor</button>`
+                  : ""
+              }
+            </div>
+          </td>
+        </tr>
       `;
     })
     .join("");
@@ -1276,6 +1442,24 @@ function isCancelableOrder(order) {
   return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
 }
 
+function isActiveSpread(spread) {
+  return (
+    spread.status === "entry_pending_long" ||
+    spread.status === "entry_pending_short" ||
+    spread.status === "open" ||
+    spread.status === "exit_pending_short" ||
+    spread.status === "exit_pending_long"
+  );
+}
+
+function isExitPendingSpread(spread) {
+  return spread.status === "exit_pending_short" || spread.status === "exit_pending_long";
+}
+
+function isMonitorableSpread(spread) {
+  return spread.status === "open" || isExitPendingSpread(spread);
+}
+
 function isReplaceableOrder(order) {
   return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
 }
@@ -1501,6 +1685,71 @@ function journalEntryTone(entryType) {
     return "success";
   }
   return "neutral";
+}
+
+function spreadStatusClass(status) {
+  if (status === "open" || status === "closed") {
+    return "success";
+  }
+  if (
+    status === "entry_pending_long" ||
+    status === "entry_pending_short" ||
+    status === "exit_pending_short" ||
+    status === "exit_pending_long"
+  ) {
+    return "warning";
+  }
+  if (status === "entry_failed" || status === "rollback_failed") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function formatSpreadStatusLabel(status) {
+  return String(status || "--")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatSpreadExitReason(reason) {
+  if (!reason) {
+    return "--";
+  }
+  return String(reason)
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatSpreadStrike(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  return number.toLocaleString("en-US", {
+    minimumFractionDigits: Number.isInteger(number) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function formatSpreadDate(value) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function formatSpreadCredit(value) {
+  if (value === null || value === undefined) {
+    return "--";
+  }
+  return `$${formatSpreadStrike(value)}`;
 }
 
 function formatMultilineText(value) {

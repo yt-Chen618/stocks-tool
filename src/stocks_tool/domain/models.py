@@ -18,6 +18,7 @@ from stocks_tool.domain.enums import (
     PlanStatus,
     ReconciliationStatus,
     RiskStatus,
+    SpreadStatus,
     TimeInForce,
     TradeStructure,
 )
@@ -379,6 +380,154 @@ class SecurityQuoteSnapshot(BaseModel):
     pre_market_quote: SessionQuote | None = None
     post_market_quote: SessionQuote | None = None
     overnight_quote: SessionQuote | None = None
+
+
+class HistoricalPriceBar(BaseModel):
+    symbol: str
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    turnover: Decimal
+    raw_payload: dict | None = None
+
+
+class OptionChainEntry(BaseModel):
+    strike: Decimal
+    call_symbol: str | None = None
+    put_symbol: str | None = None
+    standard: bool = True
+
+
+class OptionMarketSnapshot(BaseModel):
+    symbol: str
+    underlying_symbol: str
+    expiration_date: date
+    strike: Decimal
+    right: OptionRight
+    last_done: Decimal
+    prev_close: Decimal
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    timestamp: datetime
+    volume: int
+    turnover: Decimal
+    trade_status: str | None = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    open_interest: int | None = None
+    implied_volatility: Decimal | None = None
+    historical_volatility: Decimal | None = None
+    delta: Decimal | None = None
+    gamma: Decimal | None = None
+    theta: Decimal | None = None
+    vega: Decimal | None = None
+    contract_multiplier: Decimal = Decimal("100")
+    contract_size: Decimal | None = None
+    raw_payload: dict | None = None
+
+
+class BullPutSpreadCandidate(BaseModel):
+    underlying_symbol: str
+    expiration_date: date
+    days_to_expiration: int
+    width: Decimal
+    short_put: OptionMarketSnapshot
+    long_put: OptionMarketSnapshot
+    short_mid: Decimal
+    long_mid: Decimal
+    mid_credit: Decimal
+    conservative_credit: Decimal
+
+
+class BullPutSpreadRiskSummary(BaseModel):
+    width: Decimal
+    contract_multiplier: Decimal
+    contracts: int
+    max_profit: Decimal
+    max_loss: Decimal
+    break_even: Decimal
+    return_on_risk: Decimal | None = None
+    account_risk_pct: Decimal | None = None
+    status: RiskStatus
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class BullPutSpreadScanResult(BaseModel):
+    strategy_id: str = "paper_bull_put_v1"
+    symbol: str
+    mode: ExecutionMode
+    external_account_id: str
+    scanned_at: datetime
+    eligible: bool
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    underlying_quote: SecurityQuoteSnapshot | None = None
+    selected_expiration_date: date | None = None
+    days_to_expiration: int | None = None
+    moving_average_20: Decimal | None = None
+    moving_average_50: Decimal | None = None
+    candidate: BullPutSpreadCandidate | None = None
+    risk: BullPutSpreadRiskSummary | None = None
+
+
+class ExecuteBullPutSpreadRequest(BaseModel):
+    external_account_id: str
+    symbol: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    as_of: datetime | None = None
+    remark: str | None = Field(default=None, max_length=64)
+
+
+class BullPutSpread(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str = "paper_bull_put_v1"
+    broker: BrokerName
+    external_account_id: str
+    mode: ExecutionMode
+    underlying_symbol: str
+    expiration_date: date
+    contracts: int = Field(gt=0)
+    width: Decimal
+    long_symbol: str
+    long_strike: Decimal
+    short_symbol: str
+    short_strike: Decimal
+    status: SpreadStatus
+    long_entry_order_id: str | None = None
+    short_entry_order_id: str | None = None
+    long_exit_order_id: str | None = None
+    short_exit_order_id: str | None = None
+    entry_long_price: Decimal | None = None
+    entry_short_price: Decimal | None = None
+    entry_net_credit: Decimal | None = None
+    max_profit: Decimal | None = None
+    max_loss: Decimal | None = None
+    break_even: Decimal | None = None
+    account_risk_pct: Decimal | None = None
+    exit_reason: str | None = None
+    raw_payload: dict | None = None
+    entry_started_at: datetime | None = None
+    opened_at: datetime | None = None
+    closed_at: datetime | None = None
+    last_synced_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class BullPutSpreadMonitorResult(BaseModel):
+    spread: BullPutSpread
+    evaluated_at: datetime
+    should_close: bool
+    exit_reason: str | None = None
+    current_underlying_price: Decimal | None = None
+    estimated_exit_debit: Decimal | None = None
+    estimated_pnl: Decimal | None = None
+    days_to_expiration: int | None = None
 
 
 class BrokerAccountSyncResult(BaseModel):

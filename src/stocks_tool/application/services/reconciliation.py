@@ -7,15 +7,20 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import sessionmaker
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
-from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus
+from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus, SpreadStatus
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
 )
 from stocks_tool.repositories.sqlalchemy_broker_account_repository import (
     SQLAlchemyBrokerAccountRepository,
+)
+from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import (
+    SQLAlchemyBullPutSpreadRepository,
 )
 from stocks_tool.repositories.sqlalchemy_execution_repository import (
     SQLAlchemyExecutionRepository,
@@ -34,6 +39,12 @@ WORKING_ORDER_STATUSES = {
     OrderStatus.SUBMITTED,
     OrderStatus.PARTIALLY_FILLED,
 }
+
+MONITORABLE_SPREAD_STATUSES = (
+    SpreadStatus.OPEN,
+    SpreadStatus.EXIT_PENDING_SHORT,
+    SpreadStatus.EXIT_PENDING_LONG,
+)
 
 
 class ReconciliationCoordinator:
@@ -55,6 +66,7 @@ class ReconciliationCoordinator:
             orders = SQLAlchemyOrderRepository(session)
             executions = SQLAlchemyExecutionRepository(session)
             trade_plans = SQLAlchemyTradePlanRepository(session)
+            spreads = SQLAlchemyBullPutSpreadRepository(session)
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -67,6 +79,15 @@ class ReconciliationCoordinator:
                 orders=orders,
                 executions=executions,
                 longbridge_adapter=self.longbridge_adapter,
+            )
+            strategy_service = BullPutStrategyService(
+                settings=self.settings,
+                broker_accounts=broker_accounts,
+                account_snapshots=account_snapshots,
+                spreads=spreads,
+                order_service=order_service,
+                longbridge_adapter=self.longbridge_adapter,
+                risk_service=RiskService(settings=self.settings),
             )
 
             now = datetime.now(timezone.utc)
@@ -116,6 +137,31 @@ class ReconciliationCoordinator:
                             "Automatic order reconciliation failed for %s",
                             broker_account.external_account_id,
                         )
+
+                if not self.settings.bull_put_strategy.enabled:
+                    continue
+                if not self.settings.bull_put_strategy.auto_monitor_enabled:
+                    continue
+
+                for status in MONITORABLE_SPREAD_STATUSES:
+                    account_spreads = spreads.list_spreads(
+                        external_account_id=broker_account.external_account_id,
+                        status=status,
+                    )
+                    for spread in account_spreads:
+                        if not self._is_due(
+                            spread.last_synced_at,
+                            self.settings.bull_put_strategy.monitor_interval_seconds,
+                            now,
+                        ):
+                            continue
+                        try:
+                            strategy_service.monitor_spread(spread.id, as_of=now)
+                        except Exception:
+                            logger.exception(
+                                "Automatic bull put monitoring failed for spread %s",
+                                spread.id,
+                            )
 
     @staticmethod
     def _is_due(

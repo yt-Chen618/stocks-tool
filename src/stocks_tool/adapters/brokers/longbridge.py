@@ -10,6 +10,7 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    OptionRight,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -21,6 +22,9 @@ from stocks_tool.domain.models import (
     BrokerCapability,
     BrokerConfigurationStatus,
     CreateOrderRequest,
+    HistoricalPriceBar,
+    OptionChainEntry,
+    OptionMarketSnapshot,
     PositionSnapshot,
     BrokerProfile,
     SecurityQuoteSnapshot,
@@ -103,6 +107,126 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if not quotes:
             raise LongbridgeIntegrationError(f"No quote returned for symbol '{symbol}'.")
         return self._map_security_quote(quotes[0])
+
+    def list_option_expiry_dates(
+        self,
+        symbol: str,
+        mode: ExecutionMode,
+    ) -> list[date]:
+        sdk = self._load_sdk()
+        config = self._build_config(mode=mode, sdk=sdk)
+        quote_context = sdk["QuoteContext"](config)
+        expiry_dates = quote_context.option_chain_expiry_date_list(symbol)
+        return [self._to_date(expiry_date) for expiry_date in expiry_dates]
+
+    def list_option_chain(
+        self,
+        symbol: str,
+        expiry_date: date,
+        mode: ExecutionMode,
+    ) -> list[OptionChainEntry]:
+        sdk = self._load_sdk()
+        config = self._build_config(mode=mode, sdk=sdk)
+        quote_context = sdk["QuoteContext"](config)
+        contracts = quote_context.option_chain_info_by_date(symbol, expiry_date)
+        return [
+            OptionChainEntry(
+                strike=self._to_decimal(getattr(contract, "price", None)),
+                call_symbol=getattr(contract, "call_symbol", None),
+                put_symbol=getattr(contract, "put_symbol", None),
+                standard=bool(getattr(contract, "standard", True)),
+            )
+            for contract in contracts
+        ]
+
+    def get_option_market_snapshots(
+        self,
+        symbols: list[str],
+        mode: ExecutionMode,
+    ) -> list[OptionMarketSnapshot]:
+        if not symbols:
+            return []
+
+        sdk = self._load_sdk()
+        config = self._build_config(mode=mode, sdk=sdk)
+        quote_context = sdk["QuoteContext"](config)
+        option_quotes = quote_context.option_quote(symbols)
+        calc_indexes = quote_context.calc_indexes(
+            symbols,
+            [
+                sdk["CalcIndex"].OpenInterest,
+                sdk["CalcIndex"].ImpliedVolatility,
+                sdk["CalcIndex"].Delta,
+                sdk["CalcIndex"].Gamma,
+                sdk["CalcIndex"].Theta,
+                sdk["CalcIndex"].Vega,
+                sdk["CalcIndex"].StrikePrice,
+                sdk["CalcIndex"].ExpiryDate,
+            ],
+        )
+        calc_by_symbol = {
+            getattr(calc_index, "symbol"): calc_index
+            for calc_index in calc_indexes
+            if getattr(calc_index, "symbol", None)
+        }
+        return [
+            self._map_option_market_snapshot(
+                quote=quote,
+                calc_index=calc_by_symbol.get(getattr(quote, "symbol", None)),
+            )
+            for quote in option_quotes
+        ]
+
+    def get_best_bid_ask(
+        self,
+        symbol: str,
+        mode: ExecutionMode,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        sdk = self._load_sdk()
+        config = self._build_config(mode=mode, sdk=sdk)
+        quote_context = sdk["QuoteContext"](config)
+        depth = quote_context.depth(symbol)
+        best_ask = self._to_optional_decimal(
+            getattr((getattr(depth, "asks", None) or [None])[0], "price", None)
+        )
+        best_bid = self._to_optional_decimal(
+            getattr((getattr(depth, "bids", None) or [None])[0], "price", None)
+        )
+        return best_bid, best_ask
+
+    def get_recent_daily_bars(
+        self,
+        symbol: str,
+        *,
+        count: int,
+        mode: ExecutionMode,
+    ) -> list[HistoricalPriceBar]:
+        sdk = self._load_sdk()
+        config = self._build_config(mode=mode, sdk=sdk)
+        quote_context = sdk["QuoteContext"](config)
+        candlesticks = quote_context.candlesticks(
+            symbol,
+            sdk["Period"].Day,
+            count,
+            sdk["AdjustType"].NoAdjust,
+        )
+        return [
+            HistoricalPriceBar(
+                symbol=symbol,
+                timestamp=self._to_datetime(getattr(bar, "timestamp", None)),
+                open=self._to_decimal(getattr(bar, "open", None)),
+                high=self._to_decimal(getattr(bar, "high", None)),
+                low=self._to_decimal(getattr(bar, "low", None)),
+                close=self._to_decimal(getattr(bar, "close", None)),
+                volume=int(getattr(bar, "volume", 0) or 0),
+                turnover=self._to_decimal(getattr(bar, "turnover", None)),
+                raw_payload=self._serialize_attrs(
+                    bar,
+                    ["open", "high", "low", "close", "volume", "turnover", "timestamp"],
+                ),
+            )
+            for bar in candlesticks
+        ]
 
     def build_account_snapshot(
         self,
@@ -257,10 +381,13 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
     def _load_sdk(self) -> dict[str, Any]:
         try:
             from longbridge.openapi import (
+                AdjustType,
+                CalcIndex,
                 Config,
                 Language,
                 OrderSide as LongbridgeOrderSide,
                 OrderType as LongbridgeOrderType,
+                Period,
                 QuoteContext,
                 TimeInForceType,
                 TradeContext,
@@ -272,10 +399,13 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             ) from exc
 
         return {
+            "AdjustType": AdjustType,
+            "CalcIndex": CalcIndex,
             "Config": Config,
             "Language": Language,
             "LongbridgeOrderSide": LongbridgeOrderSide,
             "LongbridgeOrderType": LongbridgeOrderType,
+            "Period": Period,
             "QuoteContext": QuoteContext,
             "TimeInForceType": TimeInForceType,
             "TradeContext": TradeContext,
@@ -433,6 +563,99 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             low=self._to_decimal(getattr(quote, "low", None)),
             prev_close=self._to_decimal(getattr(quote, "prev_close", None)),
         )
+
+    def _map_option_market_snapshot(
+        self,
+        *,
+        quote: Any,
+        calc_index: Any | None,
+    ) -> OptionMarketSnapshot:
+        expiry_date = getattr(quote, "expiry_date", None) or getattr(calc_index, "expiry_date", None)
+        strike_price = getattr(quote, "strike_price", None) or getattr(calc_index, "strike_price", None)
+        implied_volatility = getattr(quote, "implied_volatility", None)
+        if implied_volatility is None:
+            implied_volatility = getattr(calc_index, "implied_volatility", None)
+        open_interest = getattr(quote, "open_interest", None)
+        if open_interest is None:
+            open_interest = getattr(calc_index, "open_interest", None)
+
+        return OptionMarketSnapshot(
+            symbol=getattr(quote, "symbol"),
+            underlying_symbol=getattr(quote, "underlying_symbol"),
+            expiration_date=self._to_date(expiry_date),
+            strike=self._to_decimal(strike_price),
+            right=self._map_option_right(getattr(quote, "direction", None)),
+            last_done=self._to_decimal(getattr(quote, "last_done", None)),
+            prev_close=self._to_decimal(getattr(quote, "prev_close", None)),
+            open=self._to_decimal(getattr(quote, "open", None)),
+            high=self._to_decimal(getattr(quote, "high", None)),
+            low=self._to_decimal(getattr(quote, "low", None)),
+            timestamp=self._to_datetime(getattr(quote, "timestamp", None)),
+            volume=int(getattr(quote, "volume", 0) or 0),
+            turnover=self._to_decimal(getattr(quote, "turnover", None)),
+            trade_status=self._enum_to_value(getattr(quote, "trade_status", None)),
+            open_interest=int(open_interest) if open_interest is not None else None,
+            implied_volatility=self._to_optional_decimal(implied_volatility),
+            historical_volatility=self._to_optional_decimal(getattr(quote, "historical_volatility", None)),
+            delta=self._to_optional_decimal(getattr(calc_index, "delta", None)),
+            gamma=self._to_optional_decimal(getattr(calc_index, "gamma", None)),
+            theta=self._to_optional_decimal(getattr(calc_index, "theta", None)),
+            vega=self._to_optional_decimal(getattr(calc_index, "vega", None)),
+            contract_multiplier=self._to_decimal(getattr(quote, "contract_multiplier", None)),
+            contract_size=self._to_optional_decimal(getattr(quote, "contract_size", None)),
+            raw_payload={
+                "quote": self._serialize_attrs(
+                    quote,
+                    [
+                        "symbol",
+                        "last_done",
+                        "prev_close",
+                        "open",
+                        "high",
+                        "low",
+                        "timestamp",
+                        "volume",
+                        "turnover",
+                        "trade_status",
+                        "implied_volatility",
+                        "open_interest",
+                        "expiry_date",
+                        "strike_price",
+                        "contract_multiplier",
+                        "contract_type",
+                        "contract_size",
+                        "direction",
+                        "historical_volatility",
+                        "underlying_symbol",
+                    ],
+                    enum_fields={"trade_status", "contract_type", "direction"},
+                ),
+                "calc_index": self._serialize_attrs(
+                    calc_index,
+                    [
+                        "symbol",
+                        "open_interest",
+                        "implied_volatility",
+                        "expiry_date",
+                        "strike_price",
+                        "delta",
+                        "gamma",
+                        "theta",
+                        "vega",
+                    ],
+                )
+                if calc_index is not None
+                else None,
+            },
+        )
+
+    def _map_option_right(self, direction: Any) -> OptionRight:
+        direction_value = self._normalize_enum_token(direction)
+        if direction_value in {"PUT", "P"}:
+            return OptionRight.PUT
+        if direction_value in {"CALL", "C"}:
+            return OptionRight.CALL
+        raise LongbridgeIntegrationError(f"Unsupported Longbridge option direction '{direction_value}'.")
 
     def _map_order_snapshot(
         self,
@@ -741,6 +964,19 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if value is None:
             return None
         return LongbridgeBrokerAdapter._to_decimal(value)
+
+    @staticmethod
+    def _to_date(value: Any) -> date:
+        if isinstance(value, date) and not isinstance(value, datetime):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, str):
+            raw = value.strip()
+            if len(raw) == 8 and raw.isdigit():
+                return date(int(raw[0:4]), int(raw[4:6]), int(raw[6:8]))
+            return date.fromisoformat(raw)
+        raise LongbridgeIntegrationError("Longbridge returned an invalid date payload.")
 
     @staticmethod
     def _to_datetime(value: Any) -> datetime:
