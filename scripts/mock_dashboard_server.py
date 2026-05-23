@@ -35,6 +35,7 @@ class MockDashboardState:
         self.symbol = "MOCK.US"
         self._order_counter = 1000
         self._journal_counter = 2000
+        self._spread_counter = 3000
         self.account = {
             "id": "mock-account-1",
             "broker": "longbridge",
@@ -161,6 +162,43 @@ class MockDashboardState:
                 "tags": ["filled", "discipline"],
                 "created_at": "2026-05-20T20:10:00Z",
                 "updated_at": "2026-05-20T20:10:00Z",
+            }
+        ]
+        self.spreads = [
+            {
+                "id": "mock-spread-0001",
+                "strategy_id": "paper_bull_put_v1",
+                "broker": "longbridge",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "underlying_symbol": "QQQ.US",
+                "expiration_date": "2026-06-19",
+                "contracts": 1,
+                "width": "3.0000",
+                "long_symbol": "QQQ260619P467000.US",
+                "long_strike": "467.0000",
+                "short_symbol": "QQQ260619P470000.US",
+                "short_strike": "470.0000",
+                "status": "open",
+                "long_entry_order_id": "mock-order-0003",
+                "short_entry_order_id": "mock-order-0004",
+                "long_exit_order_id": None,
+                "short_exit_order_id": None,
+                "entry_long_price": "1.1000",
+                "entry_short_price": "2.4000",
+                "entry_net_credit": "1.3000",
+                "max_profit": "130.0000",
+                "max_loss": "170.0000",
+                "break_even": "468.7000",
+                "account_risk_pct": "0.003400",
+                "exit_reason": None,
+                "raw_payload": {"source": "mock-seed"},
+                "entry_started_at": "2026-05-20T19:45:00Z",
+                "opened_at": "2026-05-20T19:46:00Z",
+                "closed_at": None,
+                "last_synced_at": "2026-05-21T02:14:54Z",
+                "created_at": "2026-05-20T19:45:00Z",
+                "updated_at": "2026-05-21T02:14:54Z",
             }
         ]
 
@@ -345,6 +383,55 @@ class MockDashboardState:
         self.journals.insert(0, entry)
         return deepcopy(entry)
 
+    def list_spreads(
+        self,
+        external_account_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = self.spreads
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if status is not None:
+            rows = [row for row in rows if row["status"] == status]
+        return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def get_spread(self, spread_id: str) -> dict[str, Any]:
+        for spread in self.spreads:
+            if spread["id"] == spread_id:
+                return spread
+        raise KeyError(spread_id)
+
+    def refresh_spread(self, spread_id: str) -> dict[str, Any]:
+        spread = self.get_spread(spread_id)
+        now = iso_now()
+        spread["last_synced_at"] = now
+        spread["updated_at"] = now
+        return deepcopy(spread)
+
+    def monitor_spread(self, spread_id: str) -> dict[str, Any]:
+        spread = self.get_spread(spread_id)
+        now = iso_now()
+        should_close = spread["status"] in {"open", "exit_pending_short", "exit_pending_long"}
+        if should_close:
+            self._spread_counter += 1
+            spread["status"] = "closed"
+            spread["exit_reason"] = "take_profit"
+            spread["short_exit_order_id"] = f"mock-spread-short-exit-{self._spread_counter}"
+            spread["long_exit_order_id"] = f"mock-spread-long-exit-{self._spread_counter}"
+            spread["closed_at"] = now
+        spread["last_synced_at"] = now
+        spread["updated_at"] = now
+        return {
+            "spread": deepcopy(spread),
+            "evaluated_at": now,
+            "should_close": should_close,
+            "exit_reason": spread["exit_reason"],
+            "current_underlying_price": "501.2500",
+            "estimated_exit_debit": "0.5000",
+            "estimated_pnl": "80.0000",
+            "days_to_expiration": 27,
+        }
+
 
 def create_app() -> FastAPI:
     state = MockDashboardState()
@@ -382,6 +469,13 @@ def create_app() -> FastAPI:
     def orders(external_account_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
         return state.list_orders(external_account_id)
 
+    @app.get("/strategies/bull-put/spreads")
+    def spreads(
+        external_account_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return state.list_spreads(external_account_id=external_account_id, status=status)
+
     @app.get("/executions")
     def executions(
         external_account_id: str | None = Query(default=None),
@@ -409,6 +503,13 @@ def create_app() -> FastAPI:
             return deepcopy(state.get_order(order_id))
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Order '{order_id}' was not found.") from error
+
+    @app.get("/strategies/bull-put/spreads/{spread_id}")
+    def get_spread(spread_id: str) -> dict[str, Any]:
+        try:
+            return deepcopy(state.get_spread(spread_id))
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
 
     @app.post("/orders/submit", status_code=status.HTTP_201_CREATED)
     def submit_order(payload: dict[str, Any]) -> dict[str, Any]:
@@ -438,6 +539,20 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Order '{order_id}' was not found.") from error
         except ValueError as error:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    @app.post("/strategies/bull-put/spreads/{spread_id}/refresh")
+    def refresh_spread(spread_id: str) -> dict[str, Any]:
+        try:
+            return state.refresh_spread(spread_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
+
+    @app.post("/strategies/bull-put/spreads/{spread_id}/monitor")
+    def monitor_spread(spread_id: str) -> dict[str, Any]:
+        try:
+            return state.monitor_spread(spread_id)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
 
     @app.post("/journals", status_code=status.HTTP_201_CREATED)
     def create_journal(payload: dict[str, Any]) -> dict[str, Any]:

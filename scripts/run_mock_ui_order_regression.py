@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -96,23 +98,56 @@ def require_ok(response: httpx.Response) -> Any:
     raise RegressionError(detail)
 
 
-def wait_for(
-    client: httpx.Client,
-    *,
-    timeout_seconds: float,
-    poll_seconds: float,
-    predicate,
-    label: str,
-) -> dict[str, Any]:
-    deadline = time.time() + timeout_seconds
-    last_orders: list[dict[str, Any]] = []
-    while time.time() < deadline:
-        last_orders = require_ok(client.get("/orders", params={"external_account_id": "LBPT10087357"}))
-        for order in last_orders:
-            if predicate(order):
-                return order
-        time.sleep(poll_seconds)
-    raise RegressionError(f"Timed out waiting for {label}. Last orders payload: {last_orders}")
+def resolve_playwright_core() -> str:
+    npm_command = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm_command is None:
+        raise RegressionError("Could not find npm. Install Node.js/npm before running browser regression.")
+    npm_root = subprocess.run(
+        [npm_command, "root", "-g"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    candidates = [
+        Path(npm_root) / "@playwright" / "cli" / "node_modules" / "playwright-core",
+        Path(npm_root) / "playwright-core",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    raise RegressionError(
+        "Could not locate a global playwright-core install. Install @playwright/cli and browsers first."
+    )
+
+
+def run_browser_flow(base_url: str) -> dict[str, Any]:
+    screenshot_path = ROOT / "output" / "playwright" / "mock-ui-browser-regression.png"
+    playwright_core_path = resolve_playwright_core()
+    node_command = shutil.which("node.exe") or shutil.which("node")
+    if node_command is None:
+        raise RegressionError("Could not find node. Install Node.js before running browser regression.")
+    completed = subprocess.run(
+        [
+            node_command,
+            str(ROOT / "scripts" / "mock_ui_browser_flow.js"),
+            base_url,
+            str(screenshot_path),
+            playwright_core_path,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ},
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
+        raise RegressionError(detail)
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise RegressionError(f"Browser regression output was not valid JSON: {completed.stdout}") from error
 
 
 def main() -> None:
@@ -128,6 +163,8 @@ def main() -> None:
             dashboard.raise_for_status()
             assert "Holdings Overview" in dashboard.text
             assert "Current Holdings" in dashboard.text
+            assert "Bull Put Monitor" in dashboard.text
+            assert "Bull Put Spreads" in dashboard.text
             assert "Order Ticket" in dashboard.text
             assert "Selected Order" in dashboard.text
             assert "Execution Summary" in dashboard.text
@@ -143,9 +180,13 @@ def main() -> None:
                 "selected-order-execution",
                 "journal-entry-form",
                 "selected-order-journal",
+                "spread-summary-strip",
+                "spreads-body",
                 "submitOrder()",
                 "submitJournalEntry()",
                 "replaceSelectedOrder()",
+                "renderSpreads()",
+                "monitorSpread(",
                 "renderSelectedExecution()",
                 "renderSelectedJournal()",
             ):
@@ -160,87 +201,16 @@ def main() -> None:
 
             initial_orders = require_ok(client.get("/orders", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_orders) == 2
+            initial_spreads = require_ok(client.get("/strategies/bull-put/spreads", params={"external_account_id": "LBPT10087357"}))
+            assert len(initial_spreads) == 1
+            assert initial_spreads[0]["status"] == "open"
             initial_executions = require_ok(client.get("/executions", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_executions) == 1
             assert initial_executions[0]["order_id"] == "mock-order-0002"
             initial_journals = require_ok(client.get("/journals", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_journals) == 1
             assert initial_journals[0]["order_id"] == "mock-order-0002"
-
-            created = require_ok(
-                client.post(
-                    "/orders/submit",
-                    json={
-                        "external_account_id": "LBPT10087357",
-                        "symbol": "MOCK.US",
-                        "side": "buy",
-                        "quantity": 1,
-                        "order_type": "limit",
-                        "time_in_force": "day",
-                        "mode": "paper",
-                        "limit_price": 320.0,
-                        "remark": "mock-ui-submit",
-                    },
-                )
-            )
-            submitted = wait_for(
-                client,
-                timeout_seconds=args.timeout_seconds,
-                poll_seconds=args.poll_seconds,
-                predicate=lambda order: (
-                    order["id"] == created["id"]
-                    and order["status"] == "submitted"
-                    and order["quantity"] == 1
-                    and order["limit_price"] == "320.0000"
-                ),
-                label="submitted mock order",
-            )
-
-            replaced = require_ok(
-                client.post(
-                    f"/orders/{created['id']}/replace",
-                    json={"quantity": 2, "limit_price": 321.0, "remark": "mock-ui-replace"},
-                )
-            )
-            replaced = wait_for(
-                client,
-                timeout_seconds=args.timeout_seconds,
-                poll_seconds=args.poll_seconds,
-                predicate=lambda order: (
-                    order["id"] == created["id"]
-                    and order["status"] == "submitted"
-                    and order["quantity"] == 2
-                    and order["limit_price"] == "321.0000"
-                ),
-                label="replaced mock order",
-            )
-
-            journal = require_ok(
-                client.post(
-                    "/journals",
-                    json={
-                        "external_account_id": "LBPT10087357",
-                        "symbol": "MOCK.US",
-                        "entry_type": "review",
-                        "title": "Mock regression review",
-                        "notes": "Submit, replace, and cancel remained reachable.",
-                        "order_id": created["id"],
-                        "tags": ["mock", "workflow"],
-                    },
-                )
-            )
-            linked_journals = require_ok(client.get("/journals", params={"order_id": created["id"]}))
-            assert len(linked_journals) == 1
-            assert linked_journals[0]["id"] == journal["id"]
-
-            canceled = require_ok(client.post(f"/orders/{created['id']}/cancel"))
-            canceled = wait_for(
-                client,
-                timeout_seconds=args.timeout_seconds,
-                poll_seconds=args.poll_seconds,
-                predicate=lambda order: order["id"] == created["id"] and order["status"] == "canceled",
-                label="canceled mock order",
-            )
+            browser = run_browser_flow(base_url)
 
             emit_report(
                 build_report(
@@ -249,30 +219,21 @@ def main() -> None:
                     status="passed",
                     mode="mock",
                     target=base_url,
-                    summary="Mock dashboard shell plus submit/replace/cancel order flow passed.",
+                    summary="Mock dashboard shell plus browser-driven order, spread, and journal workflows passed.",
                     payload={
                         "checks": {
                             "dashboard_shell": True,
+                            "bull_put_shell": True,
                             "execution_summary_shell": True,
                             "app_js_markers": True,
                             "account_seed": True,
                             "snapshot_seed": True,
+                            "spread_seed": True,
                             "execution_seed": True,
                             "journal_seed": True,
+                            "browser_flow": True,
                         },
-                        "order": {
-                            "local_order_id": created["id"],
-                            "external_order_id": created["external_order_id"],
-                            "submitted_status": submitted["status"],
-                            "replaced_limit": replaced["limit_price"],
-                            "replaced_quantity": replaced["quantity"],
-                            "final_status": canceled["status"],
-                        },
-                        "journal": {
-                            "entry_id": journal["id"],
-                            "entry_type": journal["entry_type"],
-                            "order_id": journal["order_id"],
-                        },
+                        "browser": browser,
                     },
                 ),
                 json_output=args.json_output,
