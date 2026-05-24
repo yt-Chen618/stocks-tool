@@ -601,6 +601,13 @@ class PreOpenProxySignal(BaseModel):
     note: str | None = None
 
 
+class PreOpenCheckpoint(BaseModel):
+    label: str
+    timing_label: str
+    status: str
+    detail: str
+
+
 class DirectionalPutSnapshot(BaseModel):
     underlying_symbol: str
     expiration_date: date
@@ -609,8 +616,58 @@ class DirectionalPutSnapshot(BaseModel):
     put_symbol: str
     bid: Decimal | None = None
     ask: Decimal | None = None
+    mid_price: Decimal | None = None
+    spread_width: Decimal | None = None
+    spread_pct: Decimal | None = None
+    distance_from_spot_pct: Decimal | None = None
     delta: Decimal | None = None
     implied_volatility: Decimal | None = None
+    liquidity_label: str | None = None
+
+
+class OptionChainLiquidStrike(BaseModel):
+    strike: Decimal
+    put_symbol: str
+    open_interest: int | None = None
+    volume: int | None = None
+    delta: Decimal | None = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+    mid_price: Decimal | None = None
+    spread_width: Decimal | None = None
+    spread_pct: Decimal | None = None
+    liquidity_label: str | None = None
+
+
+class OptionChainExpiryAnalysis(BaseModel):
+    expiration_date: date
+    days_to_expiration: int
+    atm_strike: Decimal
+    atm_put_symbol: str
+    atm_implied_volatility: Decimal | None = None
+    atm_delta: Decimal | None = None
+    atm_mid_price: Decimal | None = None
+    put_skew_strike: Decimal | None = None
+    put_skew_put_symbol: str | None = None
+    put_skew_implied_volatility: Decimal | None = None
+    put_skew_delta: Decimal | None = None
+    put_skew_diff: Decimal | None = None
+    median_spread_pct: Decimal | None = None
+    tight_count: int = 0
+    workable_count: int = 0
+    wide_count: int = 0
+    liquid_strikes: list[OptionChainLiquidStrike] = Field(default_factory=list)
+
+
+class OptionChainAnalysis(BaseModel):
+    underlying_symbol: str
+    underlying_price: Decimal
+    analyzed_at: datetime
+    front_expiration: OptionChainExpiryAnalysis | None = None
+    next_expiration: OptionChainExpiryAnalysis | None = None
+    atm_iv_term_diff: Decimal | None = None
+    term_structure_label: str | None = None
+    sample_note: str | None = None
 
 
 class PreOpenDownsideAssessment(BaseModel):
@@ -622,10 +679,16 @@ class PreOpenDownsideAssessment(BaseModel):
     regime: str
     plain_put_view: str
     preferred_vehicle: str | None = None
+    trade_action: str
+    trade_action_detail: str
+    gap_chase_risk: str
+    gap_chase_detail: str
     summary: str
     reasons: list[str] = Field(default_factory=list)
+    checkpoints: list[PreOpenCheckpoint] = Field(default_factory=list)
     signals: list[PreOpenProxySignal] = Field(default_factory=list)
     put_snapshots: list[DirectionalPutSnapshot] = Field(default_factory=list)
+    chain_analyses: list[OptionChainAnalysis] = Field(default_factory=list)
 
 
 class BrokerAccountSyncResult(BaseModel):

@@ -11,6 +11,9 @@ from stocks_tool.domain.models import (
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
     DirectionalPutSnapshot,
+    OptionChainAnalysis,
+    OptionChainExpiryAnalysis,
+    OptionChainLiquidStrike,
     PreOpenDownsideAssessment,
     PreOpenProxySignal,
     BullPutStrategyReviewResult,
@@ -75,8 +78,13 @@ def test_pre_open_risk_route_returns_assessment() -> None:
         regime="broad_downside_risk",
         plain_put_view="reasonable",
         preferred_vehicle="QQQ",
+        trade_action="wait_for_open_confirmation",
+        trade_action_detail="Bias is bearish. Only press QQQ puts if QQQ and semis stay weak through the open.",
+        gap_chase_risk="medium",
+        gap_chase_detail="The bearish read is usable, but only if the first 5-15 minutes confirm that tech stays weaker than the broad market.",
         summary="Multiple macro and tech proxies are aligned for a weaker U.S. open.",
         reasons=["QQQ is trading meaningfully below its reference level."],
+        checkpoints=[],
         signals=[
             PreOpenProxySignal(
                 key="qqq",
@@ -97,8 +105,57 @@ def test_pre_open_risk_route_returns_assessment() -> None:
                 put_symbol="QQQ260529P710000.US",
                 bid=Decimal("6.10"),
                 ask=Decimal("6.30"),
+                mid_price=Decimal("6.20"),
+                spread_width=Decimal("0.20"),
+                spread_pct=Decimal("3.23"),
+                distance_from_spot_pct=Decimal("0.99"),
                 delta=Decimal("-0.41"),
                 implied_volatility=Decimal("0.24"),
+                liquidity_label="tight",
+            )
+        ],
+        chain_analyses=[
+            OptionChainAnalysis(
+                underlying_symbol="QQQ.US",
+                underlying_price=Decimal("710.00"),
+                analyzed_at=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+                front_expiration=OptionChainExpiryAnalysis(
+                    expiration_date=datetime(2026, 5, 29, tzinfo=timezone.utc).date(),
+                    days_to_expiration=3,
+                    atm_strike=Decimal("710"),
+                    atm_put_symbol="QQQ260529P710000.US",
+                    atm_implied_volatility=Decimal("0.24"),
+                    atm_delta=Decimal("-0.41"),
+                    atm_mid_price=Decimal("6.20"),
+                    put_skew_strike=Decimal("700"),
+                    put_skew_put_symbol="QQQ260529P700000.US",
+                    put_skew_implied_volatility=Decimal("0.26"),
+                    put_skew_delta=Decimal("-0.25"),
+                    put_skew_diff=Decimal("0.02"),
+                    median_spread_pct=Decimal("4.10"),
+                    tight_count=1,
+                    workable_count=1,
+                    wide_count=0,
+                    liquid_strikes=[
+                        OptionChainLiquidStrike(
+                            strike=Decimal("710"),
+                            put_symbol="QQQ260529P710000.US",
+                            open_interest=1200,
+                            volume=5000,
+                            delta=Decimal("-0.41"),
+                            bid=Decimal("6.10"),
+                            ask=Decimal("6.30"),
+                            mid_price=Decimal("6.20"),
+                            spread_width=Decimal("0.20"),
+                            spread_pct=Decimal("3.23"),
+                            liquidity_label="tight",
+                        )
+                    ],
+                ),
+                next_expiration=None,
+                atm_iv_term_diff=None,
+                term_structure_label=None,
+                sample_note="Liquidity buckets use ATM/skew anchors plus the deepest open-interest puts for each expiry.",
             )
         ],
     )
@@ -113,7 +170,9 @@ def test_pre_open_risk_route_returns_assessment() -> None:
     body = response.json()
     assert body["preferred_vehicle"] == "QQQ"
     assert body["plain_put_view"] == "reasonable"
+    assert body["trade_action"] == "wait_for_open_confirmation"
     assert body["signals"][0]["symbol"] == "QQQ.US"
+    assert body["chain_analyses"][0]["front_expiration"]["atm_put_symbol"] == "QQQ260529P710000.US"
 
 
 def test_preview_bull_put_strategy_maps_lookup_error_to_404() -> None:

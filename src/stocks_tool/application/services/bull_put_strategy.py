@@ -38,9 +38,13 @@ from stocks_tool.domain.models import (
     DirectionalPutSnapshot,
     ExecuteBullPutSpreadRequest,
     HistoricalPriceBar,
+    OptionChainAnalysis,
+    OptionChainExpiryAnalysis,
+    OptionChainLiquidStrike,
     OptionMarketSnapshot,
     OptionContractRef,
     Order,
+    PreOpenCheckpoint,
     PreOpenDownsideAssessment,
     PreOpenProxySignal,
     UpdateBullPutStrategyRuntimeRequest,
@@ -454,10 +458,35 @@ class BullPutStrategyService:
         if not reasons:
             reasons.append("No broad bearish proxy cluster is present right now.")
 
+        trade_action, trade_action_detail = self._pre_open_trade_action(
+            session=session,
+            downside_score=score,
+            preferred_vehicle=preferred_vehicle,
+            qqq_change=qqq_change,
+            spy_change=spy_change,
+            semis_change=semis_change,
+        )
+        gap_chase_risk, gap_chase_detail = self._pre_open_gap_risk(
+            downside_score=score,
+            qqq_change=qqq_change,
+            spy_change=spy_change,
+            semis_change=semis_change,
+        )
         put_snapshots = self._build_directional_put_snapshots(
             evaluated_at=evaluated_at,
             spy_signal=signal_by_key["spy"],
             qqq_signal=signal_by_key["qqq"],
+        )
+        chain_analyses = self._build_option_chain_analyses(
+            evaluated_at=evaluated_at,
+            spy_signal=signal_by_key["spy"],
+            qqq_signal=signal_by_key["qqq"],
+        )
+        checkpoints = self._build_pre_open_checkpoints(
+            evaluated_at=evaluated_at,
+            session=session,
+            trade_action=trade_action,
+            preferred_vehicle=preferred_vehicle,
         )
 
         return PreOpenDownsideAssessment(
@@ -469,10 +498,16 @@ class BullPutStrategyService:
             regime=regime,
             plain_put_view=plain_put_view,
             preferred_vehicle=preferred_vehicle,
+            trade_action=trade_action,
+            trade_action_detail=trade_action_detail,
+            gap_chase_risk=gap_chase_risk,
+            gap_chase_detail=gap_chase_detail,
             summary=summary,
             reasons=reasons,
+            checkpoints=checkpoints,
             signals=signals,
             put_snapshots=put_snapshots,
+            chain_analyses=chain_analyses,
         )
 
     def preview_spread(
@@ -1559,6 +1594,134 @@ class BullPutStrategyService:
         session_minutes = (local_time.hour * 60) + local_time.minute
         return max(open_minutes - session_minutes, 0)
 
+    def _pre_open_trade_action(
+        self,
+        *,
+        session: str,
+        downside_score: int,
+        preferred_vehicle: str | None,
+        qqq_change: Decimal,
+        spy_change: Decimal,
+        semis_change: Decimal,
+    ) -> tuple[str, str]:
+        if downside_score >= 5:
+            if session == "premarket":
+                if min(qqq_change, spy_change, semis_change) <= Decimal("-1.25"):
+                    return (
+                        "wait_for_failed_bounce",
+                        "Bearish bias is real, but the gap is already stretched. Wait for the first bounce to fail instead of paying up for plain puts into the open.",
+                    )
+                return (
+                    "wait_for_open_confirmation",
+                    f"Bias is bearish. Only press {preferred_vehicle or 'index'} puts if QQQ and semis stay weak through the open.",
+                )
+            if session == "regular":
+                return (
+                    "use_intraday_confirmation",
+                    f"Only add {preferred_vehicle or 'index'} puts if the opening bounce fails and the proxy weakness still lines up.",
+                )
+            return (
+                "prepare_next_session",
+                "Use the current read to prepare a watchlist, but wait for the next regular session before acting on plain puts.",
+            )
+        if downside_score >= 3:
+            return (
+                "selective_probe_only",
+                "Downside risk is present, but broad confirmation is incomplete. Any plain-put idea should stay small and highly selective.",
+            )
+        return (
+            "stand_down",
+            "The proxy set is too mixed to justify paying premium for a plain downside put setup.",
+        )
+
+    def _pre_open_gap_risk(
+        self,
+        *,
+        downside_score: int,
+        qqq_change: Decimal,
+        spy_change: Decimal,
+        semis_change: Decimal,
+    ) -> tuple[str, str]:
+        gap_extension = min(qqq_change, spy_change, semis_change)
+        if gap_extension <= Decimal("-1.25") or (downside_score >= 5 and semis_change <= Decimal("-1.50")):
+            return (
+                "high",
+                "The tape is weak enough that a gap-down open could make plain puts expensive immediately. Favor patience over chasing the first downtick.",
+            )
+        if gap_extension <= Decimal("-0.75") or downside_score >= 5:
+            return (
+                "medium",
+                "The bearish read is usable, but only if the first 5-15 minutes confirm that tech stays weaker than the broad market.",
+            )
+        return (
+            "low",
+            "Gap extension is limited. If the open confirms, plain puts are less likely to be immediately overpaid.",
+        )
+
+    def _build_pre_open_checkpoints(
+        self,
+        *,
+        evaluated_at: datetime,
+        session: str,
+        trade_action: str,
+        preferred_vehicle: str | None,
+    ) -> list[PreOpenCheckpoint]:
+        preferred_label = preferred_vehicle or "index"
+        details = [
+            (
+                "Macro pulse",
+                "08:30 ET",
+                "Recheck futures, rates proxies, and any overnight macro shock before trusting the bearish read.",
+                8 * 60 + 30,
+            ),
+            (
+                "Tape confirmation",
+                "09:15 ET",
+                "Compare QQQ versus SPY and semis versus QQQ. If tech stops underperforming here, plain puts lose edge quickly.",
+                9 * 60 + 15,
+            ),
+            (
+                "Opening print",
+                "09:30 ET",
+                "Do not chase the first print. Watch whether the gap extends or immediately attracts buyers.",
+                9 * 60 + 30,
+            ),
+            (
+                "First 15 minutes",
+                "09:45 ET",
+                f"If the opening bounce fails and {preferred_label} remains the weak vehicle, the downside expression is cleaner.",
+                9 * 60 + 45,
+            ),
+        ]
+        local_time = evaluated_at.astimezone(self.new_york)
+        current_minutes = (local_time.hour * 60) + local_time.minute
+        checkpoints: list[PreOpenCheckpoint] = []
+        active_assigned = False
+        for label, timing_label, detail, threshold in details:
+            status = "pending"
+            if session == "weekend":
+                status = "pending"
+            elif current_minutes >= threshold:
+                status = "complete"
+            elif not active_assigned:
+                status = "active"
+                active_assigned = True
+            checkpoints.append(
+                PreOpenCheckpoint(
+                    label=label,
+                    timing_label=timing_label,
+                    status=status,
+                    detail=detail,
+                )
+            )
+        if trade_action == "stand_down" and checkpoints:
+            checkpoints[-1] = checkpoints[-1].model_copy(
+                update={
+                    "detail": "If proxy weakness does not broaden by 09:45 ET, stand down instead of forcing a directional put entry.",
+                }
+            )
+        return checkpoints
+
     def _build_pre_open_signal(
         self,
         *,
@@ -1630,6 +1793,160 @@ class BullPutStrategyService:
                 snapshots.append(snapshot)
         return snapshots
 
+    def _build_option_chain_analyses(
+        self,
+        *,
+        evaluated_at: datetime,
+        spy_signal: PreOpenProxySignal,
+        qqq_signal: PreOpenProxySignal,
+    ) -> list[OptionChainAnalysis]:
+        analyses: list[OptionChainAnalysis] = []
+        for signal in (spy_signal, qqq_signal):
+            analysis = self._option_chain_analysis(
+                symbol=signal.symbol,
+                underlying_price=signal.session_price,
+                evaluated_at=evaluated_at,
+            )
+            if analysis is not None:
+                analyses.append(analysis)
+        return analyses
+
+    def _option_chain_analysis(
+        self,
+        *,
+        symbol: str,
+        underlying_price: Decimal,
+        evaluated_at: datetime,
+    ) -> OptionChainAnalysis | None:
+        expiry_dates = self.longbridge_adapter.list_option_expiry_dates(
+            symbol=symbol,
+            mode=ExecutionMode.PAPER,
+        )
+        expiries = self._select_option_chain_analysis_expirations(expiry_dates, evaluated_at)
+        if not expiries:
+            return None
+
+        expiry_analyses = [
+            analysis
+            for expiry_date in expiries
+            if (analysis := self._analyze_option_expiration(
+                symbol=symbol,
+                underlying_price=underlying_price,
+                expiry_date=expiry_date,
+                evaluated_at=evaluated_at,
+            )) is not None
+        ]
+        if not expiry_analyses:
+            return None
+
+        front_expiration = expiry_analyses[0]
+        next_expiration = expiry_analyses[1] if len(expiry_analyses) > 1 else None
+        term_diff = None
+        term_structure_label = None
+        if (
+            front_expiration.atm_implied_volatility is not None
+            and next_expiration is not None
+            and next_expiration.atm_implied_volatility is not None
+        ):
+            term_diff = (next_expiration.atm_implied_volatility - front_expiration.atm_implied_volatility).quantize(
+                Decimal("0.0001")
+            )
+            term_structure_label = self._option_term_structure_label(term_diff)
+
+        return OptionChainAnalysis(
+            underlying_symbol=symbol,
+            underlying_price=underlying_price,
+            analyzed_at=evaluated_at,
+            front_expiration=front_expiration,
+            next_expiration=next_expiration,
+            atm_iv_term_diff=term_diff,
+            term_structure_label=term_structure_label,
+            sample_note="Liquidity buckets use ATM/skew anchors plus the deepest open-interest puts for each expiry.",
+        )
+
+    def _analyze_option_expiration(
+        self,
+        *,
+        symbol: str,
+        underlying_price: Decimal,
+        expiry_date: date,
+        evaluated_at: datetime,
+    ) -> OptionChainExpiryAnalysis | None:
+        chain = self.longbridge_adapter.list_option_chain(
+            symbol=symbol,
+            expiry_date=expiry_date,
+            mode=ExecutionMode.PAPER,
+        )
+        put_symbols = [entry.put_symbol for entry in chain if entry.standard and entry.put_symbol]
+        if not put_symbols:
+            return None
+
+        put_quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=put_symbols,
+            mode=ExecutionMode.PAPER,
+        )
+        if not put_quotes:
+            return None
+
+        atm_quote = min(
+            put_quotes,
+            key=lambda quote: (abs(quote.strike - underlying_price), quote.strike),
+        )
+        skew_quote = self._select_skew_put_quote(put_quotes, underlying_price)
+        sampled_quotes = self._sample_option_liquidity_quotes(
+            quotes=put_quotes,
+            anchor_quotes=[atm_quote, skew_quote] if skew_quote is not None else [atm_quote],
+            underlying_price=underlying_price,
+        )
+        enriched_quotes = [
+            self._with_top_of_book(quote, mode=ExecutionMode.PAPER)
+            for quote in sampled_quotes
+        ]
+        enriched_by_symbol = {quote.symbol: quote for quote in enriched_quotes}
+        atm_quote = enriched_by_symbol.get(atm_quote.symbol, atm_quote)
+        if skew_quote is not None:
+            skew_quote = enriched_by_symbol.get(skew_quote.symbol, skew_quote)
+
+        spread_pcts = [
+            spread_pct
+            for quote in enriched_quotes
+            if (spread_pct := self._quote_spread_pct(quote)) is not None
+        ]
+        tight_count = sum(1 for spread_pct in spread_pcts if self._option_liquidity_label(spread_pct) == "tight")
+        workable_count = sum(1 for spread_pct in spread_pcts if self._option_liquidity_label(spread_pct) == "workable")
+        wide_count = sum(1 for spread_pct in spread_pcts if self._option_liquidity_label(spread_pct) == "wide")
+        liquid_strikes = [
+            self._build_option_chain_liquid_strike(quote)
+            for quote in sorted(
+                enriched_quotes,
+                key=lambda quote: (
+                    -(quote.open_interest or 0),
+                    -(quote.volume or 0),
+                    abs(quote.strike - underlying_price),
+                ),
+            )[:3]
+        ]
+
+        return OptionChainExpiryAnalysis(
+            expiration_date=expiry_date,
+            days_to_expiration=self._days_to_expiration(expiry_date, evaluated_at),
+            atm_strike=atm_quote.strike,
+            atm_put_symbol=atm_quote.symbol,
+            atm_implied_volatility=atm_quote.implied_volatility,
+            atm_delta=atm_quote.delta,
+            atm_mid_price=self._quote_mid_price(atm_quote),
+            put_skew_strike=skew_quote.strike if skew_quote is not None else None,
+            put_skew_put_symbol=skew_quote.symbol if skew_quote is not None else None,
+            put_skew_implied_volatility=skew_quote.implied_volatility if skew_quote is not None else None,
+            put_skew_delta=skew_quote.delta if skew_quote is not None else None,
+            put_skew_diff=self._quote_iv_diff(skew_quote, atm_quote),
+            median_spread_pct=self._median_decimal(spread_pcts),
+            tight_count=tight_count,
+            workable_count=workable_count,
+            wide_count=wide_count,
+            liquid_strikes=liquid_strikes,
+        )
+
     def _nearest_directional_put_snapshot(
         self,
         *,
@@ -1663,6 +1980,21 @@ class BullPutStrategyService:
             key=lambda quote: (abs(quote.strike - underlying_price), quote.expiration_date),
         )
         selected = self._with_top_of_book(selected, mode=ExecutionMode.PAPER)
+        mid_price = None
+        spread_width = None
+        spread_pct = None
+        if selected.bid is not None and selected.ask is not None:
+            spread_width = self._quantize_price(selected.ask - selected.bid)
+            mid_price = self._quantize_price((selected.ask + selected.bid) / Decimal("2"))
+            if mid_price > Decimal("0"):
+                spread_pct = ((selected.ask - selected.bid) / mid_price * Decimal("100")).quantize(Decimal("0.01"))
+        elif selected.bid is not None or selected.ask is not None:
+            mid_price = self._quantize_price(selected.bid or selected.ask or Decimal("0"))
+        distance_from_spot_pct = None
+        if underlying_price > Decimal("0"):
+            distance_from_spot_pct = (
+                ((underlying_price - selected.strike) / underlying_price) * Decimal("100")
+            ).quantize(Decimal("0.01"))
         return DirectionalPutSnapshot(
             underlying_symbol=symbol,
             expiration_date=selected.expiration_date,
@@ -1671,8 +2003,13 @@ class BullPutStrategyService:
             put_symbol=selected.symbol,
             bid=selected.bid,
             ask=selected.ask,
+            mid_price=mid_price,
+            spread_width=spread_width,
+            spread_pct=spread_pct,
+            distance_from_spot_pct=distance_from_spot_pct,
             delta=selected.delta,
             implied_volatility=selected.implied_volatility,
+            liquidity_label=self._option_liquidity_label(spread_pct),
         )
 
     def _select_pre_open_put_expiration(
@@ -1690,6 +2027,148 @@ class BullPutStrategyService:
         if not candidates:
             return None
         return min(candidates, key=lambda expiry_date: (expiry_date - evaluated_date).days)
+
+    def _select_option_chain_analysis_expirations(
+        self,
+        expiry_dates: list[date],
+        evaluated_at: datetime,
+    ) -> list[date]:
+        strategy = self.settings.bull_put_strategy
+        evaluated_date = evaluated_at.astimezone(self.new_york).date()
+        candidates = [
+            expiry_date
+            for expiry_date in expiry_dates
+            if (expiry_date - evaluated_date).days >= strategy.pre_open_put_min_dte
+        ]
+        return sorted(candidates)[:2]
+
+    @staticmethod
+    def _option_liquidity_label(spread_pct: Decimal | None) -> str | None:
+        if spread_pct is None:
+            return None
+        if spread_pct <= Decimal("4"):
+            return "tight"
+        if spread_pct <= Decimal("9"):
+            return "workable"
+        return "wide"
+
+    @staticmethod
+    def _option_term_structure_label(term_diff: Decimal | None) -> str | None:
+        if term_diff is None:
+            return None
+        if term_diff >= Decimal("0.0200"):
+            return "next_richer"
+        if term_diff <= Decimal("-0.0200"):
+            return "front_loaded"
+        return "flat"
+
+    @staticmethod
+    def _select_skew_put_quote(
+        quotes: list[OptionMarketSnapshot],
+        underlying_price: Decimal,
+    ) -> OptionMarketSnapshot | None:
+        delta_quotes = [quote for quote in quotes if quote.delta is not None]
+        if not delta_quotes:
+            return None
+        return min(
+            delta_quotes,
+            key=lambda quote: (
+                abs(abs(quote.delta or Decimal("0")) - Decimal("0.25")),
+                abs(quote.strike - underlying_price),
+            ),
+        )
+
+    @staticmethod
+    def _sample_option_liquidity_quotes(
+        *,
+        quotes: list[OptionMarketSnapshot],
+        anchor_quotes: list[OptionMarketSnapshot],
+        underlying_price: Decimal,
+    ) -> list[OptionMarketSnapshot]:
+        ranked_quotes = sorted(
+            quotes,
+            key=lambda quote: (
+                -(quote.open_interest or 0),
+                -(quote.volume or 0),
+                abs(quote.strike - underlying_price),
+            ),
+        )
+        sampled: list[OptionMarketSnapshot] = []
+        seen_symbols: set[str] = set()
+        for quote in [*anchor_quotes, *ranked_quotes]:
+            if quote.symbol in seen_symbols:
+                continue
+            sampled.append(quote)
+            seen_symbols.add(quote.symbol)
+            if len(sampled) >= 6:
+                break
+        return sampled
+
+    def _build_option_chain_liquid_strike(
+        self,
+        quote: OptionMarketSnapshot,
+    ) -> OptionChainLiquidStrike:
+        spread_width = self._quote_spread_width(quote)
+        spread_pct = self._quote_spread_pct(quote)
+        return OptionChainLiquidStrike(
+            strike=quote.strike,
+            put_symbol=quote.symbol,
+            open_interest=quote.open_interest,
+            volume=quote.volume,
+            delta=quote.delta,
+            bid=quote.bid,
+            ask=quote.ask,
+            mid_price=self._quote_mid_price(quote),
+            spread_width=spread_width,
+            spread_pct=spread_pct,
+            liquidity_label=self._option_liquidity_label(spread_pct),
+        )
+
+    @staticmethod
+    def _quote_mid_price(quote: OptionMarketSnapshot) -> Decimal | None:
+        if quote.bid is not None and quote.ask is not None:
+            return ((quote.bid + quote.ask) / Decimal("2")).quantize(Decimal("0.01"))
+        if quote.bid is not None:
+            return quote.bid.quantize(Decimal("0.01"))
+        if quote.ask is not None:
+            return quote.ask.quantize(Decimal("0.01"))
+        return None
+
+    @staticmethod
+    def _quote_spread_width(quote: OptionMarketSnapshot) -> Decimal | None:
+        if quote.bid is None or quote.ask is None:
+            return None
+        if quote.ask <= quote.bid:
+            return None
+        return (quote.ask - quote.bid).quantize(Decimal("0.01"))
+
+    def _quote_spread_pct(self, quote: OptionMarketSnapshot) -> Decimal | None:
+        spread_width = self._quote_spread_width(quote)
+        mid_price = self._quote_mid_price(quote)
+        if spread_width is None or mid_price is None or mid_price <= Decimal("0"):
+            return None
+        return ((spread_width / mid_price) * Decimal("100")).quantize(Decimal("0.01"))
+
+    @staticmethod
+    def _quote_iv_diff(
+        left: OptionMarketSnapshot | None,
+        right: OptionMarketSnapshot | None,
+    ) -> Decimal | None:
+        if left is None or right is None:
+            return None
+        if left.implied_volatility is None or right.implied_volatility is None:
+            return None
+        return (left.implied_volatility - right.implied_volatility).quantize(Decimal("0.0001"))
+
+    @staticmethod
+    def _median_decimal(values: list[Decimal]) -> Decimal | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        middle = len(ordered) // 2
+        if len(ordered) % 2 == 1:
+            return ordered[middle].quantize(Decimal("0.01"))
+        return ((ordered[middle - 1] + ordered[middle]) / Decimal("2")).quantize(Decimal("0.01"))
 
     def _safe_create_journal_entry(self, request: CreateJournalEntryRequest, *, context: str) -> None:
         try:

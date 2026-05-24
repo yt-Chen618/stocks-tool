@@ -393,6 +393,11 @@ a {
   gap: 18px;
 }
 
+.panel-stack {
+  display: grid;
+  gap: 18px;
+}
+
 .holdings-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(340px, 1fr);

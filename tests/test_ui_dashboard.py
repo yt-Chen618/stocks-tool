@@ -16,6 +16,9 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Pre-open Risk Board" in response.text
     assert "Risk Proxies" in response.text
     assert "QQQ / SPY Put Check" in response.text
+    assert "Option Chain Analysis" in response.text
+    assert "Longbridge Status" in response.text
+    assert "Quick Quote" in response.text
     assert "Order Ticket" in response.text
     assert "Selected Order" in response.text
     assert "Execution Summary" in response.text

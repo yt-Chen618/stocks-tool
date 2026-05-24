@@ -175,6 +175,23 @@ def build_spy_option_chain() -> list[OptionChainEntry]:
     ]
 
 
+def build_spy_next_option_chain() -> list[OptionChainEntry]:
+    return [
+        OptionChainEntry(
+            strike=Decimal("612"),
+            call_symbol="SPY260605C612000.US",
+            put_symbol="SPY260605P612000.US",
+            standard=True,
+        ),
+        OptionChainEntry(
+            strike=Decimal("600"),
+            call_symbol="SPY260605C600000.US",
+            put_symbol="SPY260605P600000.US",
+            standard=True,
+        ),
+    ]
+
+
 def build_option_quotes() -> list[OptionMarketSnapshot]:
     timestamp = datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc)
     return [
@@ -302,6 +319,58 @@ def build_spy_option_quotes() -> list[OptionMarketSnapshot]:
     ]
 
 
+def build_spy_next_option_quotes() -> list[OptionMarketSnapshot]:
+    timestamp = datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc)
+    return [
+        OptionMarketSnapshot(
+            symbol="SPY260605P612000.US",
+            underlying_symbol="SPY.US",
+            expiration_date=date(2026, 6, 5),
+            strike=Decimal("612"),
+            right=OptionRight.PUT,
+            last_done=Decimal("5.10"),
+            prev_close=Decimal("4.95"),
+            open=Decimal("5.00"),
+            high=Decimal("5.25"),
+            low=Decimal("4.85"),
+            timestamp=timestamp,
+            volume=3600,
+            turnover=Decimal("240000"),
+            trade_status="Normal",
+            open_interest=1600,
+            implied_volatility=Decimal("0.21"),
+            historical_volatility=Decimal("0.16"),
+            delta=Decimal("-0.31"),
+            gamma=Decimal("0.02"),
+            theta=Decimal("-0.03"),
+            vega=Decimal("0.07"),
+        ),
+        OptionMarketSnapshot(
+            symbol="SPY260605P600000.US",
+            underlying_symbol="SPY.US",
+            expiration_date=date(2026, 6, 5),
+            strike=Decimal("600"),
+            right=OptionRight.PUT,
+            last_done=Decimal("2.60"),
+            prev_close=Decimal("2.45"),
+            open=Decimal("2.50"),
+            high=Decimal("2.70"),
+            low=Decimal("2.35"),
+            timestamp=timestamp,
+            volume=3300,
+            turnover=Decimal("126000"),
+            trade_status="Normal",
+            open_interest=1700,
+            implied_volatility=Decimal("0.23"),
+            historical_volatility=Decimal("0.17"),
+            delta=Decimal("-0.24"),
+            gamma=Decimal("0.01"),
+            theta=Decimal("-0.02"),
+            vega=Decimal("0.05"),
+        ),
+    ]
+
+
 def build_qqq_shortdated_option_chain() -> list[OptionChainEntry]:
     return [
         OptionChainEntry(
@@ -314,6 +383,23 @@ def build_qqq_shortdated_option_chain() -> list[OptionChainEntry]:
             strike=Decimal("490"),
             call_symbol="QQQ260529C490000.US",
             put_symbol="QQQ260529P490000.US",
+            standard=True,
+        ),
+    ]
+
+
+def build_qqq_next_option_chain() -> list[OptionChainEntry]:
+    return [
+        OptionChainEntry(
+            strike=Decimal("500"),
+            call_symbol="QQQ260612C500000.US",
+            put_symbol="QQQ260612P500000.US",
+            standard=True,
+        ),
+        OptionChainEntry(
+            strike=Decimal("490"),
+            call_symbol="QQQ260612C490000.US",
+            put_symbol="QQQ260612P490000.US",
             standard=True,
         ),
     ]
@@ -367,6 +453,58 @@ def build_qqq_shortdated_option_quotes() -> list[OptionMarketSnapshot]:
             gamma=Decimal("0.01"),
             theta=Decimal("-0.02"),
             vega=Decimal("0.05"),
+        ),
+    ]
+
+
+def build_qqq_next_option_quotes() -> list[OptionMarketSnapshot]:
+    timestamp = datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc)
+    return [
+        OptionMarketSnapshot(
+            symbol="QQQ260612P500000.US",
+            underlying_symbol="QQQ.US",
+            expiration_date=date(2026, 6, 12),
+            strike=Decimal("500"),
+            right=OptionRight.PUT,
+            last_done=Decimal("6.15"),
+            prev_close=Decimal("5.80"),
+            open=Decimal("5.95"),
+            high=Decimal("6.30"),
+            low=Decimal("5.70"),
+            timestamp=timestamp,
+            volume=3100,
+            turnover=Decimal("310000"),
+            trade_status="Normal",
+            open_interest=1800,
+            implied_volatility=Decimal("0.27"),
+            historical_volatility=Decimal("0.21"),
+            delta=Decimal("-0.33"),
+            gamma=Decimal("0.02"),
+            theta=Decimal("-0.03"),
+            vega=Decimal("0.08"),
+        ),
+        OptionMarketSnapshot(
+            symbol="QQQ260612P490000.US",
+            underlying_symbol="QQQ.US",
+            expiration_date=date(2026, 6, 12),
+            strike=Decimal("490"),
+            right=OptionRight.PUT,
+            last_done=Decimal("3.10"),
+            prev_close=Decimal("2.95"),
+            open=Decimal("3.00"),
+            high=Decimal("3.22"),
+            low=Decimal("2.84"),
+            timestamp=timestamp,
+            volume=2900,
+            turnover=Decimal("154000"),
+            trade_status="Normal",
+            open_interest=2600,
+            implied_volatility=Decimal("0.25"),
+            historical_volatility=Decimal("0.20"),
+            delta=Decimal("-0.22"),
+            gamma=Decimal("0.01"),
+            theta=Decimal("-0.02"),
+            vega=Decimal("0.06"),
         ),
     ]
 
@@ -490,16 +628,24 @@ def build_service(
     )
     adapter.list_option_chain.side_effect = lambda symbol, expiry_date, mode: (
         build_spy_option_chain()
-        if symbol == "SPY.US"
+        if symbol == "SPY.US" and expiry_date == date(2026, 5, 29)
+        else build_spy_next_option_chain()
+        if symbol == "SPY.US" and expiry_date == date(2026, 6, 5)
         else build_qqq_shortdated_option_chain()
         if symbol == "QQQ.US" and expiry_date == date(2026, 5, 29)
+        else build_qqq_next_option_chain()
+        if symbol == "QQQ.US" and expiry_date == date(2026, 6, 12)
         else build_option_chain()
     )
     adapter.get_option_market_snapshots.side_effect = lambda symbols, mode: (
         build_spy_option_quotes()
-        if symbols and str(symbols[0]).startswith("SPY")
+        if symbols and str(symbols[0]).startswith("SPY260529")
+        else build_spy_next_option_quotes()
+        if symbols and str(symbols[0]).startswith("SPY260605")
         else build_qqq_shortdated_option_quotes()
         if symbols and str(symbols[0]).startswith("QQQ260529")
+        else build_qqq_next_option_quotes()
+        if symbols and str(symbols[0]).startswith("QQQ260612")
         else build_option_quotes()
     )
     adapter.get_best_bid_ask.side_effect = lambda symbol, mode: {
@@ -508,8 +654,12 @@ def build_service(
         "QQQ260619P464000.US": (Decimal("0.60"), Decimal("0.70")),
         "QQQ260529P498000.US": (Decimal("3.64"), Decimal("3.84")),
         "QQQ260529P490000.US": (Decimal("1.88"), Decimal("2.00")),
+        "QQQ260612P500000.US": (Decimal("6.10"), Decimal("6.30")),
+        "QQQ260612P490000.US": (Decimal("3.00"), Decimal("3.18")),
         "SPY260529P610000.US": (Decimal("7.10"), Decimal("7.30")),
         "SPY260529P600000.US": (Decimal("3.30"), Decimal("3.45")),
+        "SPY260605P612000.US": (Decimal("5.00"), Decimal("5.20")),
+        "SPY260605P600000.US": (Decimal("2.50"), Decimal("2.70")),
     }[symbol]
     spreads.list_spreads.return_value = []
     spreads.create_spread.side_effect = lambda spread: spread
@@ -1044,7 +1194,26 @@ def test_pre_open_downside_assessment_prefers_qqq_puts_when_semis_and_qqq_are_we
     assert result.downside_score >= 5
     assert result.preferred_vehicle == "QQQ"
     assert result.plain_put_view == "reasonable"
+    assert result.trade_action == "wait_for_failed_bounce"
+    assert result.gap_chase_risk == "high"
+    assert len(result.checkpoints) == 4
     assert {snapshot.underlying_symbol for snapshot in result.put_snapshots} == {"SPY.US", "QQQ.US"}
+    qqq_snapshot = next(snapshot for snapshot in result.put_snapshots if snapshot.underlying_symbol == "QQQ.US")
+    assert qqq_snapshot.mid_price == Decimal("3.74")
+    assert qqq_snapshot.spread_width == Decimal("0.20")
+    assert qqq_snapshot.spread_pct == Decimal("5.35")
+    assert qqq_snapshot.distance_from_spot_pct == Decimal("0.40")
+    assert qqq_snapshot.liquidity_label == "workable"
+    assert {analysis.underlying_symbol for analysis in result.chain_analyses} == {"SPY.US", "QQQ.US"}
+    qqq_analysis = next(analysis for analysis in result.chain_analyses if analysis.underlying_symbol == "QQQ.US")
+    assert qqq_analysis.front_expiration is not None
+    assert qqq_analysis.next_expiration is not None
+    assert qqq_analysis.front_expiration.atm_strike == Decimal("498")
+    assert qqq_analysis.front_expiration.put_skew_diff == Decimal("0.0000")
+    assert qqq_analysis.front_expiration.median_spread_pct == Decimal("5.77")
+    assert qqq_analysis.next_expiration.atm_strike == Decimal("500")
+    assert qqq_analysis.atm_iv_term_diff == Decimal("0.0200")
+    assert qqq_analysis.term_structure_label == "next_richer"
 
 
 def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:

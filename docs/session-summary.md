@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-05-23
+Last updated: 2026-05-24
 
 ## Project
 
@@ -94,6 +94,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - runtime state is stored in `bull_put_strategy_runtime`
   - strategy-driven journal entries are now written automatically for spread opens, spread closes, scan skips, and periodic parameter reviews
   - periodic review now generates at most one parameter suggestion at a time and never changes runtime strategy parameters automatically
+  - the pre-open board now also builds a SPY / QQQ option-chain analysis layer with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries
 - Current limitations:
   - the workflow still coordinates two separate option orders rather than a broker-native combo order
   - real Longbridge paper preview now works, but the latest execute attempts on `QQQ.US` still ended `long_entry_unfilled`, so no bull put spread has opened end to end yet
@@ -231,6 +232,7 @@ Current dashboard capabilities:
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View a pre-open risk board with macro proxies plus `QQQ / SPY` directional put checks
+- View plain-put action guidance, gap-chase risk, opening checkpoints, richer `QQQ / SPY` reference-put liquidity summaries, and a deeper option-chain analysis layer inside the pre-open board
 - View Longbridge configuration status
 - Load quick quote
 - Submit `market`, `limit`, and `stop` paper orders
@@ -280,6 +282,8 @@ Frontend files:
 - Added dashboard bull put runtime cards, control form, last skip reason, latest review, and recent strategy-note feed.
 - Added `GET /strategies/pre-open-risk` plus a dashboard pre-open risk board that summarizes proxy tape weakness and short-dated `QQQ / SPY` reference puts.
 - Added regular-session entry gating and bounded repricing ladders for bull put entry legs.
+- Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
+- Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
 - Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
 - Added a headless browser-driven `mock-ui` regression that now also checks the pre-open risk board, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
@@ -306,7 +310,7 @@ Frontend files:
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the pre-open risk board, bull put strategy controls, skip-reason rendering, and latest-review rendering
+- Result: `passed` and now includes the pre-open risk board, option-chain analysis, bull put strategy controls, skip-reason rendering, and latest-review rendering
 - Latest bull put service-regression run:
 
 ```powershell

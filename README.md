@@ -21,6 +21,7 @@ This repository currently contains:
 - a Longbridge adapter boundary with quote and account-sync entry points
 - a paper bull put spread workflow with preview, two-leg entry, exit monitoring, rollback, and spread persistence
 - a bull put runtime-state layer with scheduled entry scans, review generation, kill-switch style controls, and strategy journaling
+- a pre-open downside board with SPY / QQQ option-chain analysis for directional long-put checks
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
 - an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
@@ -144,7 +145,7 @@ The bull put spread workflow is currently paper-only:
 - persistence: spread lifecycle, order ids, entry credit, and risk summary are stored in `bull_put_spreads`
 - runtime state: daily entry count, daily realized PnL, last scan result, last skip reason, last review summary, last action, and paused symbols are stored in `bull_put_strategy_runtime`
 - journaling: the strategy now writes entry, close, scan-skip, and parameter-review notes into the existing journal workflow
-- dashboard: the `/` workbench now shows a pre-open risk board for QQQ / SPY downside checks, bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
+- dashboard: the `/` workbench now shows a pre-open risk board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, richer reference-put liquidity summaries, and a new option-chain analysis layer with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 
 ## Regression scripts
 
@@ -161,7 +162,7 @@ Available workflows:
 
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
-- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the pre-open risk board, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
+- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the pre-open risk board, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 
 Both scripts now emit the same JSON envelope shape:

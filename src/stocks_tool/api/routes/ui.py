@@ -179,88 +179,100 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
-                    <section class="band insights-band">
-                      <div class="panel-grid">
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Broker</span>
-                              <h2>Longbridge Status</h2>
-                            </div>
-                          </div>
-                          <dl id="broker-status" class="status-list"></dl>
-                        </section>
-
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Quote</span>
-                              <h2>Quick Quote</h2>
-                            </div>
-                          </div>
-                          <form id="quote-form" class="quote-form">
-                            <label class="field">
-                              <span>Symbol</span>
-                              <input id="quote-symbol" type="text" value="UNH.US" autocomplete="off" />
-                            </label>
-                            <button class="icon-button accent" type="submit">
-                              <span class="icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" focusable="false">
-                                  <circle cx="11" cy="11" r="7"/>
-                                  <path d="m21 21-4.3-4.3"/>
-                                </svg>
-                              </span>
-                              <span>Load Quote</span>
-                            </button>
-                          </form>
-                          <div id="quote-card" class="quote-card empty">No quote loaded.</div>
-                        </section>
-                      </div>
-                    </section>
-
                     <section class="band preopen-band">
-                      <div class="panel-grid preopen-grid">
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Macro</span>
-                              <h2>Pre-open Risk Board</h2>
+                      <div class="panel-stack">
+                        <div class="panel-grid preopen-grid">
+                          <section class="panel">
+                            <div class="panel-header">
+                              <div>
+                                <span class="section-kicker">Macro</span>
+                                <h2>Pre-open Risk Board</h2>
+                              </div>
                             </div>
-                          </div>
-                          <div id="preopen-summary-strip" class="mini-metric-strip">
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Downside Score</span>
-                              <strong class="mini-metric-value">--</strong>
-                            </article>
-                          </div>
-                          <div id="preopen-assessment-card" class="strategy-note-body empty">
-                            Loading pre-open assessment...
-                          </div>
-                        </section>
+                            <div id="preopen-summary-strip" class="mini-metric-strip">
+                              <article class="mini-metric-tile">
+                                <span class="metric-label">Downside Score</span>
+                                <strong class="mini-metric-value">--</strong>
+                              </article>
+                            </div>
+                            <div id="preopen-assessment-card" class="strategy-note-body empty">
+                              Loading pre-open assessment...
+                            </div>
+                          </section>
+
+                          <section class="panel">
+                            <div class="panel-header">
+                              <div>
+                                <span class="section-kicker">Signals</span>
+                                <h2>Risk Proxies</h2>
+                              </div>
+                            </div>
+                            <div id="preopen-signals" class="holdings-focus">
+                              <div class="holding-empty">Waiting for market proxy signals.</div>
+                            </div>
+                          </section>
+
+                          <section class="panel">
+                            <div class="panel-header">
+                              <div>
+                                <span class="section-kicker">Options</span>
+                                <h2>QQQ / SPY Put Check</h2>
+                              </div>
+                            </div>
+                            <div id="preopen-puts" class="holdings-focus">
+                              <div class="holding-empty">Waiting for directional put snapshots.</div>
+                            </div>
+                          </section>
+                        </div>
 
                         <section class="panel">
                           <div class="panel-header">
                             <div>
-                              <span class="section-kicker">Signals</span>
-                              <h2>Risk Proxies</h2>
+                              <span class="section-kicker">Surface</span>
+                              <h2>Option Chain Analysis</h2>
                             </div>
                           </div>
-                          <div id="preopen-signals" class="holdings-focus">
-                            <div class="holding-empty">Waiting for market proxy signals.</div>
+                          <div id="preopen-chain-analysis" class="holdings-focus">
+                            <div class="holding-empty">Waiting for front and next-expiry option chain analysis.</div>
                           </div>
                         </section>
 
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Options</span>
-                              <h2>QQQ / SPY Put Check</h2>
+                        <div class="panel-grid">
+                          <section class="panel">
+                            <div class="panel-header">
+                              <div>
+                                <span class="section-kicker">Broker</span>
+                                <h2>Longbridge Status</h2>
+                              </div>
                             </div>
-                          </div>
-                          <div id="preopen-puts" class="holdings-focus">
-                            <div class="holding-empty">Waiting for directional put snapshots.</div>
-                          </div>
-                        </section>
+                            <dl id="broker-status" class="status-list"></dl>
+                          </section>
+
+                          <section class="panel">
+                            <div class="panel-header">
+                              <div>
+                                <span class="section-kicker">Quote</span>
+                                <h2>Quick Quote</h2>
+                              </div>
+                            </div>
+                            <form id="quote-form" class="quote-form">
+                              <label class="field">
+                                <span>Symbol</span>
+                                <input id="quote-symbol" type="text" value="UNH.US" autocomplete="off" />
+                              </label>
+                              <button class="icon-button accent" type="submit">
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <circle cx="11" cy="11" r="7"/>
+                                    <path d="m21 21-4.3-4.3"/>
+                                  </svg>
+                                </span>
+                                <span>Load Quote</span>
+                              </button>
+                            </form>
+                            <div id="quote-card" class="quote-card empty">No quote loaded.</div>
+                          </section>
+                        </div>
                       </div>
                     </section>
 

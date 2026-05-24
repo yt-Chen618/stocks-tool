@@ -57,6 +57,7 @@ function bindElements() {
   els.preOpenAssessmentCard = document.getElementById("preopen-assessment-card");
   els.preOpenSignals = document.getElementById("preopen-signals");
   els.preOpenPuts = document.getElementById("preopen-puts");
+  els.preOpenChainAnalysis = document.getElementById("preopen-chain-analysis");
   els.refreshDashboard = document.getElementById("refresh-dashboard");
   els.syncAccount = document.getElementById("sync-account");
   els.syncOrders = document.getElementById("sync-orders");
@@ -1283,6 +1284,7 @@ function renderPreOpenAssessment(errorMessage = "") {
     els.preOpenAssessmentCard.textContent = detail;
     els.preOpenSignals.innerHTML = '<div class="holding-empty">Waiting for market proxy signals.</div>';
     els.preOpenPuts.innerHTML = '<div class="holding-empty">Waiting for directional put snapshots.</div>';
+    els.preOpenChainAnalysis.innerHTML = '<div class="holding-empty">Waiting for option chain analysis.</div>';
     return;
   }
 
@@ -1308,12 +1310,18 @@ function renderPreOpenAssessment(errorMessage = "") {
       detail: assessment.market_open ? "Regular U.S. session is live." : formatPreOpenTimingDetail(assessment),
     },
     {
-      label: "Preferred Vehicle",
-      value: assessment.preferred_vehicle || "--",
-      tone: assessment.preferred_vehicle ? "warning" : "",
+      label: "Action",
+      value: formatPreOpenLabel(assessment.trade_action),
+      tone: preOpenActionTone(assessment.trade_action),
       detail: assessment.preferred_vehicle
-        ? `${assessment.preferred_vehicle} currently has the cleaner downside read.`
-        : "No clear SPY / QQQ downside edge.",
+        ? `${assessment.preferred_vehicle} is the cleaner vehicle if the tape confirms.`
+        : "No clean SPY / QQQ vehicle is standing out.",
+    },
+    {
+      label: "Gap Chase Risk",
+      value: formatPreOpenLabel(assessment.gap_chase_risk),
+      tone: preOpenGapTone(assessment.gap_chase_risk),
+      detail: "Measures the risk of overpaying for plain puts into the open.",
     },
   ];
 
@@ -1340,6 +1348,24 @@ function renderPreOpenAssessment(errorMessage = "") {
         )
         .join("")
     : '<div class="strategy-note-body empty">No bearish trigger is strong enough to favor plain index puts right now.</div>';
+  const checkpointsMarkup = assessment.checkpoints.length
+    ? assessment.checkpoints
+        .map(
+          (checkpoint) => `
+            <article class="strategy-journal-entry">
+              <div class="strategy-journal-head">
+                <strong>${escapeHtml(checkpoint.label)}</strong>
+                <span>${escapeHtml(checkpoint.timing_label)}</span>
+              </div>
+              <div class="strategy-action-cell">
+                <strong>${escapeHtml(formatPreOpenLabel(checkpoint.status))}</strong>
+                <span>${escapeHtml(checkpoint.detail)}</span>
+              </div>
+            </article>
+          `
+        )
+        .join("")
+    : "";
 
   els.preOpenAssessmentCard.className = "strategy-note-body";
   els.preOpenAssessmentCard.innerHTML = `
@@ -1347,8 +1373,35 @@ function renderPreOpenAssessment(errorMessage = "") {
       <strong>${escapeHtml(assessment.summary)}</strong>
       <span>${escapeHtml(formatDateTime(assessment.analyzed_at))}</span>
     </div>
-    <p>${escapeHtml(formatPreOpenNarrative(assessment))}</p>
+    <div class="status-list">
+      <div>
+        <dt>Preferred Vehicle</dt>
+        <dd>${escapeHtml(assessment.preferred_vehicle || "--")}</dd>
+      </div>
+      <div>
+        <dt>Action</dt>
+        <dd>${escapeHtml(formatPreOpenLabel(assessment.trade_action))}</dd>
+      </div>
+      <div>
+        <dt>Gap Chase Risk</dt>
+        <dd>${escapeHtml(formatPreOpenLabel(assessment.gap_chase_risk))}</dd>
+      </div>
+      <div>
+        <dt>Session</dt>
+        <dd>${escapeHtml(formatPreOpenTimingDetail(assessment))}</dd>
+      </div>
+    </div>
+    <article class="strategy-journal-entry">
+      <p>${escapeHtml(formatPreOpenNarrative(assessment))}</p>
+    </article>
+    <article class="strategy-journal-entry">
+      <p>${escapeHtml(assessment.trade_action_detail)}</p>
+    </article>
+    <article class="strategy-journal-entry">
+      <p>${escapeHtml(assessment.gap_chase_detail)}</p>
+    </article>
     ${reasonsMarkup}
+    ${checkpointsMarkup}
   `;
 
   if (!assessment.signals.length) {
@@ -1388,52 +1441,178 @@ function renderPreOpenAssessment(errorMessage = "") {
 
   if (!assessment.put_snapshots.length) {
     els.preOpenPuts.innerHTML = '<div class="holding-empty">No short-dated reference puts were found.</div>';
+  } else {
+    els.preOpenPuts.innerHTML = assessment.put_snapshots
+      .map((snapshot) => {
+        const preferred =
+          assessment.preferred_vehicle && snapshot.underlying_symbol.startsWith(assessment.preferred_vehicle);
+        return `
+          <article class="holding-card">
+            <div class="holding-head">
+              <div class="symbol-block">
+                <strong>${escapeHtml(snapshot.underlying_symbol)}</strong>
+                <span>${escapeHtml(snapshot.put_symbol)}</span>
+              </div>
+              <span class="pill ${preferred ? "warning" : preOpenLiquidityTone(snapshot.liquidity_label)}">${escapeHtml(preferred ? "Preferred" : snapshot.liquidity_label || "Reference")}</span>
+            </div>
+            <div class="holding-stats">
+              <div>
+                <span>Expiry</span>
+                <strong>${escapeHtml(formatSpreadDate(snapshot.expiration_date))}</strong>
+              </div>
+              <div>
+                <span>Strike</span>
+                <strong>${escapeHtml(formatSpreadStrike(snapshot.strike))}</strong>
+              </div>
+              <div>
+                <span>DTE</span>
+                <strong>${escapeHtml(String(snapshot.days_to_expiration))}</strong>
+              </div>
+                <div>
+                  <span>Bid / Ask</span>
+                  <strong>${escapeHtml(`${formatNumber(snapshot.bid)} / ${formatNumber(snapshot.ask)}`)}</strong>
+                </div>
+                <div>
+                  <span>Mid / Spread</span>
+                  <strong>${escapeHtml(`${formatNumber(snapshot.mid_price)} / ${formatPercentValue(snapshot.spread_pct)}`)}</strong>
+                </div>
+                <div>
+                  <span>Delta / IV</span>
+                  <strong>${escapeHtml(`${formatSignedDecimal(snapshot.delta, 2)} / ${formatImpliedVolatility(snapshot.implied_volatility)}`)}</strong>
+                </div>
+                <div>
+                  <span>Spot Distance</span>
+                  <strong>${escapeHtml(formatSpotDistance(snapshot.distance_from_spot_pct))}</strong>
+                </div>
+              </div>
+            </article>
+        `;
+      })
+      .join("");
+  }
+
+  renderPreOpenChainAnalysis(assessment.chain_analyses || []);
+}
+
+function renderPreOpenChainAnalysis(analyses) {
+  if (!Array.isArray(analyses) || !analyses.length) {
+    els.preOpenChainAnalysis.innerHTML = '<div class="holding-empty">No option chain analysis is available.</div>';
     return;
   }
 
-  els.preOpenPuts.innerHTML = assessment.put_snapshots
-    .map((snapshot) => {
-      const preferred =
-        assessment.preferred_vehicle && snapshot.underlying_symbol.startsWith(assessment.preferred_vehicle);
+  els.preOpenChainAnalysis.innerHTML = analyses
+    .map((analysis) => {
+      const front = analysis.front_expiration;
+      const next = analysis.next_expiration;
+      const termLabel = formatOptionTermStructure(analysis.term_structure_label);
       return `
         <article class="holding-card">
           <div class="holding-head">
             <div class="symbol-block">
-              <strong>${escapeHtml(snapshot.underlying_symbol)}</strong>
-              <span>${escapeHtml(snapshot.put_symbol)}</span>
+              <strong>${escapeHtml(analysis.underlying_symbol)}</strong>
+              <span>${escapeHtml(analysis.sample_note || "Front/next expiry summary with liquidity sampling.")}</span>
             </div>
-            <span class="pill ${preferred ? "warning" : "neutral"}">${escapeHtml(preferred ? "Preferred" : "Reference")}</span>
+            <span class="pill ${preOpenTermTone(analysis.term_structure_label)}">${escapeHtml(termLabel)}</span>
           </div>
           <div class="holding-stats">
             <div>
-              <span>Expiry</span>
-              <strong>${escapeHtml(formatSpreadDate(snapshot.expiration_date))}</strong>
+              <span>Spot</span>
+              <strong>${escapeHtml(formatNumber(analysis.underlying_price))}</strong>
             </div>
             <div>
-              <span>Strike</span>
-              <strong>${escapeHtml(formatSpreadStrike(snapshot.strike))}</strong>
+              <span>Front ATM IV</span>
+              <strong>${escapeHtml(front ? formatImpliedVolatility(front.atm_implied_volatility) : "--")}</strong>
             </div>
             <div>
-              <span>DTE</span>
-              <strong>${escapeHtml(String(snapshot.days_to_expiration))}</strong>
+              <span>Next ATM IV</span>
+              <strong>${escapeHtml(next ? formatImpliedVolatility(next.atm_implied_volatility) : "--")}</strong>
             </div>
             <div>
-              <span>Bid / Ask</span>
-              <strong>${escapeHtml(`${formatNumber(snapshot.bid)} / ${formatNumber(snapshot.ask)}`)}</strong>
+              <span>Term Slope</span>
+              <strong>${escapeHtml(formatSignedIvDifference(analysis.atm_iv_term_diff))}</strong>
             </div>
             <div>
-              <span>Delta</span>
-              <strong>${escapeHtml(formatSignedDecimal(snapshot.delta, 2))}</strong>
+              <span>Front Put Skew</span>
+              <strong>${escapeHtml(front ? formatSignedIvDifference(front.put_skew_diff) : "--")}</strong>
             </div>
             <div>
-              <span>IV</span>
-              <strong>${escapeHtml(formatImpliedVolatility(snapshot.implied_volatility))}</strong>
+              <span>Front Median Spread</span>
+              <strong>${escapeHtml(front ? formatPercentValue(front.median_spread_pct) : "--")}</strong>
             </div>
           </div>
+          ${front ? renderOptionExpiryAnalysis(front, "Front Expiry") : ""}
+          ${next ? renderOptionExpiryAnalysis(next, "Next Expiry") : ""}
         </article>
       `;
     })
     .join("");
+}
+
+function renderOptionExpiryAnalysis(expiry, label) {
+  const liquidMarkup = Array.isArray(expiry.liquid_strikes) && expiry.liquid_strikes.length
+    ? expiry.liquid_strikes
+        .map(
+          (strike) => `
+            <article class="strategy-journal-entry">
+              <div class="strategy-journal-head">
+                <strong>${escapeHtml(formatSpreadStrike(strike.strike))}</strong>
+                <span>${escapeHtml(strike.put_symbol)}</span>
+              </div>
+              <div class="holding-stats compact">
+                <div>
+                  <span>OI / Vol</span>
+                  <strong>${escapeHtml(`${formatPositionQuantity(strike.open_interest)} / ${formatPositionQuantity(strike.volume)}`)}</strong>
+                </div>
+                <div>
+                  <span>Bid / Ask</span>
+                  <strong>${escapeHtml(`${formatNumber(strike.bid)} / ${formatNumber(strike.ask)}`)}</strong>
+                </div>
+                <div>
+                  <span>Spread / Delta</span>
+                  <strong>${escapeHtml(`${formatPercentValue(strike.spread_pct)} / ${formatSignedDecimal(strike.delta, 2)}`)}</strong>
+                </div>
+              </div>
+            </article>
+          `
+        )
+        .join("")
+    : '<div class="strategy-note-body empty">No liquid strikes were sampled for this expiry.</div>';
+
+  return `
+    <article class="strategy-journal-entry">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(`${formatSpreadDate(expiry.expiration_date)} (${expiry.days_to_expiration} DTE)`)}</span>
+      </div>
+      <div class="status-list">
+        <div>
+          <dt>ATM Put</dt>
+          <dd>${escapeHtml(`${formatSpreadStrike(expiry.atm_strike)} / ${formatNumber(expiry.atm_mid_price)}`)}</dd>
+        </div>
+        <div>
+          <dt>ATM Delta / IV</dt>
+          <dd>${escapeHtml(`${formatSignedDecimal(expiry.atm_delta, 2)} / ${formatImpliedVolatility(expiry.atm_implied_volatility)}`)}</dd>
+        </div>
+        <div>
+          <dt>Put Skew Leg</dt>
+          <dd>${escapeHtml(expiry.put_skew_strike ? `${formatSpreadStrike(expiry.put_skew_strike)} / ${formatSignedDecimal(expiry.put_skew_delta, 2)}` : "--")}</dd>
+        </div>
+        <div>
+          <dt>Skew IV Lift</dt>
+          <dd>${escapeHtml(formatSignedIvDifference(expiry.put_skew_diff))}</dd>
+        </div>
+        <div>
+          <dt>Spread Buckets</dt>
+          <dd>${escapeHtml(`${expiry.tight_count} tight / ${expiry.workable_count} workable / ${expiry.wide_count} wide`)}</dd>
+        </div>
+        <div>
+          <dt>Median Spread</dt>
+          <dd>${escapeHtml(formatPercentValue(expiry.median_spread_pct))}</dd>
+        </div>
+      </div>
+      ${liquidMarkup}
+    </article>
+  `;
 }
 
 function renderSelectedOrder() {
@@ -2008,6 +2187,26 @@ function preOpenViewTone(view) {
   return "success";
 }
 
+function preOpenActionTone(action) {
+  if (action === "wait_for_failed_bounce" || action === "wait_for_open_confirmation") {
+    return "warning";
+  }
+  if (action === "use_intraday_confirmation" || action === "selective_probe_only") {
+    return "neutral";
+  }
+  return "success";
+}
+
+function preOpenGapTone(risk) {
+  if (risk === "high") {
+    return "error";
+  }
+  if (risk === "medium") {
+    return "warning";
+  }
+  return "success";
+}
+
 function preOpenSignalTone(signal) {
   if (signal === "bearish") {
     return "error";
@@ -2018,10 +2217,56 @@ function preOpenSignalTone(signal) {
   return "neutral";
 }
 
+function preOpenLiquidityTone(label) {
+  if (label === "wide") {
+    return "error";
+  }
+  if (label === "workable") {
+    return "warning";
+  }
+  if (label === "tight") {
+    return "success";
+  }
+  return "neutral";
+}
+
+function preOpenTermTone(label) {
+  if (label === "front_loaded") {
+    return "error";
+  }
+  if (label === "next_richer") {
+    return "warning";
+  }
+  return "neutral";
+}
+
 function formatPreOpenLabel(value) {
   return String(value || "--")
     .replaceAll("_", " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatOptionTermStructure(label) {
+  if (label === "front_loaded") {
+    return "Front Loaded";
+  }
+  if (label === "next_richer") {
+    return "Next Richer";
+  }
+  if (label === "flat") {
+    return "Flat";
+  }
+  return "Unclear";
+}
+
+function formatSignedIvDifference(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const points = Math.abs(number) <= 1 ? number * 100 : number;
+  const prefix = points > 0 ? "+" : "";
+  return `${prefix}${points.toFixed(1)} pts`;
 }
 
 function formatPreOpenTimingDetail(assessment) {
@@ -2040,9 +2285,19 @@ function formatPreOpenTimingDetail(assessment) {
 function formatPreOpenNarrative(assessment) {
   const timing = formatPreOpenTimingDetail(assessment);
   if (!assessment.preferred_vehicle) {
-    return `${assessment.summary} ${timing}`;
+    return `${assessment.summary} ${timing} ${assessment.trade_action_detail}`;
   }
   return `${assessment.summary} ${assessment.preferred_vehicle} is the cleaner plain-put expression for now. ${timing}`;
+}
+
+function formatSpotDistance(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  const prefix = number > 0 ? "+" : "";
+  const suffix = number >= 0 ? " OTM" : " ITM";
+  return `${prefix}${number.toFixed(2)}%${suffix}`;
 }
 
 function formatRuntimeScanResult(value) {
@@ -2087,6 +2342,14 @@ function formatSignedPercentValue(value) {
   }
   const prefix = number > 0 ? "+" : "";
   return `${prefix}${number.toFixed(2)}%`;
+}
+
+function formatPercentValue(value) {
+  const number = toNumber(value);
+  if (!Number.isFinite(number)) {
+    return "--";
+  }
+  return `${number.toFixed(2)}%`;
 }
 
 function formatSignedDecimal(value, decimals = 2) {
