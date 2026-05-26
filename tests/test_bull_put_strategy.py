@@ -665,7 +665,9 @@ def build_service(
     spreads.create_spread.side_effect = lambda spread: spread
     spreads.update_spread.side_effect = lambda spread: spread
     runtime_states = Mock()
+    pre_open_runs = Mock()
     runtime_store: dict[str, object] = {}
+    pre_open_store: dict[tuple[str, date, str], object] = {}
 
     def get_runtime_state(*, external_account_id: str, strategy_id: str = "paper_bull_put_v1"):
         return runtime_store.get((external_account_id, strategy_id))
@@ -676,6 +678,21 @@ def build_service(
 
     runtime_states.get_runtime_state.side_effect = get_runtime_state
     runtime_states.upsert_runtime_state.side_effect = upsert_runtime_state
+    pre_open_runs.get_by_session_date.side_effect = (
+        lambda *, external_account_id, target_session_date, strategy_id="pre_open_put_check_v1": pre_open_store.get(
+            (external_account_id, target_session_date, strategy_id)
+        )
+    )
+    pre_open_runs.list_runs.side_effect = (
+        lambda *, external_account_id=None, limit=20: [
+            run
+            for key, run in sorted(pre_open_store.items(), key=lambda item: item[1].target_session_date, reverse=True)
+            if external_account_id is None or key[0] == external_account_id
+        ][:limit]
+    )
+    pre_open_runs.upsert_run.side_effect = (
+        lambda run: pre_open_store.__setitem__((run.external_account_id, run.target_session_date, run.strategy_id), run) or run
+    )
     journal_service = Mock()
 
     service = BullPutStrategyService(
@@ -684,6 +701,7 @@ def build_service(
         account_snapshots=account_snapshots,
         spreads=spreads,
         runtime_states=runtime_states,
+        pre_open_runs=pre_open_runs,
         order_service=order_service,
         longbridge_adapter=adapter,
         risk_service=RiskService(settings=Settings()),
@@ -1214,6 +1232,65 @@ def test_pre_open_downside_assessment_prefers_qqq_puts_when_semis_and_qqq_are_we
     assert qqq_analysis.next_expiration.atm_strike == Decimal("500")
     assert qqq_analysis.atm_iv_term_diff == Decimal("0.0200")
     assert qqq_analysis.term_structure_label == "next_richer"
+
+
+def test_pre_open_assessment_targets_next_trading_day_on_memorial_day() -> None:
+    service, _, _, _ = build_service()
+
+    result = service.get_pre_open_downside_assessment(
+        as_of=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.session == "holiday"
+    assert result.target_session_date == date(2026, 5, 26)
+    assert result.next_regular_open_at is not None
+    assert result.next_regular_open_at.astimezone(service.new_york).date() == date(2026, 5, 26)
+
+
+def test_capture_pre_open_run_persists_assessment_for_next_session() -> None:
+    service, _, _, _ = build_service()
+
+    result = service.capture_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.captured is True
+    assert result.run.target_session_date == date(2026, 5, 26)
+    assert result.run.review_status == "awaiting_open"
+    assert len(result.run.checkpoints) == 3
+    assert service.journal_service.create_entry.call_count >= 1
+
+
+def test_review_pre_open_run_updates_opening_checkpoints_and_final_status() -> None:
+    service, _, _, _ = build_service()
+    capture = service.capture_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+    )
+
+    first = service.review_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
+    )
+
+    assert first.reviewed is True
+    assert first.updated_checkpoint_keys == ["open"]
+    assert first.run is not None
+    assert first.run.review_status == "in_progress"
+    assert first.run.checkpoints[0].confirmation == "failed"
+
+    final = service.review_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 14, 0, tzinfo=timezone.utc),
+    )
+
+    assert final.reviewed is True
+    assert final.run is not None
+    assert final.run.review_status == "failed"
+    assert final.run.review_completed_at is not None
+    assert set(final.updated_checkpoint_keys) == {"first_15", "first_30"}
+    assert service.journal_service.create_entry.call_count >= 2
 
 
 def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:

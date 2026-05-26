@@ -15,6 +15,7 @@ async function main() {
   let strategySkipText = "";
   let strategyReviewText = "";
   let preOpenAssessmentText = "";
+  let preOpenRunText = "";
 
   try {
     await page.goto(baseUrl, { waitUntil: "networkidle" });
@@ -23,6 +24,7 @@ async function main() {
     await expectText(page.locator("body"), "Pre-open Risk Board");
     await expectText(page.locator("body"), "Risk Proxies");
     await expectText(page.locator("body"), "QQQ / SPY Put Check");
+    await expectText(page.locator("body"), "Opening Follow-through");
     await expectText(page.locator("body"), "Bull Put Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Bull Put Spreads");
@@ -31,7 +33,9 @@ async function main() {
     await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
     await expectText(page.locator("#preopen-signals"), "Nasdaq 100 ETF");
     await expectText(page.locator("#preopen-puts"), "QQQ260530P498000.US");
+    await expectText(page.locator("#preopen-run-review"), "Opening follow-through confirmed");
     preOpenAssessmentText = await page.locator("#preopen-assessment-card").innerText();
+    preOpenRunText = await page.locator("#preopen-run-review").innerText();
 
     await clickRowButton(page, "#spreads-body tr", "QQQ.US", "Monitor");
     await page.waitForFunction(
@@ -120,6 +124,10 @@ async function main() {
           preOpen: {
             rendered: preOpenAssessmentText.includes("QQQ cleaner than SPY"),
             summary: preOpenAssessmentText,
+          },
+          preOpenRun: {
+            rendered: preOpenRunText.includes("Opening follow-through confirmed"),
+            summary: preOpenRunText,
           },
           spread: {
             monitorTriggered:

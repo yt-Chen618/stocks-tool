@@ -35,6 +35,9 @@ from stocks_tool.repositories.sqlalchemy_journal_repository import (
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
 )
+from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
+    SQLAlchemyPreOpenAssessmentRunRepository,
+)
 from stocks_tool.repositories.sqlalchemy_trade_plan_repository import (
     SQLAlchemyTradePlanRepository,
 )
@@ -75,6 +78,7 @@ class ReconciliationCoordinator:
             trade_plans = SQLAlchemyTradePlanRepository(session)
             spreads = SQLAlchemyBullPutSpreadRepository(session)
             runtime_states = SQLAlchemyBullPutStrategyRuntimeRepository(session)
+            pre_open_runs = SQLAlchemyPreOpenAssessmentRunRepository(session)
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -100,6 +104,7 @@ class ReconciliationCoordinator:
                 account_snapshots=account_snapshots,
                 spreads=spreads,
                 runtime_states=runtime_states,
+                pre_open_runs=pre_open_runs,
                 order_service=order_service,
                 longbridge_adapter=self.longbridge_adapter,
                 risk_service=RiskService(settings=self.settings),
@@ -156,6 +161,27 @@ class ReconciliationCoordinator:
 
                 if not self.settings.bull_put_strategy.enabled:
                     continue
+                try:
+                    strategy_service.capture_pre_open_run(
+                        external_account_id=broker_account.external_account_id,
+                        as_of=now,
+                        automatic=True,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Automatic pre-open assessment capture failed for %s",
+                        broker_account.external_account_id,
+                    )
+                try:
+                    strategy_service.review_pre_open_run(
+                        external_account_id=broker_account.external_account_id,
+                        as_of=now,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Automatic pre-open review failed for %s",
+                        broker_account.external_account_id,
+                    )
                 if self.settings.bull_put_strategy.auto_scan_enabled:
                     try:
                         strategy_service.run_entry_scan(

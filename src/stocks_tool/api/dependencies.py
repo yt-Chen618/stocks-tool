@@ -24,6 +24,7 @@ from stocks_tool.ports.repository import (
     ExecutionRepository,
     JournalRepository,
     OrderRepository,
+    PreOpenAssessmentRunRepository,
     TradePlanRepository,
     WatchlistRepository,
 )
@@ -53,6 +54,9 @@ from stocks_tool.repositories.sqlalchemy_trade_plan_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_watchlist_repository import (
     SQLAlchemyWatchlistRepository,
+)
+from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
+    SQLAlchemyPreOpenAssessmentRunRepository,
 )
 
 
@@ -131,6 +135,12 @@ def get_bull_put_strategy_runtime_repository(
     return SQLAlchemyBullPutStrategyRuntimeRepository(session)
 
 
+def get_pre_open_assessment_run_repository(
+    session: Session = Depends(get_db_session),
+) -> PreOpenAssessmentRunRepository:
+    return SQLAlchemyPreOpenAssessmentRunRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -186,6 +196,7 @@ def get_bull_put_strategy_service(
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
     spreads: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
     runtime_states: BullPutStrategyRuntimeRepository = Depends(get_bull_put_strategy_runtime_repository),
+    pre_open_runs: PreOpenAssessmentRunRepository = Depends(get_pre_open_assessment_run_repository),
     order_service: OrderService = Depends(get_order_service),
     adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
     risk_service: RiskService = Depends(get_risk_service),
@@ -198,6 +209,7 @@ def get_bull_put_strategy_service(
         account_snapshots=account_snapshots,
         spreads=spreads,
         runtime_states=runtime_states,
+        pre_open_runs=pre_open_runs,
         order_service=order_service,
         longbridge_adapter=adapter,
         risk_service=risk_service,

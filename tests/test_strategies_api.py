@@ -11,6 +11,10 @@ from stocks_tool.domain.models import (
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
     DirectionalPutSnapshot,
+    PreOpenAssessmentCaptureResult,
+    PreOpenAssessmentReviewResult,
+    PreOpenAssessmentRun,
+    PreOpenReviewCheckpoint,
     OptionChainAnalysis,
     OptionChainExpiryAnalysis,
     OptionChainLiquidStrike,
@@ -73,7 +77,9 @@ def test_pre_open_risk_route_returns_assessment() -> None:
         analyzed_at=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
         session="premarket",
         market_open=False,
+        target_session_date=datetime(2026, 5, 26, tzinfo=timezone.utc).date(),
         minutes_to_regular_open=55,
+        next_regular_open_at=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
         downside_score=5,
         regime="broad_downside_risk",
         plain_put_view="reasonable",
@@ -173,6 +179,98 @@ def test_pre_open_risk_route_returns_assessment() -> None:
     assert body["trade_action"] == "wait_for_open_confirmation"
     assert body["signals"][0]["symbol"] == "QQQ.US"
     assert body["chain_analyses"][0]["front_expiration"]["atm_put_symbol"] == "QQQ260529P710000.US"
+
+
+def test_capture_pre_open_run_route_returns_run_result() -> None:
+    service = Mock()
+    run = PreOpenAssessmentRun(
+        external_account_id="LBPT10087357",
+        target_session_date=datetime(2026, 5, 26, tzinfo=timezone.utc).date(),
+        assessment=PreOpenDownsideAssessment(
+            analyzed_at=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+            session="holiday",
+            market_open=False,
+            target_session_date=datetime(2026, 5, 26, tzinfo=timezone.utc).date(),
+            minutes_to_regular_open=None,
+            next_regular_open_at=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
+            downside_score=4,
+            regime="selective_downside_risk",
+            plain_put_view="selective",
+            preferred_vehicle="QQQ",
+            trade_action="prepare_next_session",
+            trade_action_detail="Wait for the next regular session.",
+            gap_chase_risk="medium",
+            gap_chase_detail="Do not pay up blindly into the first print.",
+            summary="Memorial Day keeps the next regular open on Tuesday.",
+            reasons=["NYSE is closed for Memorial Day on 2026-05-25."],
+        ),
+        checkpoints=[
+            PreOpenReviewCheckpoint(
+                key="open",
+                label="Opening Print",
+                timing_label="09:30 ET",
+                scheduled_at=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
+            )
+        ],
+        review_status="awaiting_open",
+    )
+    service.capture_pre_open_run.return_value = PreOpenAssessmentCaptureResult(run=run, captured=True)
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post("/strategies/pre-open-runs/LBPT10087357/capture")
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["captured"] is True
+    assert body["run"]["target_session_date"] == "2026-05-26"
+
+
+def test_review_pre_open_run_route_returns_review_result() -> None:
+    service = Mock()
+    run = PreOpenAssessmentRun(
+        external_account_id="LBPT10087357",
+        target_session_date=datetime(2026, 5, 26, tzinfo=timezone.utc).date(),
+        assessment=PreOpenDownsideAssessment(
+            analyzed_at=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+            session="premarket",
+            market_open=False,
+            target_session_date=datetime(2026, 5, 26, tzinfo=timezone.utc).date(),
+            minutes_to_regular_open=70,
+            next_regular_open_at=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
+            downside_score=5,
+            regime="broad_downside_risk",
+            plain_put_view="reasonable",
+            preferred_vehicle="QQQ",
+            trade_action="wait_for_open_confirmation",
+            trade_action_detail="Bias is bearish.",
+            gap_chase_risk="medium",
+            gap_chase_detail="Wait for confirmation.",
+            summary="Weak tape persists.",
+        ),
+        checkpoints=[],
+        review_status="failed",
+        review_summary="Opening follow-through failed to confirm the bearish pre-open read by 10:00 ET.",
+        review_completed_at=datetime(2026, 5, 26, 14, 0, tzinfo=timezone.utc),
+    )
+    service.review_pre_open_run.return_value = PreOpenAssessmentReviewResult(
+        run=run,
+        reviewed=True,
+        updated_checkpoint_keys=["first_30"],
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post("/strategies/pre-open-runs/LBPT10087357/review")
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reviewed"] is True
+    assert body["updated_checkpoint_keys"] == ["first_30"]
 
 
 def test_preview_bull_put_strategy_maps_lookup_error_to_404() -> None:

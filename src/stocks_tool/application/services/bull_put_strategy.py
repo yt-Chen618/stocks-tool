@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from decimal import Decimal
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
@@ -45,8 +46,12 @@ from stocks_tool.domain.models import (
     OptionContractRef,
     Order,
     PreOpenCheckpoint,
+    PreOpenAssessmentCaptureResult,
+    PreOpenAssessmentReviewResult,
     PreOpenDownsideAssessment,
     PreOpenProxySignal,
+    PreOpenAssessmentRun,
+    PreOpenReviewCheckpoint,
     UpdateBullPutStrategyRuntimeRequest,
 )
 from stocks_tool.ports.repository import (
@@ -54,6 +59,7 @@ from stocks_tool.ports.repository import (
     BrokerAccountRepository,
     BullPutSpreadRepository,
     BullPutStrategyRuntimeRepository,
+    PreOpenAssessmentRunRepository,
 )
 
 
@@ -65,6 +71,81 @@ ACTIVE_SPREAD_STATUSES = {
     SpreadStatus.EXIT_PENDING_LONG,
 }
 logger = logging.getLogger(__name__)
+PRE_OPEN_CAPTURE_START = datetime_time(hour=8, minute=30)
+PRE_OPEN_CAPTURE_END = datetime_time(hour=9, minute=15)
+PRE_OPEN_REVIEW_CHECKPOINTS = (
+    ("open", "Opening Print", "09:30 ET", datetime_time(hour=9, minute=30)),
+    ("first_15", "First 15 Minutes", "09:45 ET", datetime_time(hour=9, minute=45)),
+    ("first_30", "First 30 Minutes", "10:00 ET", datetime_time(hour=10, minute=0)),
+)
+
+
+def _observed_fixed_holiday(day: date) -> date:
+    if day.weekday() == 5:
+        return day - timedelta(days=1)
+    if day.weekday() == 6:
+        return day + timedelta(days=1)
+    return day
+
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, occurrence: int) -> date:
+    current = date(year, month, 1)
+    while current.weekday() != weekday:
+        current += timedelta(days=1)
+    current += timedelta(days=(occurrence - 1) * 7)
+    return current
+
+
+def _last_weekday_of_month(year: int, month: int, weekday: int) -> date:
+    if month == 12:
+        current = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        current = date(year, month + 1, 1) - timedelta(days=1)
+    while current.weekday() != weekday:
+        current -= timedelta(days=1)
+    return current
+
+
+def _easter_sunday(year: int) -> date:
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+@lru_cache
+def _us_options_holidays(year: int) -> frozenset[date]:
+    holidays: set[date] = set()
+    for fixed in (
+        date(year, 1, 1),
+        date(year, 6, 19),
+        date(year, 7, 4),
+        date(year, 12, 25),
+    ):
+        observed = _observed_fixed_holiday(fixed)
+        if observed.year == year:
+            holidays.add(observed)
+    next_new_year_observed = _observed_fixed_holiday(date(year + 1, 1, 1))
+    if next_new_year_observed.year == year:
+        holidays.add(next_new_year_observed)
+    holidays.add(_nth_weekday_of_month(year, 1, 0, 3))
+    holidays.add(_nth_weekday_of_month(year, 2, 0, 3))
+    holidays.add(_easter_sunday(year) - timedelta(days=2))
+    holidays.add(_last_weekday_of_month(year, 5, 0))
+    holidays.add(_nth_weekday_of_month(year, 9, 0, 1))
+    holidays.add(_nth_weekday_of_month(year, 11, 3, 4))
+    return frozenset(holidays)
 
 
 class BullPutStrategyService:
@@ -76,6 +157,7 @@ class BullPutStrategyService:
         account_snapshots: AccountSnapshotRepository,
         spreads: BullPutSpreadRepository,
         runtime_states: BullPutStrategyRuntimeRepository,
+        pre_open_runs: PreOpenAssessmentRunRepository,
         order_service: OrderService,
         longbridge_adapter: LongbridgeBrokerAdapter,
         risk_service: RiskService,
@@ -86,6 +168,7 @@ class BullPutStrategyService:
         self.account_snapshots = account_snapshots
         self.spreads = spreads
         self.runtime_states = runtime_states
+        self.pre_open_runs = pre_open_runs
         self.order_service = order_service
         self.longbridge_adapter = longbridge_adapter
         self.risk_service = risk_service
@@ -391,6 +474,12 @@ class BullPutStrategyService:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
 
         session = self._market_session_label(evaluated_at)
+        target_session_date = self._target_session_date(evaluated_at, session=session)
+        next_regular_open_at = self._next_regular_open_at(
+            evaluated_at=evaluated_at,
+            session=session,
+            target_session_date=target_session_date,
+        )
         signal_specs = [
             ("spy", "S&P 500 ETF", self.settings.bull_put_strategy.pre_open_proxy_spy_symbol),
             ("qqq", "Nasdaq 100 ETF", self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol),
@@ -493,7 +582,9 @@ class BullPutStrategyService:
             analyzed_at=evaluated_at,
             session=session,
             market_open=session == "regular",
+            target_session_date=target_session_date,
             minutes_to_regular_open=self._minutes_to_regular_open(evaluated_at, session),
+            next_regular_open_at=next_regular_open_at,
             downside_score=score,
             regime=regime,
             plain_put_view=plain_put_view,
@@ -508,6 +599,176 @@ class BullPutStrategyService:
             signals=signals,
             put_snapshots=put_snapshots,
             chain_analyses=chain_analyses,
+        )
+
+    def list_pre_open_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 20,
+    ) -> list[PreOpenAssessmentRun]:
+        return self.pre_open_runs.list_runs(
+            external_account_id=external_account_id,
+            limit=limit,
+        )
+
+    def capture_pre_open_run(
+        self,
+        *,
+        external_account_id: str,
+        as_of: datetime | None = None,
+        force: bool = False,
+        automatic: bool = False,
+    ) -> PreOpenAssessmentCaptureResult:
+        broker_account = self.broker_accounts.get_by_external_account_id(external_account_id)
+        if broker_account is None or broker_account.broker != BrokerName.LONGBRIDGE:
+            raise LookupError(f"No local Longbridge broker account was found for '{external_account_id}'.")
+
+        evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        if automatic and not force:
+            due_reason = self._pre_open_capture_not_due_reason(evaluated_at)
+            if due_reason is not None:
+                existing = self.pre_open_runs.list_runs(external_account_id=external_account_id, limit=1)
+                fallback_run = existing[0] if existing else PreOpenAssessmentRun(
+                    external_account_id=external_account_id,
+                    target_session_date=self._target_session_date(evaluated_at),
+                    assessment=self.get_pre_open_downside_assessment(as_of=evaluated_at),
+                )
+                return PreOpenAssessmentCaptureResult(
+                    run=fallback_run,
+                    captured=False,
+                    reason=due_reason,
+                )
+
+        session = self._market_session_label(evaluated_at)
+        target_session_date = self._target_session_date(evaluated_at, session=session)
+        existing = self.pre_open_runs.get_by_session_date(
+            external_account_id=external_account_id,
+            target_session_date=target_session_date,
+        )
+        if existing is not None and not force:
+            return PreOpenAssessmentCaptureResult(
+                run=existing,
+                captured=False,
+                reason="Pre-open assessment already captured for the target session date.",
+            )
+
+        assessment = self.get_pre_open_downside_assessment(as_of=evaluated_at)
+        run = existing or PreOpenAssessmentRun(
+            external_account_id=external_account_id,
+            target_session_date=assessment.target_session_date,
+            assessment=assessment,
+            checkpoints=self._build_review_checkpoints(assessment.target_session_date),
+            review_status="awaiting_open",
+        )
+        run = run.model_copy(
+            update={
+                "target_session_date": assessment.target_session_date,
+                "assessment": assessment,
+                "review_status": run.review_status if run.checkpoints else "awaiting_open",
+                "updated_at": evaluated_at,
+            }
+        )
+        if not run.checkpoints:
+            run = run.model_copy(update={"checkpoints": self._build_review_checkpoints(assessment.target_session_date)})
+        stored = self.pre_open_runs.upsert_run(run)
+        if not self._pre_open_run_flag(stored, "assessment_logged_at"):
+            self._safe_create_journal_entry(
+                CreateJournalEntryRequest(
+                    external_account_id=external_account_id,
+                    symbol=assessment.preferred_vehicle or self._first_strategy_symbol(),
+                    entry_type=JournalEntryType.NOTE,
+                    title=f"Pre-open downside assessment for {assessment.target_session_date.isoformat()}",
+                    notes=self._pre_open_assessment_journal_notes(assessment),
+                    tags=["strategy", "pre-open", "assessment", "paper"],
+                ),
+                context=f"pre-open assessment {stored.id}",
+            )
+            stored = self._mark_pre_open_run_flag(stored, "assessment_logged_at", evaluated_at)
+        return PreOpenAssessmentCaptureResult(run=stored, captured=True)
+
+    def review_pre_open_run(
+        self,
+        *,
+        external_account_id: str,
+        as_of: datetime | None = None,
+        force: bool = False,
+    ) -> PreOpenAssessmentReviewResult:
+        evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        run = self._latest_reviewable_pre_open_run(
+            external_account_id=external_account_id,
+            as_of=evaluated_at,
+        )
+        if run is None:
+            return PreOpenAssessmentReviewResult(
+                reviewed=False,
+                reason="No captured pre-open assessment is waiting for opening follow-through review.",
+            )
+
+        local_now = evaluated_at.astimezone(self.new_york)
+        updated_checkpoint_keys: list[str] = []
+        checkpoints: list[PreOpenReviewCheckpoint] = []
+        for checkpoint in run.checkpoints:
+            due = force or local_now >= checkpoint.scheduled_at.astimezone(self.new_york)
+            if checkpoint.captured_at is not None and not force:
+                checkpoints.append(checkpoint)
+                continue
+            if not due:
+                checkpoints.append(checkpoint)
+                continue
+            reviewed_checkpoint = self._capture_pre_open_review_checkpoint(
+                checkpoint=checkpoint,
+                evaluated_at=evaluated_at,
+            )
+            checkpoints.append(reviewed_checkpoint)
+            updated_checkpoint_keys.append(checkpoint.key)
+
+        if not updated_checkpoint_keys and not force:
+            return PreOpenAssessmentReviewResult(
+                run=run,
+                reviewed=False,
+                reason="Pre-open assessment review is not due yet.",
+            )
+
+        review_status, review_summary, review_completed_at = self._summarize_pre_open_review(
+            run=run,
+            checkpoints=checkpoints,
+            evaluated_at=evaluated_at,
+        )
+        updated_run = run.model_copy(
+            update={
+                "checkpoints": checkpoints,
+                "review_status": review_status,
+                "review_summary": review_summary,
+                "last_reviewed_at": evaluated_at,
+                "review_completed_at": review_completed_at,
+                "updated_at": evaluated_at,
+            }
+        )
+        stored = self.pre_open_runs.upsert_run(updated_run)
+        if review_completed_at is not None and not self._pre_open_run_flag(stored, "review_logged_at"):
+            self._safe_create_journal_entry(
+                CreateJournalEntryRequest(
+                    external_account_id=external_account_id,
+                    symbol=stored.assessment.preferred_vehicle or self._first_strategy_symbol(),
+                    entry_type=JournalEntryType.REVIEW,
+                    title=f"Opening follow-through review for {stored.target_session_date.isoformat()}",
+                    notes=stored.review_summary or "Opening follow-through review completed.",
+                    tags=["strategy", "pre-open", "opening-review", review_status, "paper"],
+                ),
+                context=f"pre-open review {stored.id}",
+            )
+            stored = self._mark_pre_open_run_flag(stored, "review_logged_at", evaluated_at)
+        return PreOpenAssessmentReviewResult(
+            run=stored,
+            reviewed=True,
+            updated_checkpoint_keys=updated_checkpoint_keys,
         )
 
     def preview_spread(
@@ -1136,8 +1397,8 @@ class BullPutStrategyService:
         if not strategy.auto_scan_enabled:
             return "Automatic bull put scan is disabled by configuration."
         local_time = as_of.astimezone(self.new_york)
-        if local_time.weekday() >= 5:
-            return "Automatic bull put scans only run on weekdays."
+        if not self._is_us_options_trading_day(local_time.date()):
+            return "Automatic bull put scans only run on U.S. options trading days."
 
         window_minutes = (local_time.hour * 60) + local_time.minute
         start_minutes = (strategy.scan_window_start_hour_et * 60) + strategy.scan_window_start_minute_et
@@ -1151,9 +1412,17 @@ class BullPutStrategyService:
             return "Automatic bull put scan already ran for this account today."
         return None
 
+    def _pre_open_capture_not_due_reason(self, as_of: datetime) -> str | None:
+        local_time = as_of.astimezone(self.new_york)
+        if not self._is_us_options_trading_day(local_time.date()):
+            return "Automatic pre-open capture only runs on U.S. options trading days."
+        if local_time.time() < PRE_OPEN_CAPTURE_START or local_time.time() > PRE_OPEN_CAPTURE_END:
+            return "Automatic pre-open capture is outside the configured ET pre-open window."
+        return None
+
     def _entry_session_gate_reason(self, as_of: datetime) -> str | None:
         local_time = as_of.astimezone(self.new_york)
-        if local_time.weekday() >= 5:
+        if not self._is_us_options_trading_day(local_time.date()):
             return "Bull put entries only execute during the regular U.S. options week."
         strategy = self.settings.bull_put_strategy
         session_minutes = (local_time.hour * 60) + local_time.minute
@@ -1200,6 +1469,189 @@ class BullPutStrategyService:
         if (as_of - state.last_review_at).days >= strategy.review_interval_days:
             return None
         return "Bull put review is not due yet."
+
+    def _build_review_checkpoints(self, target_session_date: date) -> list[PreOpenReviewCheckpoint]:
+        checkpoints: list[PreOpenReviewCheckpoint] = []
+        for key, label, timing_label, checkpoint_time in PRE_OPEN_REVIEW_CHECKPOINTS:
+            scheduled_local = datetime.combine(target_session_date, checkpoint_time, tzinfo=self.new_york)
+            checkpoints.append(
+                PreOpenReviewCheckpoint(
+                    key=key,
+                    label=label,
+                    timing_label=timing_label,
+                    scheduled_at=scheduled_local.astimezone(timezone.utc),
+                )
+            )
+        return checkpoints
+
+    def _latest_reviewable_pre_open_run(
+        self,
+        *,
+        external_account_id: str,
+        as_of: datetime,
+    ) -> PreOpenAssessmentRun | None:
+        target_date = self._session_date(as_of)
+        for run in self.pre_open_runs.list_runs(external_account_id=external_account_id, limit=10):
+            if run.target_session_date > target_date:
+                continue
+            if run.review_completed_at is None:
+                return run
+        return None
+
+    def _capture_pre_open_review_checkpoint(
+        self,
+        *,
+        checkpoint: PreOpenReviewCheckpoint,
+        evaluated_at: datetime,
+    ) -> PreOpenReviewCheckpoint:
+        qqq_signal = self._regular_session_signal(
+            key="qqq",
+            label="Nasdaq 100 ETF",
+            symbol=self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol,
+        )
+        spy_signal = self._regular_session_signal(
+            key="spy",
+            label="S&P 500 ETF",
+            symbol=self.settings.bull_put_strategy.pre_open_proxy_spy_symbol,
+        )
+        semis_signal = self._regular_session_signal(
+            key="semis",
+            label="Semiconductor Proxy",
+            symbol=self.settings.bull_put_strategy.pre_open_proxy_semis_symbol,
+        )
+        qqq_vs_spy = (qqq_signal.change_pct - spy_signal.change_pct).quantize(Decimal("0.01"))
+        semis_vs_qqq = (semis_signal.change_pct - qqq_signal.change_pct).quantize(Decimal("0.01"))
+        confirmation, detail = self._review_checkpoint_confirmation(
+            qqq_change=qqq_signal.change_pct,
+            spy_change=spy_signal.change_pct,
+            semis_change=semis_signal.change_pct,
+            qqq_vs_spy=qqq_vs_spy,
+            semis_vs_qqq=semis_vs_qqq,
+        )
+        return checkpoint.model_copy(
+            update={
+                "captured_at": evaluated_at,
+                "status": "captured",
+                "qqq_change_pct": qqq_signal.change_pct,
+                "spy_change_pct": spy_signal.change_pct,
+                "semis_change_pct": semis_signal.change_pct,
+                "qqq_vs_spy_diff": qqq_vs_spy,
+                "semis_vs_qqq_diff": semis_vs_qqq,
+                "confirmation": confirmation,
+                "detail": detail,
+            }
+        )
+
+    def _regular_session_signal(
+        self,
+        *,
+        key: str,
+        label: str,
+        symbol: str,
+    ) -> PreOpenProxySignal:
+        quote = self.longbridge_adapter.get_quote(symbol=symbol, mode=ExecutionMode.PAPER)
+        return self._build_pre_open_signal(
+            key=key,
+            label=label,
+            quote=quote,
+            session="regular",
+        )
+
+    @staticmethod
+    def _review_checkpoint_confirmation(
+        *,
+        qqq_change: Decimal,
+        spy_change: Decimal,
+        semis_change: Decimal,
+        qqq_vs_spy: Decimal,
+        semis_vs_qqq: Decimal,
+    ) -> tuple[str, str]:
+        if qqq_change <= Decimal("-0.60") and semis_change <= Decimal("-0.90") and qqq_vs_spy <= Decimal("-0.25"):
+            return (
+                "confirmed",
+                "QQQ and semis are still underperforming the broad tape, so the original downside read remains intact.",
+            )
+        if qqq_change < Decimal("0") and spy_change < Decimal("0"):
+            return (
+                "mixed",
+                "Broad tape is still softer, but tech-specific downside confirmation is incomplete.",
+            )
+        return (
+            "failed",
+            "The opening tape did not keep enough downside pressure in QQQ and semis to validate the pre-open put bias.",
+        )
+
+    def _summarize_pre_open_review(
+        self,
+        *,
+        run: PreOpenAssessmentRun,
+        checkpoints: list[PreOpenReviewCheckpoint],
+        evaluated_at: datetime,
+    ) -> tuple[str, str, datetime | None]:
+        captured = [checkpoint for checkpoint in checkpoints if checkpoint.captured_at is not None]
+        if not captured:
+            return (
+                run.review_status,
+                run.review_summary or "Opening follow-through review is waiting for the first checkpoint.",
+                None,
+            )
+        latest = captured[-1]
+        if len(captured) < len(PRE_OPEN_REVIEW_CHECKPOINTS):
+            summary = f"{latest.label} review is {latest.confirmation or 'mixed'}. {latest.detail or ''}".strip()
+            return "in_progress", summary, None
+        confirmed = sum(1 for checkpoint in captured if checkpoint.confirmation == "confirmed")
+        failed = sum(1 for checkpoint in captured if checkpoint.confirmation == "failed")
+        if confirmed >= 2:
+            return (
+                "confirmed",
+                "Opening follow-through confirmed the bearish pre-open read across the key post-open checkpoints.",
+                evaluated_at,
+            )
+        if failed >= 2:
+            return (
+                "failed",
+                "Opening follow-through failed to confirm the bearish pre-open read by 10:00 ET.",
+                evaluated_at,
+            )
+        return (
+            "mixed",
+            "Opening follow-through stayed mixed through 10:00 ET, so the pre-open directional edge was incomplete.",
+            evaluated_at,
+        )
+
+    def _pre_open_assessment_journal_notes(self, assessment: PreOpenDownsideAssessment) -> str:
+        open_label = (
+            assessment.next_regular_open_at.astimezone(self.new_york).strftime("%Y-%m-%d %H:%M ET")
+            if assessment.next_regular_open_at is not None
+            else "regular session already open"
+        )
+        reasons = "; ".join(assessment.reasons[:3]) if assessment.reasons else "No major bearish trigger was active."
+        return (
+            f"Target session date: {assessment.target_session_date.isoformat()}. Next regular open: {open_label}. "
+            f"Summary: {assessment.summary} Preferred vehicle: {assessment.preferred_vehicle or 'none'}. "
+            f"Action: {assessment.trade_action}. Gap risk: {assessment.gap_chase_risk}. "
+            f"Drivers: {reasons}"
+        )
+
+    def _mark_pre_open_run_flag(
+        self,
+        run: PreOpenAssessmentRun,
+        key: str,
+        timestamp: datetime | None = None,
+    ) -> PreOpenAssessmentRun:
+        marker = timestamp or datetime.now(timezone.utc)
+        raw_payload = dict(run.raw_payload or {})
+        journal_meta = dict(raw_payload.get("journal") or {})
+        journal_meta[key] = marker.isoformat()
+        raw_payload["journal"] = journal_meta
+        updated = run.model_copy(update={"raw_payload": raw_payload, "updated_at": marker})
+        return self.pre_open_runs.upsert_run(updated)
+
+    @staticmethod
+    def _pre_open_run_flag(run: PreOpenAssessmentRun, key: str) -> bool:
+        raw_payload = run.raw_payload or {}
+        journal_meta = raw_payload.get("journal") or {}
+        return key in journal_meta
 
     def _list_closed_spreads(self, *, external_account_id: str) -> list[BullPutSpread]:
         spreads = self.spreads.list_spreads(
@@ -1575,16 +2027,49 @@ class BullPutStrategyService:
     def _session_date(self, as_of: datetime) -> date:
         return as_of.astimezone(self.new_york).date()
 
+    def _is_us_options_trading_day(self, local_date: date) -> bool:
+        return local_date.weekday() < 5 and local_date not in _us_options_holidays(local_date.year)
+
+    def _next_us_options_trading_day(self, start_date: date) -> date:
+        current = start_date
+        while not self._is_us_options_trading_day(current):
+            current += timedelta(days=1)
+        return current
+
+    def _target_session_date(self, as_of: datetime, *, session: str | None = None) -> date:
+        local_date = self._session_date(as_of)
+        current_session = session or self._market_session_label(as_of)
+        if current_session in {"premarket", "regular"} and self._is_us_options_trading_day(local_date):
+            return local_date
+        return self._next_us_options_trading_day(local_date + timedelta(days=1))
+
     def _market_session_label(self, as_of: datetime) -> str:
         local_time = as_of.astimezone(self.new_york)
         if local_time.weekday() >= 5:
             return "weekend"
+        if not self._is_us_options_trading_day(local_time.date()):
+            return "holiday"
         session_minutes = (local_time.hour * 60) + local_time.minute
         if session_minutes < 570:
             return "premarket"
         if session_minutes < 960:
             return "regular"
         return "postmarket"
+
+    def _next_regular_open_at(
+        self,
+        *,
+        evaluated_at: datetime,
+        session: str,
+        target_session_date: date,
+    ) -> datetime | None:
+        if session == "regular":
+            return None
+        return datetime.combine(
+            target_session_date,
+            datetime_time(hour=9, minute=30),
+            tzinfo=self.new_york,
+        ).astimezone(timezone.utc)
 
     def _minutes_to_regular_open(self, as_of: datetime, session: str) -> int | None:
         if session != "premarket":

@@ -268,6 +268,7 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     executions = Mock()
     trade_plans = Mock()
     spreads = Mock()
+    pre_open_runs = Mock()
     strategy_service = Mock()
 
     broker_account = build_broker_account().model_copy(
@@ -316,6 +317,11 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     )
     monkeypatch.setattr(
         reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: pre_open_runs,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
         "BullPutStrategyService",
         lambda **kwargs: strategy_service,
     )
@@ -329,6 +335,8 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
 
     coordinator.run_once()
 
+    strategy_service.capture_pre_open_run.assert_called_once()
+    strategy_service.review_pre_open_run.assert_called_once()
     strategy_service.run_entry_scan.assert_called_once()
     strategy_service.run_review.assert_called_once()
     scan_call = strategy_service.run_entry_scan.call_args
@@ -350,6 +358,7 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
     executions = Mock()
     trade_plans = Mock()
     spreads = Mock()
+    pre_open_runs = Mock()
     strategy_service = Mock()
 
     now = datetime.now(timezone.utc)
@@ -399,6 +408,11 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
     )
     monkeypatch.setattr(
         reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: pre_open_runs,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
         "BullPutStrategyService",
         lambda **kwargs: strategy_service,
     )
@@ -412,6 +426,8 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
 
     coordinator.run_once()
 
+    strategy_service.capture_pre_open_run.assert_called_once()
+    strategy_service.review_pre_open_run.assert_called_once()
     strategy_service.run_entry_scan.assert_called_once()
     strategy_service.run_review.assert_called_once()
     strategy_service.monitor_spread.assert_not_called()

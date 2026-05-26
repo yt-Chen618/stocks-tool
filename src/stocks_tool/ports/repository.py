@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
     JournalEntryType,
@@ -11,6 +11,7 @@ from stocks_tool.domain.models import (
     AccountSnapshot,
     AddWatchlistItemRequest,
     BrokerAccount,
+    PreOpenAssessmentRun,
     BullPutSpread,
     BullPutStrategyRuntimeState,
     Execution,
@@ -206,4 +207,36 @@ class BullPutStrategyRuntimeRepository(ABC):
         self,
         state: BullPutStrategyRuntimeState,
     ) -> BullPutStrategyRuntimeState:
+        raise NotImplementedError
+
+
+class PreOpenAssessmentRunRepository(ABC):
+    @abstractmethod
+    def get_run(self, run_id: str) -> PreOpenAssessmentRun | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_by_session_date(
+        self,
+        *,
+        external_account_id: str,
+        target_session_date: date,
+        strategy_id: str = "pre_open_put_check_v1",
+    ) -> PreOpenAssessmentRun | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 20,
+    ) -> list[PreOpenAssessmentRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_run(
+        self,
+        run: PreOpenAssessmentRun,
+    ) -> PreOpenAssessmentRun:
         raise NotImplementedError

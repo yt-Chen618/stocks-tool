@@ -674,7 +674,9 @@ class PreOpenDownsideAssessment(BaseModel):
     analyzed_at: datetime
     session: str
     market_open: bool
+    target_session_date: date
     minutes_to_regular_open: int | None = None
+    next_regular_open_at: datetime | None = None
     downside_score: int
     regime: str
     plain_put_view: str
@@ -689,6 +691,51 @@ class PreOpenDownsideAssessment(BaseModel):
     signals: list[PreOpenProxySignal] = Field(default_factory=list)
     put_snapshots: list[DirectionalPutSnapshot] = Field(default_factory=list)
     chain_analyses: list[OptionChainAnalysis] = Field(default_factory=list)
+
+
+class PreOpenReviewCheckpoint(BaseModel):
+    key: str
+    label: str
+    timing_label: str
+    scheduled_at: datetime
+    captured_at: datetime | None = None
+    status: str = "pending"
+    qqq_change_pct: Decimal | None = None
+    spy_change_pct: Decimal | None = None
+    semis_change_pct: Decimal | None = None
+    qqq_vs_spy_diff: Decimal | None = None
+    semis_vs_qqq_diff: Decimal | None = None
+    confirmation: str | None = None
+    detail: str | None = None
+
+
+class PreOpenAssessmentRun(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str = "pre_open_put_check_v1"
+    external_account_id: str
+    target_session_date: date
+    assessment: PreOpenDownsideAssessment
+    checkpoints: list[PreOpenReviewCheckpoint] = Field(default_factory=list)
+    review_status: str = "pending"
+    review_summary: str | None = None
+    last_reviewed_at: datetime | None = None
+    review_completed_at: datetime | None = None
+    raw_payload: dict | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PreOpenAssessmentCaptureResult(BaseModel):
+    run: PreOpenAssessmentRun
+    captured: bool
+    reason: str | None = None
+
+
+class PreOpenAssessmentReviewResult(BaseModel):
+    run: PreOpenAssessmentRun | None = None
+    reviewed: bool = False
+    updated_checkpoint_keys: list[str] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class BrokerAccountSyncResult(BaseModel):

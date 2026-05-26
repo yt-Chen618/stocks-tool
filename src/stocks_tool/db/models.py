@@ -380,6 +380,47 @@ class BullPutStrategyRuntimeRecord(TimestampMixin, Base):
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 
 
+class PreOpenAssessmentRunRecord(TimestampMixin, Base):
+    __tablename__ = "pre_open_assessment_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_account_id",
+            "strategy_id",
+            "target_session_date",
+            name="uq_pre_open_assessment_runs_account_strategy_session_date",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+        default="pre_open_put_check_v1",
+        server_default="pre_open_put_check_v1",
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_session_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    assessment_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    checkpoints_payload: Mapped[list | None] = mapped_column(JSONB)
+    review_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+        server_default="pending",
+    )
+    review_summary: Mapped[str | None] = mapped_column(Text)
+    last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    review_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
 class JournalEntryRecord(TimestampMixin, Base):
     __tablename__ = "journal_entries"
 

@@ -91,7 +91,9 @@ class MockDashboardState:
             "analyzed_at": "2026-05-23T12:20:00Z",
             "session": "premarket",
             "market_open": False,
+            "target_session_date": "2026-05-23",
             "minutes_to_regular_open": 70,
+            "next_regular_open_at": "2026-05-23T13:30:00Z",
             "downside_score": 5,
             "regime": "broad_downside_risk",
             "plain_put_view": "reasonable",
@@ -341,6 +343,69 @@ class MockDashboardState:
                 }
             ],
         }
+        self.pre_open_runs = [
+            {
+                "id": "mock-preopen-run-0001",
+                "strategy_id": "pre_open_put_check_v1",
+                "external_account_id": self.account_id,
+                "target_session_date": "2026-05-23",
+                "assessment": deepcopy(self.pre_open_assessment),
+                "checkpoints": [
+                    {
+                        "key": "open",
+                        "label": "Opening Print",
+                        "timing_label": "09:30 ET",
+                        "scheduled_at": "2026-05-23T13:30:00Z",
+                        "captured_at": "2026-05-23T13:30:20Z",
+                        "status": "captured",
+                        "qqq_change_pct": "-0.82",
+                        "spy_change_pct": "-0.48",
+                        "semis_change_pct": "-1.18",
+                        "qqq_vs_spy_diff": "-0.34",
+                        "semis_vs_qqq_diff": "-0.36",
+                        "confirmation": "confirmed",
+                        "detail": "The open kept QQQ and semis weaker than the broad tape.",
+                    },
+                    {
+                        "key": "first_15",
+                        "label": "First 15 Minutes",
+                        "timing_label": "09:45 ET",
+                        "scheduled_at": "2026-05-23T13:45:00Z",
+                        "captured_at": "2026-05-23T13:45:18Z",
+                        "status": "captured",
+                        "qqq_change_pct": "-0.74",
+                        "spy_change_pct": "-0.41",
+                        "semis_change_pct": "-1.02",
+                        "qqq_vs_spy_diff": "-0.33",
+                        "semis_vs_qqq_diff": "-0.28",
+                        "confirmation": "mixed",
+                        "detail": "Broad downside held, but the move paused enough to keep the read from being one-way.",
+                    },
+                    {
+                        "key": "first_30",
+                        "label": "First 30 Minutes",
+                        "timing_label": "10:00 ET",
+                        "scheduled_at": "2026-05-23T14:00:00Z",
+                        "captured_at": "2026-05-23T14:00:24Z",
+                        "status": "captured",
+                        "qqq_change_pct": "-0.96",
+                        "spy_change_pct": "-0.57",
+                        "semis_change_pct": "-1.31",
+                        "qqq_vs_spy_diff": "-0.39",
+                        "semis_vs_qqq_diff": "-0.35",
+                        "confirmation": "confirmed",
+                        "detail": "The first half hour kept the downside dispersion intact, so the bearish pre-open read held up.",
+                    },
+                ],
+                "review_status": "confirmed",
+                "review_summary": "Opening follow-through confirmed the bearish pre-open read across the key post-open checkpoints.",
+                "last_reviewed_at": "2026-05-23T14:00:24Z",
+                "review_completed_at": "2026-05-23T14:00:24Z",
+                "raw_payload": {"source": "mock-preopen-seed"},
+                "created_at": "2026-05-23T12:20:00Z",
+                "updated_at": "2026-05-23T14:00:24Z",
+            }
+        ]
         self.snapshot = {
             "id": "mock-snapshot-1",
             "broker_account_id": "mock-account-1",
@@ -541,6 +606,16 @@ class MockDashboardState:
         if external_account_id and external_account_id != self.account_id:
             return []
         return deepcopy(sorted(self.orders, key=lambda item: item["updated_at"], reverse=True))
+
+    def list_pre_open_runs(
+        self,
+        external_account_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.pre_open_runs
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        return deepcopy(rows[:limit])
 
     def get_order(self, order_id: str) -> dict[str, Any]:
         for order in self.orders:
@@ -931,6 +1006,13 @@ def create_app() -> FastAPI:
     @app.get("/strategies/pre-open-risk")
     def pre_open_risk() -> dict[str, Any]:
         return deepcopy(state.pre_open_assessment)
+
+    @app.get("/strategies/pre-open-runs")
+    def pre_open_runs(
+        external_account_id: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        return state.list_pre_open_runs(external_account_id=external_account_id, limit=limit)
 
     @app.get("/account-snapshots")
     def account_snapshots(external_account_id: str = Query(...)) -> list[dict[str, Any]]:

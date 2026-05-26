@@ -15,6 +15,9 @@ from stocks_tool.domain.models import (
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
     PreOpenDownsideAssessment,
+    PreOpenAssessmentRun,
+    PreOpenAssessmentCaptureResult,
+    PreOpenAssessmentReviewResult,
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
@@ -37,6 +40,64 @@ def get_pre_open_risk_assessment(
         return service.get_pre_open_downside_assessment(as_of=as_of)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/pre-open-runs", response_model=list[PreOpenAssessmentRun])
+def list_pre_open_runs(
+    external_account_id: str | None = Query(default=None, description="Optional broker account id filter, e.g. LBPT10087357"),
+    limit: int = Query(default=20, ge=1, le=100),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> list[PreOpenAssessmentRun]:
+    return service.list_pre_open_runs(
+        external_account_id=external_account_id,
+        limit=limit,
+    )
+
+
+@router.post("/pre-open-runs/{external_account_id}/capture", response_model=PreOpenAssessmentCaptureResult)
+def capture_pre_open_run(
+    external_account_id: str,
+    as_of: datetime | None = Query(default=None),
+    force: bool = Query(default=False),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> PreOpenAssessmentCaptureResult:
+    try:
+        return service.capture_pre_open_run(
+            external_account_id=external_account_id,
+            as_of=as_of,
+            force=force,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/pre-open-runs/{external_account_id}/review", response_model=PreOpenAssessmentReviewResult)
+def review_pre_open_run(
+    external_account_id: str,
+    as_of: datetime | None = Query(default=None),
+    force: bool = Query(default=False),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> PreOpenAssessmentReviewResult:
+    try:
+        return service.review_pre_open_run(
+            external_account_id=external_account_id,
+            as_of=as_of,
+            force=force,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:

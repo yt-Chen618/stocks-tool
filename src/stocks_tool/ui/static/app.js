@@ -12,6 +12,7 @@ const state = {
   latestSnapshot: null,
   selectedOrderId: "",
   preOpenAssessment: null,
+  preOpenRuns: [],
 };
 
 const els = {};
@@ -58,6 +59,7 @@ function bindElements() {
   els.preOpenSignals = document.getElementById("preopen-signals");
   els.preOpenPuts = document.getElementById("preopen-puts");
   els.preOpenChainAnalysis = document.getElementById("preopen-chain-analysis");
+  els.preOpenRunReview = document.getElementById("preopen-run-review");
   els.refreshDashboard = document.getElementById("refresh-dashboard");
   els.syncAccount = document.getElementById("sync-account");
   els.syncOrders = document.getElementById("sync-orders");
@@ -241,9 +243,8 @@ async function loadDashboard() {
     renderWatchlists();
     renderBrokerStatus();
     await loadAccountData();
-    await loadQuote();
-    await loadPreOpenAssessment();
-    setStatus("Dashboard updated.", "success");
+    loadMarketOverlayPanels();
+    setStatus("Dashboard updated. Market overlays are refreshing in the background.", "success");
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load dashboard.", "error");
@@ -258,11 +259,13 @@ async function loadAccountData() {
     state.runtime = null;
     state.executions = [];
     state.journals = [];
+    state.preOpenRuns = [];
     state.latestSnapshot = null;
     state.selectedOrderId = "";
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderSpreads();
     renderOrders();
@@ -274,13 +277,14 @@ async function loadAccountData() {
   }
 
   try {
-    const [snapshots, orders, spreads, runtime, executions, journals] = await Promise.all([
+    const [snapshots, orders, spreads, runtime, executions, journals, preOpenRuns] = await Promise.all([
       fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
     ]);
     state.snapshots = snapshots;
     state.orders = orders;
@@ -288,6 +292,7 @@ async function loadAccountData() {
     state.runtime = runtime;
     state.executions = executions;
     state.journals = journals;
+    state.preOpenRuns = preOpenRuns;
     state.latestSnapshot = snapshots[0] || null;
 
     if (!orders.some((order) => order.id === state.selectedOrderId)) {
@@ -297,6 +302,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderSpreads();
     renderOrders();
@@ -310,7 +316,13 @@ async function loadAccountData() {
   }
 }
 
-async function loadQuote() {
+function loadMarketOverlayPanels() {
+  void loadQuote({ timeoutMs: 5000 });
+  void loadPreOpenAssessment({ timeoutMs: 6000 });
+}
+
+async function loadQuote(options = {}) {
+  const { timeoutMs = 8000 } = options;
   const symbol = els.quoteSymbol.value.trim().toUpperCase();
   if (!symbol) {
     els.quoteCard.className = "quote-card empty";
@@ -319,7 +331,10 @@ async function loadQuote() {
   }
 
   try {
-    const quote = await fetchJson(`/brokers/longbridge/quote?symbol=${encodeURIComponent(symbol)}&mode=paper`);
+    const quote = await fetchJson(
+      `/brokers/longbridge/quote?symbol=${encodeURIComponent(symbol)}&mode=paper`,
+      { timeoutMs }
+    );
     renderQuote(quote);
   } catch (error) {
     console.error(error);
@@ -328,9 +343,10 @@ async function loadQuote() {
   }
 }
 
-async function loadPreOpenAssessment() {
+async function loadPreOpenAssessment(options = {}) {
+  const { timeoutMs = 10000 } = options;
   try {
-    state.preOpenAssessment = await fetchJson("/strategies/pre-open-risk");
+    state.preOpenAssessment = await fetchJson("/strategies/pre-open-risk", { timeoutMs });
     renderPreOpenAssessment();
   } catch (error) {
     console.error(error);
@@ -1548,6 +1564,108 @@ function renderPreOpenChainAnalysis(analyses) {
     .join("");
 }
 
+function renderLatestPreOpenRun() {
+  const run = Array.isArray(state.preOpenRuns) && state.preOpenRuns.length ? state.preOpenRuns[0] : null;
+  if (!state.selectedAccountId) {
+    els.preOpenRunReview.className = "strategy-note-body empty";
+    els.preOpenRunReview.textContent = "Select a broker account to load the latest pre-open capture and opening review.";
+    return;
+  }
+
+  if (!run) {
+    els.preOpenRunReview.className = "strategy-note-body empty";
+    els.preOpenRunReview.textContent = "No pre-open capture has been stored for this broker account yet.";
+    return;
+  }
+
+  const checkpoints = Array.isArray(run.checkpoints) ? run.checkpoints : [];
+  const capturedCount = checkpoints.filter((checkpoint) => checkpoint.captured_at).length;
+  const checkpointMarkup = checkpoints.length
+    ? checkpoints
+        .map(
+          (checkpoint) => `
+            <article class="strategy-journal-entry">
+              <div class="strategy-journal-head">
+                <strong>${escapeHtml(checkpoint.label)}</strong>
+                <span>${escapeHtml(checkpoint.timing_label)}</span>
+              </div>
+              <div class="status-list">
+                <div>
+                  <dt>Status</dt>
+                  <dd><span class="pill ${preOpenReviewTone(checkpoint.status)}">${escapeHtml(formatPreOpenLabel(checkpoint.status))}</span></dd>
+                </div>
+                <div>
+                  <dt>Review</dt>
+                  <dd><span class="pill ${preOpenReviewTone(checkpoint.confirmation)}">${escapeHtml(formatPreOpenLabel(checkpoint.confirmation || "pending"))}</span></dd>
+                </div>
+                <div>
+                  <dt>QQQ / SPY</dt>
+                  <dd>${escapeHtml(`${formatSignedPercentValue(checkpoint.qqq_change_pct)} / ${formatSignedPercentValue(checkpoint.spy_change_pct)}`)}</dd>
+                </div>
+                <div>
+                  <dt>Semis</dt>
+                  <dd>${escapeHtml(formatSignedPercentValue(checkpoint.semis_change_pct))}</dd>
+                </div>
+                <div>
+                  <dt>QQQ vs SPY</dt>
+                  <dd>${escapeHtml(formatSignedPercentValue(checkpoint.qqq_vs_spy_diff))}</dd>
+                </div>
+                <div>
+                  <dt>Semis vs QQQ</dt>
+                  <dd>${escapeHtml(formatSignedPercentValue(checkpoint.semis_vs_qqq_diff))}</dd>
+                </div>
+              </div>
+              <p>${escapeHtml(checkpoint.detail || "Opening review is still waiting for this checkpoint.")}</p>
+            </article>
+          `
+        )
+        .join("")
+    : '<div class="holding-empty">No opening checkpoints were stored for this run.</div>';
+
+  const assessmentSummary = run.assessment?.summary || "Stored pre-open assessment.";
+  const reviewSummary = run.review_summary || "Opening follow-through review is still waiting for the first checkpoint.";
+  const targetSession = formatSessionDate(run.target_session_date);
+  const nextOpen = run.assessment?.next_regular_open_at ? formatDateTime(run.assessment.next_regular_open_at) : "--";
+
+  els.preOpenRunReview.className = "strategy-note-body";
+  els.preOpenRunReview.innerHTML = `
+    <div class="strategy-journal-head">
+      <strong>${escapeHtml(assessmentSummary)}</strong>
+      <span>${escapeHtml(formatDateTime(run.created_at))}</span>
+    </div>
+    <div class="status-list">
+      <div>
+        <dt>Target Session</dt>
+        <dd>${escapeHtml(targetSession)}</dd>
+      </div>
+      <div>
+        <dt>Review Status</dt>
+        <dd><span class="pill ${preOpenReviewTone(run.review_status)}">${escapeHtml(formatPreOpenLabel(run.review_status))}</span></dd>
+      </div>
+      <div>
+        <dt>Checkpoints</dt>
+        <dd>${escapeHtml(`${capturedCount} / ${checkpoints.length}`)}</dd>
+      </div>
+      <div>
+        <dt>Next Open</dt>
+        <dd>${escapeHtml(nextOpen)}</dd>
+      </div>
+      <div>
+        <dt>Preferred Vehicle</dt>
+        <dd>${escapeHtml(run.assessment?.preferred_vehicle || "--")}</dd>
+      </div>
+      <div>
+        <dt>Action Bias</dt>
+        <dd>${escapeHtml(formatPreOpenLabel(run.assessment?.trade_action || "--"))}</dd>
+      </div>
+    </div>
+    <article class="strategy-journal-entry">
+      <p>${escapeHtml(reviewSummary)}</p>
+    </article>
+    ${checkpointMarkup}
+  `;
+}
+
 function renderOptionExpiryAnalysis(expiry, label) {
   const liquidMarkup = Array.isArray(expiry.liquid_strikes) && expiry.liquid_strikes.length
     ? expiry.liquid_strikes
@@ -2240,6 +2358,19 @@ function preOpenTermTone(label) {
   return "neutral";
 }
 
+function preOpenReviewTone(value) {
+  if (value === "confirmed") {
+    return "success";
+  }
+  if (value === "failed") {
+    return "error";
+  }
+  if (value === "mixed" || value === "in_progress" || value === "awaiting_open") {
+    return "warning";
+  }
+  return "neutral";
+}
+
 function formatPreOpenLabel(value) {
   return String(value || "--")
     .replaceAll("_", " ")
@@ -2275,6 +2406,17 @@ function formatPreOpenTimingDetail(assessment) {
   }
   if (assessment.minutes_to_regular_open !== null && assessment.minutes_to_regular_open !== undefined) {
     return `${assessment.minutes_to_regular_open} min to 09:30 ET regular open.`;
+  }
+  if (assessment.next_regular_open_at) {
+    const nextOpen = new Date(assessment.next_regular_open_at);
+    if (!Number.isNaN(nextOpen.getTime())) {
+      const month = String(nextOpen.getMonth() + 1).padStart(2, "0");
+      const day = String(nextOpen.getDate()).padStart(2, "0");
+      return `Next regular open: ${nextOpen.getFullYear()}-${month}-${day} 09:30 ET.`;
+    }
+  }
+  if (assessment.session === "holiday") {
+    return "U.S. equity options are closed for a market holiday.";
   }
   if (assessment.session === "weekend") {
     return "U.S. equity options are closed for the weekend.";
@@ -2392,28 +2534,68 @@ function toFiniteNumber(value, fallback = 0) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, {
-    headers: {
-      "Content-Type": "application/json",
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
-
-  if (!response.ok) {
-    let detail = `Request failed: ${response.status}`;
-    try {
-      const payload = await response.json();
-      if (payload?.detail) {
-        detail = payload.detail;
-      }
-    } catch {
-      // ignore
-    }
-    throw new Error(detail);
+  const { timeoutMs = null, signal: providedSignal, ...requestOptions } = options;
+  const controller = new AbortController();
+  const signal = mergeAbortSignals(controller.signal, providedSignal);
+  let timeoutId = null;
+  if (timeoutMs !== null && timeoutMs !== undefined) {
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   }
 
-  return response.json();
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+        ...(requestOptions.headers || {}),
+      },
+      ...requestOptions,
+      signal,
+    });
+
+    if (!response.ok) {
+      let detail = `Request failed: ${response.status}`;
+      try {
+        const payload = await response.json();
+        if (payload?.detail) {
+          detail = payload.detail;
+        }
+      } catch {
+        // ignore
+      }
+      throw new Error(detail);
+    }
+
+    return response.json();
+  } catch (error) {
+    if (error?.name === "AbortError" && timeoutMs !== null && timeoutMs !== undefined) {
+      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)}s.`);
+    }
+    throw error;
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
+function mergeAbortSignals(...signals) {
+  const activeSignals = signals.filter(Boolean);
+  if (activeSignals.length === 0) {
+    return undefined;
+  }
+  if (activeSignals.length === 1) {
+    return activeSignals[0];
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of activeSignals) {
+    if (signal.aborted) {
+      controller.abort();
+      return controller.signal;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  }
+  return controller.signal;
 }
 
 function setStatus(message, tone = "") {
@@ -2592,6 +2774,21 @@ function formatSpreadDate(value) {
     return value;
   }
   return date.toLocaleDateString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function formatSessionDate(value) {
+  if (!value) {
+    return "--";
+  }
+  const date = new Date(`${value}T00:00:00`);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleDateString("zh-CN", {
+    year: "numeric",
     month: "2-digit",
     day: "2-digit",
   });

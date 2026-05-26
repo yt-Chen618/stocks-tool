@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import threading
+import time
 from typing import Any
 
 from stocks_tool.core.config import Settings
@@ -48,6 +51,13 @@ class LongbridgeConfigurationError(LongbridgeIntegrationError):
 class LongbridgeBrokerAdapter(BrokerAdapter):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, self.settings.longbridge_executor_max_workers),
+            thread_name_prefix="longbridge-sdk",
+        )
+        self._circuit_lock = threading.Lock()
+        self._circuit_open_until = 0.0
+        self._circuit_reason = ""
 
     @property
     def name(self) -> BrokerName:
@@ -483,14 +493,69 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return mapping.get(self.settings.longbridge_language.lower(), getattr(language_enum, "EN"))
 
     def _run_sdk_action(self, action: str, func):
+        self._raise_if_circuit_open(action)
+        future = self._executor.submit(func)
         try:
-            return func()
+            return future.result(timeout=max(1, self.settings.longbridge_request_timeout_seconds))
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            self._open_circuit(
+                reason=(
+                    f"Longbridge timed out while trying to {action} after "
+                    f"{self.settings.longbridge_request_timeout_seconds}s."
+                )
+            )
+            raise LongbridgeIntegrationError(
+                f"Longbridge timed out while trying to {action} after "
+                f"{self.settings.longbridge_request_timeout_seconds}s."
+            ) from exc
         except LongbridgeIntegrationError:
             raise
         except Exception as exc:
+            if self._should_open_circuit(exc):
+                self._open_circuit(
+                    reason=f"Longbridge connectivity failed while trying to {action}: {exc}"
+                )
             raise LongbridgeIntegrationError(
                 f"Longbridge failed to {action}: {exc}"
             ) from exc
+
+    def _raise_if_circuit_open(self, action: str) -> None:
+        with self._circuit_lock:
+            now = time.monotonic()
+            if now >= self._circuit_open_until:
+                self._circuit_open_until = 0.0
+                self._circuit_reason = ""
+                return
+            remaining = max(1, int(round(self._circuit_open_until - now)))
+            reason = self._circuit_reason or "Longbridge connectivity is temporarily unavailable."
+        raise LongbridgeIntegrationError(
+            f"{reason} Skipping attempt to {action} for another {remaining}s."
+        )
+
+    def _open_circuit(self, *, reason: str) -> None:
+        with self._circuit_lock:
+            self._circuit_open_until = time.monotonic() + max(
+                1,
+                self.settings.longbridge_circuit_breaker_seconds,
+            )
+            self._circuit_reason = reason
+
+    @staticmethod
+    def _should_open_circuit(exc: Exception) -> bool:
+        message = str(exc).lower()
+        network_markers = (
+            "client error (connect)",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "timed out",
+            "timeout",
+            "dns",
+            "socket/token",
+            "network",
+        )
+        return any(marker in message for marker in network_markers)
 
     def _pick_account_balance(
         self,

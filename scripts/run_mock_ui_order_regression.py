@@ -166,6 +166,7 @@ def main() -> None:
             assert "Pre-open Risk Board" in dashboard.text
             assert "Risk Proxies" in dashboard.text
             assert "QQQ / SPY Put Check" in dashboard.text
+            assert "Opening Follow-through" in dashboard.text
             assert "Bull Put Strategy" in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
@@ -189,8 +190,10 @@ def main() -> None:
                 "strategy-runtime-strip",
                 "preopen-summary-strip",
                 "preopen-assessment-card",
-                "loadPreOpenAssessment()",
+                "preopen-run-review",
+                "loadMarketOverlayPanels()",
                 "renderPreOpenAssessment(",
+                "renderLatestPreOpenRun()",
                 "strategy-controls-form",
                 "runStrategyScan()",
                 "runStrategyReview()",
@@ -214,6 +217,11 @@ def main() -> None:
             pre_open = require_ok(client.get("/strategies/pre-open-risk"))
             assert pre_open["preferred_vehicle"] == "QQQ"
             assert pre_open["plain_put_view"] == "reasonable"
+            pre_open_runs = require_ok(
+                client.get("/strategies/pre-open-runs", params={"external_account_id": "LBPT10087357", "limit": 1})
+            )
+            assert len(pre_open_runs) == 1
+            assert pre_open_runs[0]["review_status"] == "confirmed"
 
             snapshots = require_ok(client.get("/account-snapshots", params={"external_account_id": "LBPT10087357"}))
             assert snapshots[0]["positions"][0]["symbol"] == "MOCK.US"
@@ -248,9 +256,11 @@ def main() -> None:
                         "checks": {
                             "dashboard_shell": True,
                             "pre_open_shell": True,
+                            "pre_open_review_shell": True,
                             "bull_put_shell": True,
                             "execution_summary_shell": True,
                             "pre_open_seed": True,
+                            "pre_open_run_seed": True,
                             "app_js_markers": True,
                             "account_seed": True,
                             "snapshot_seed": True,

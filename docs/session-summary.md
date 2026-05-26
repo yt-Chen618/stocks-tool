@@ -70,6 +70,9 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/pre-open-risk`
+- `GET /strategies/pre-open-runs`
+- `POST /strategies/pre-open-runs/{external_account_id}/capture`
+- `POST /strategies/pre-open-runs/{external_account_id}/review`
 - Current scope:
   - paper-only
   - configured universe: `QQQ.US`, `SMH.US`, `SOXL.US`, `EWY.US`
@@ -95,6 +98,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - strategy-driven journal entries are now written automatically for spread opens, spread closes, scan skips, and periodic parameter reviews
   - periodic review now generates at most one parameter suggestion at a time and never changes runtime strategy parameters automatically
   - the pre-open board now also builds a SPY / QQQ option-chain analysis layer with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries
+  - pre-open assessments are now persisted one run per target U.S. session date, with structured opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`
+  - holiday-aware scheduling now distinguishes normal Mondays from exchange holidays; for example, `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26`
 - Current limitations:
   - the workflow still coordinates two separate option orders rather than a broker-native combo order
   - real Longbridge paper preview now works, but the latest execute attempts on `QQQ.US` still ended `long_entry_unfilled`, so no bull put spread has opened end to end yet
@@ -104,6 +109,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - A background reconciliation scheduler now starts with the FastAPI app.
 - Active Longbridge paper accounts with `auto_reconcile_enabled=true` are polled automatically.
 - The same background loop now also monitors open or exit-pending bull put spreads.
+- The same background loop now also captures one pre-open downside assessment during the ET pre-open window and reviews opening follow-through after the regular session opens.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
 - Default intervals:
@@ -284,9 +290,14 @@ Frontend files:
 - Added regular-session entry gating and bounded repricing ladders for bull put entry legs.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
+- Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
+- Added holiday-aware target-session handling so the pre-open board and persisted runs correctly treat `2026-05-25` as a Memorial Day closure with the next open on `2026-05-26`.
+- Added an `Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
+- Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays refresh asynchronously in the background.
+- Added bounded Longbridge SDK timeouts plus a short circuit breaker so quote/connectivity failures fail fast instead of blocking the whole local API process.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
 - Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
-- Added a headless browser-driven `mock-ui` regression that now also checks the pre-open risk board, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
+- Added a headless browser-driven `mock-ui` regression that now also checks the pre-open risk board, opening follow-through review card, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
@@ -297,20 +308,20 @@ Frontend files:
 - Added `tests/test_strategies_api.py` for strategy preview, execute, monitor, and runtime-review route coverage.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the bull put review and smoke additions:
+- Latest local verification run after the dashboard load decoupling and Longbridge fast-fail additions:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `47 passed`
+- Result: `55 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the pre-open risk board, option-chain analysis, bull put strategy controls, skip-reason rendering, and latest-review rendering
+- Result: `passed` and now includes the pre-open risk board, opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, and latest-review rendering
 - Latest bull put service-regression run:
 
 ```powershell
@@ -329,6 +340,9 @@ Frontend files:
   - selected candidate remained `QQQ.US` bull put
   - no naked short was left behind
   - latest spread execute ended `entry_failed` with `long_entry_unfilled`
+- Latest dashboard usability timing on a fresh local instance after the async overlay change:
+  - first open reached `Dashboard updated. Market overlays are refreshing in the background.` in about `1199 ms`
+  - manual refresh returned to the same usable state in about `3371 ms`
 
 ## Known cleanup items
 

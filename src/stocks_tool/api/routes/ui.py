@@ -237,6 +237,18 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
+                        <section class="panel">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Review</span>
+                              <h2>Opening Follow-through</h2>
+                            </div>
+                          </div>
+                          <div id="preopen-run-review" class="strategy-note-body empty">
+                            Select a broker account to load the latest pre-open capture and opening review.
+                          </div>
+                        </section>
+
                         <div class="panel-grid">
                           <section class="panel">
                             <div class="panel-header">
