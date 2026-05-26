@@ -25,6 +25,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `watchlists`
 - `broker-accounts`
 - `account-snapshots`
+- `account-snapshots/latest`
 - `brokers/longbridge`
 - `strategies`
 - `executions`
@@ -128,6 +129,14 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `orders_last_synced_at`
   - `orders_last_sync_error`
 - The scheduler is disabled in pytest through `tests/conftest.py`.
+
+### External automation note
+
+- A Codex heartbeat automation named `US Preopen Market Check` is configured outside the repo.
+- The device locale is `Asia/Shanghai`, so the automation does **not** use a single fixed local reminder time for U.S. pre-open work.
+- Instead, it wakes at local `20:35` and `21:35` on weekdays, then checks whether the current `America/New_York` time is actually inside the `08:30-09:15 ET` U.S. pre-open window.
+- This dual-window design is intentional so the same automation survives U.S. daylight-saving changes without needing manual edits each spring/fall.
+- The automation also stays quiet on market holidays or other non-trading days; the `2026-05-25` Memorial Day closure is the current example that motivated this rule.
 
 ### Orders layer
 
@@ -294,6 +303,8 @@ Frontend files:
 - Added holiday-aware target-session handling so the pre-open board and persisted runs correctly treat `2026-05-25` as a Memorial Day closure with the next open on `2026-05-26`.
 - Added an `Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
 - Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays refresh asynchronously in the background.
+- Added `GET /account-snapshots/latest` so the dashboard can fetch the latest local snapshot summary without reloading the full snapshot-history payload on each refresh.
+- Added explicit dashboard overlay states for `Quick Quote` and `Pre-open Risk Board`, including `Live`, `Refreshing`, `Timed Out`, `Circuit Open`, and `Stale`, while preserving the last successful broker-backed data when a later refresh fails.
 - Added bounded Longbridge SDK timeouts plus a short circuit breaker so quote/connectivity failures fail fast instead of blocking the whole local API process.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
 - Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
@@ -321,7 +332,7 @@ Frontend files:
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the pre-open risk board, opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, and latest-review rendering
+- Result: `passed` and now includes the pre-open risk board, opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the overlay status surfaces for `Quick Quote` and the pre-open board
 - Latest bull put service-regression run:
 
 ```powershell

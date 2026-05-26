@@ -64,6 +64,22 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
         ).scalars().unique().one()
         return self._to_domain(refreshed)
 
+    def get_latest_account_snapshot(
+        self,
+        external_account_id: str,
+    ) -> AccountSnapshot | None:
+        query = (
+            select(AccountSnapshotRecord)
+            .options(selectinload(AccountSnapshotRecord.positions))
+            .where(AccountSnapshotRecord.external_account_id == external_account_id)
+            .order_by(AccountSnapshotRecord.captured_at.desc())
+            .limit(1)
+        )
+        record = self.session.execute(query).scalars().unique().first()
+        if record is None:
+            return None
+        return self._to_domain(record)
+
     def list_account_snapshots(
         self,
         external_account_id: str | None = None,

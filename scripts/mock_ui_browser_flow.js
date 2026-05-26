@@ -18,9 +18,13 @@ async function main() {
   let preOpenRunText = "";
 
   try {
-    await page.goto(baseUrl, { waitUntil: "networkidle" });
+    await page.goto(baseUrl, { waitUntil: "load" });
     await page.waitForSelector("#account-select");
     await page.waitForSelector("#spreads-body tr");
+    await page.waitForFunction(
+      () => document.getElementById("status-banner")?.textContent?.includes("Dashboard updated"),
+      { timeout: 10000 },
+    );
     await expectText(page.locator("body"), "Pre-open Risk Board");
     await expectText(page.locator("body"), "Risk Proxies");
     await expectText(page.locator("body"), "QQQ / SPY Put Check");
@@ -30,6 +34,8 @@ async function main() {
     await expectText(page.locator("body"), "Bull Put Spreads");
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
+    await expectText(page.locator("#quote-card"), "LIVE");
+    await expectText(page.locator("#preopen-summary-strip"), "Board Status");
     await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
     await expectText(page.locator("#preopen-signals"), "Nasdaq 100 ETF");
     await expectText(page.locator("#preopen-puts"), "QQQ260530P498000.US");
@@ -159,11 +165,21 @@ async function main() {
   }
 }
 
-async function expectText(locator, text) {
-  const content = await locator.innerText();
-  if (!content.includes(text)) {
-    throw new Error(`Expected text '${text}' to appear in locator content.`);
+async function expectText(locator, text, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let content = "";
+  while (Date.now() < deadline) {
+    try {
+      content = await locator.innerText();
+      if (content.includes(text)) {
+        return;
+      }
+    } catch {
+      // ignore and retry
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
+  throw new Error(`Expected text '${text}' to appear in locator content. Current content: ${content}`);
 }
 
 async function clickRowButton(page, rowSelector, matchText, buttonText) {

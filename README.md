@@ -91,6 +91,7 @@ Then open:
 - `GET /brokers/longbridge/profile`
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
+- `GET /account-snapshots/latest?external_account_id=LBPT10087357`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/pre-open-risk`
 - `GET /strategies/pre-open-runs`
@@ -152,6 +153,7 @@ The bull put spread workflow is currently paper-only:
 - holiday handling: the pre-open assessment now distinguishes normal Mondays from exchange holidays, so `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26 09:30 ET`
 - dashboard: the `/` workbench now shows a pre-open risk board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, richer reference-put liquidity summaries, a deeper option-chain analysis layer with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus the latest persisted opening follow-through run for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 - dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest pre-open run now render first; Longbridge-backed `Quick Quote` and `Pre-open Risk Board` refresh in the background so `/` stays usable even when broker quote calls are slow
+- dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded request timeout plus a short circuit breaker to fail fast when quote connectivity degrades instead of hanging the whole local API
 
 ## Regression scripts

@@ -121,6 +121,47 @@ class AccountSnapshot(BaseModel):
     captured_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class AccountSnapshotPositionSummary(BaseModel):
+    symbol: str
+    asset_type: AssetType
+    quantity: Decimal
+    average_cost: Decimal
+    market_value: Decimal
+    unrealized_pnl: Decimal
+
+
+class AccountSnapshotSummary(BaseModel):
+    account_id: str
+    currency: str = "USD"
+    cash_balance: Decimal
+    net_liquidation: Decimal
+    buying_power: Decimal
+    positions: list[AccountSnapshotPositionSummary] = Field(default_factory=list)
+    captured_at: datetime
+
+    @classmethod
+    def from_snapshot(cls, snapshot: AccountSnapshot) -> "AccountSnapshotSummary":
+        return cls(
+            account_id=snapshot.account_id,
+            currency=snapshot.currency,
+            cash_balance=snapshot.cash_balance,
+            net_liquidation=snapshot.net_liquidation,
+            buying_power=snapshot.buying_power,
+            positions=[
+                AccountSnapshotPositionSummary(
+                    symbol=position.symbol,
+                    asset_type=position.asset_type,
+                    quantity=position.quantity,
+                    average_cost=position.average_cost,
+                    market_value=position.market_value,
+                    unrealized_pnl=position.unrealized_pnl,
+                )
+                for position in snapshot.positions
+            ],
+            captured_at=snapshot.captured_at,
+        )
+
+
 class RiskCheckResult(BaseModel):
     status: RiskStatus
     reasons: list[str] = Field(default_factory=list)

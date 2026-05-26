@@ -99,6 +99,13 @@ class AccountSnapshotRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_latest_account_snapshot(
+        self,
+        external_account_id: str,
+    ) -> AccountSnapshot | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_account_snapshots(
         self,
         external_account_id: str | None = None,

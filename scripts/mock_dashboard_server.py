@@ -1020,6 +1020,20 @@ def create_app() -> FastAPI:
             return []
         return [deepcopy(state.snapshot)]
 
+    @app.get("/account-snapshots/latest")
+    def latest_account_snapshot(external_account_id: str = Query(...)) -> dict[str, Any] | None:
+        if external_account_id != state.account_id:
+            return None
+        return {
+            "account_id": state.snapshot["external_account_id"],
+            "currency": state.snapshot["currency"],
+            "cash_balance": state.snapshot["cash_balance"],
+            "net_liquidation": state.snapshot["net_liquidation"],
+            "buying_power": state.snapshot["buying_power"],
+            "positions": deepcopy(state.snapshot["positions"]),
+            "captured_at": state.snapshot["captured_at"],
+        }
+
     @app.get("/orders")
     def orders(external_account_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
         return state.list_orders(external_account_id)

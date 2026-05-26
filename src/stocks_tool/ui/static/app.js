@@ -7,11 +7,13 @@ const state = {
   runtime: null,
   executions: [],
   journals: [],
-  snapshots: [],
   brokerStatus: null,
   latestSnapshot: null,
   selectedOrderId: "",
+  quote: null,
+  quoteStatus: { kind: "idle", detail: "No quote loaded.", reason: "" },
   preOpenAssessment: null,
+  preOpenStatus: { kind: "loading", detail: "Loading pre-open assessment...", reason: "" },
   preOpenRuns: [],
 };
 
@@ -253,7 +255,6 @@ async function loadDashboard() {
 
 async function loadAccountData() {
   if (!state.selectedAccountId) {
-    state.snapshots = [];
     state.orders = [];
     state.spreads = [];
     state.runtime = null;
@@ -277,8 +278,8 @@ async function loadAccountData() {
   }
 
   try {
-    const [snapshots, orders, spreads, runtime, executions, journals, preOpenRuns] = await Promise.all([
-      fetchJson(`/account-snapshots?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+    const [latestSnapshot, orders, spreads, runtime, executions, journals, preOpenRuns] = await Promise.all([
+      fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
@@ -286,14 +287,13 @@ async function loadAccountData() {
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
     ]);
-    state.snapshots = snapshots;
     state.orders = orders;
     state.spreads = spreads;
     state.runtime = runtime;
     state.executions = executions;
     state.journals = journals;
     state.preOpenRuns = preOpenRuns;
-    state.latestSnapshot = snapshots[0] || null;
+    state.latestSnapshot = latestSnapshot;
 
     if (!orders.some((order) => order.id === state.selectedOrderId)) {
       state.selectedOrderId = orders[0]?.id || "";
@@ -325,33 +325,61 @@ async function loadQuote(options = {}) {
   const { timeoutMs = 8000 } = options;
   const symbol = els.quoteSymbol.value.trim().toUpperCase();
   if (!symbol) {
-    els.quoteCard.className = "quote-card empty";
-    els.quoteCard.textContent = "Enter a symbol.";
+    state.quote = null;
+    state.quoteStatus = buildOverlayStatus("idle", "Enter a symbol.");
+    renderQuote();
     return;
   }
 
+  const hasMatchingQuote = state.quote && state.quote.symbol === symbol;
+  if (!hasMatchingQuote) {
+    state.quote = null;
+  }
+  state.quoteStatus = buildOverlayStatus("loading", `Refreshing ${symbol} quote...`);
+  renderQuote();
+
   try {
-    const quote = await fetchJson(
+    state.quote = await fetchJson(
       `/brokers/longbridge/quote?symbol=${encodeURIComponent(symbol)}&mode=paper`,
       { timeoutMs }
     );
-    renderQuote(quote);
+    state.quoteStatus = buildOverlayStatus("live", overlayLiveDetail("Quote", state.quote.timestamp));
+    renderQuote();
   } catch (error) {
     console.error(error);
-    els.quoteCard.className = "quote-card";
-    els.quoteCard.innerHTML = `<div class="pill error">Quote Error</div><div>${escapeHtml(error.message || "Unable to load quote.")}</div>`;
+    const hasStaleQuote = state.quote && state.quote.symbol === symbol;
+    if (!hasStaleQuote) {
+      state.quote = null;
+    }
+    state.quoteStatus = classifyOverlayFailure(error, {
+      label: "quote",
+      stale: hasStaleQuote,
+      staleAt: state.quote?.timestamp,
+    });
+    renderQuote();
   }
 }
 
 async function loadPreOpenAssessment(options = {}) {
   const { timeoutMs = 10000 } = options;
+  state.preOpenStatus = buildOverlayStatus("loading", "Refreshing pre-open board...");
+  renderPreOpenAssessment();
+
   try {
     state.preOpenAssessment = await fetchJson("/strategies/pre-open-risk", { timeoutMs });
+    state.preOpenStatus = buildOverlayStatus(
+      "live",
+      overlayLiveDetail("Pre-open board", state.preOpenAssessment.analyzed_at)
+    );
     renderPreOpenAssessment();
   } catch (error) {
     console.error(error);
-    state.preOpenAssessment = null;
-    renderPreOpenAssessment(error.message || "Unable to load pre-open assessment.");
+    state.preOpenStatus = classifyOverlayFailure(error, {
+      label: "pre-open board",
+      stale: Boolean(state.preOpenAssessment),
+      staleAt: state.preOpenAssessment?.analyzed_at,
+    });
+    renderPreOpenAssessment();
   }
 }
 
@@ -1225,7 +1253,32 @@ function renderPositions() {
     .join("");
 }
 
-function renderQuote(quote) {
+function renderQuote() {
+  const quote = state.quote;
+  const overlay = state.quoteStatus;
+  const symbol = quote?.symbol || els.quoteSymbol.value.trim().toUpperCase();
+  if (!quote) {
+    if (overlay.kind === "idle") {
+      els.quoteCard.className = "quote-card empty";
+      els.quoteCard.textContent = overlay.detail || "No quote loaded.";
+      return;
+    }
+
+    els.quoteCard.className = "quote-card";
+    els.quoteCard.innerHTML = `
+      <div class="overlay-status-row">
+        <div class="overlay-status-copy">
+          <span class="section-kicker">${escapeHtml(symbol || "Quick Quote")}</span>
+          <strong>${escapeHtml(overlayStatusLabel(overlay.kind))}</strong>
+        </div>
+        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
+      </div>
+      <p class="overlay-detail">${escapeHtml(overlay.detail || "Quote refresh is waiting for the next response.")}</p>
+      ${renderOverlayReason(overlay)}
+    `;
+    return;
+  }
+
   const lastDone = Number(quote.last_done);
   const prevClose = Number(quote.prev_close);
   const diff = lastDone - prevClose;
@@ -1235,13 +1288,18 @@ function renderQuote(quote) {
 
   els.quoteCard.className = "quote-card";
   els.quoteCard.innerHTML = `
-    <div>
-      <span class="section-kicker">${escapeHtml(quote.symbol)}</span>
-      <div class="quote-price">
-        <strong>${formatNumber(quote.last_done)}</strong>
-        <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} / ${changePrefix}${pct.toFixed(2)}%</span>
+    <div class="overlay-status-row">
+      <div class="overlay-status-copy">
+        <span class="section-kicker">${escapeHtml(quote.symbol)}</span>
+        <div class="quote-price">
+          <strong>${formatNumber(quote.last_done)}</strong>
+          <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} / ${changePrefix}${pct.toFixed(2)}%</span>
+        </div>
       </div>
+      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
     </div>
+    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Quote", quote.timestamp))}</p>
+    ${renderOverlayReason(overlay)}
     <div class="quote-meta">
       <div><span>Open</span><strong>${formatNumber(quote.open)}</strong></div>
       <div><span>Prev Close</span><strong>${formatNumber(quote.prev_close)}</strong></div>
@@ -1253,11 +1311,18 @@ function renderQuote(quote) {
   `;
 }
 
-function renderPreOpenAssessment(errorMessage = "") {
+function renderPreOpenAssessment() {
   const assessment = state.preOpenAssessment;
+  const overlay = state.preOpenStatus;
   if (!assessment) {
-    const detail = errorMessage || "Waiting for the latest macro proxy snapshot.";
+    const detail = overlay.detail || "Waiting for the latest macro proxy snapshot.";
     const summaryValues = [
+      {
+        label: "Board Status",
+        value: overlayStatusLabel(overlay.kind),
+        tone: overlayStatusTone(overlay.kind),
+        detail,
+      },
       {
         label: "Downside Score",
         value: "--",
@@ -1296,8 +1361,17 @@ function renderPreOpenAssessment(errorMessage = "") {
       )
       .join("");
 
-    els.preOpenAssessmentCard.className = `strategy-note-body ${errorMessage ? "" : "empty"}`;
-    els.preOpenAssessmentCard.textContent = detail;
+    els.preOpenAssessmentCard.className = `strategy-note-body ${overlay.kind === "idle" || overlay.kind === "loading" ? "empty" : ""}`;
+    els.preOpenAssessmentCard.innerHTML = `
+      <div class="overlay-status-row">
+        <div class="overlay-status-copy">
+          <strong>Pre-open Risk Board</strong>
+          <span>${escapeHtml(detail)}</span>
+        </div>
+        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
+      </div>
+      ${renderOverlayReason(overlay)}
+    `;
     els.preOpenSignals.innerHTML = '<div class="holding-empty">Waiting for market proxy signals.</div>';
     els.preOpenPuts.innerHTML = '<div class="holding-empty">Waiting for directional put snapshots.</div>';
     els.preOpenChainAnalysis.innerHTML = '<div class="holding-empty">Waiting for option chain analysis.</div>';
@@ -1305,6 +1379,12 @@ function renderPreOpenAssessment(errorMessage = "") {
   }
 
   const summaryValues = [
+    {
+      label: "Board Status",
+      value: overlayStatusLabel(overlay.kind),
+      tone: overlayStatusTone(overlay.kind),
+      detail: overlay.detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at),
+    },
     {
       label: "Downside Score",
       value: String(assessment.downside_score),
@@ -1385,10 +1465,15 @@ function renderPreOpenAssessment(errorMessage = "") {
 
   els.preOpenAssessmentCard.className = "strategy-note-body";
   els.preOpenAssessmentCard.innerHTML = `
-    <div class="strategy-journal-head">
-      <strong>${escapeHtml(assessment.summary)}</strong>
-      <span>${escapeHtml(formatDateTime(assessment.analyzed_at))}</span>
+    <div class="overlay-status-row">
+      <div class="overlay-status-copy">
+        <strong>${escapeHtml(assessment.summary)}</strong>
+        <span>${escapeHtml(formatDateTime(assessment.analyzed_at))}</span>
+      </div>
+      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
     </div>
+    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at))}</p>
+    ${renderOverlayReason(overlay)}
     <div class="status-list">
       <div>
         <dt>Preferred Vehicle</dt>
@@ -2644,6 +2729,115 @@ function formatDateTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function buildOverlayStatus(kind, detail = "", reason = "") {
+  return { kind, detail, reason };
+}
+
+function overlayStatusTone(kind) {
+  if (kind === "live") {
+    return "success";
+  }
+  if (kind === "loading" || kind === "timed_out" || kind === "stale") {
+    return "warning";
+  }
+  if (kind === "circuit_open" || kind === "error") {
+    return "error";
+  }
+  return "neutral";
+}
+
+function overlayStatusLabel(kind) {
+  if (kind === "live") {
+    return "Live";
+  }
+  if (kind === "loading") {
+    return "Refreshing";
+  }
+  if (kind === "timed_out") {
+    return "Timed Out";
+  }
+  if (kind === "circuit_open") {
+    return "Circuit Open";
+  }
+  if (kind === "stale") {
+    return "Stale";
+  }
+  if (kind === "error") {
+    return "Unavailable";
+  }
+  return "Idle";
+}
+
+function overlayLiveDetail(label, refreshedAt) {
+  const formatted = formatDateTime(refreshedAt);
+  if (formatted === "--") {
+    return `${label} refreshed successfully.`;
+  }
+  return `${label} refreshed ${formatted}.`;
+}
+
+function classifyOverlayFailure(error, { label, stale = false, staleAt = null } = {}) {
+  const reason = error?.message || `Unable to load ${label}.`;
+  const normalized = reason.toLowerCase();
+  let failureKind = "error";
+  if (normalized.includes("timed out")) {
+    failureKind = "timed_out";
+  } else if (normalized.includes("skipping attempt")) {
+    failureKind = "circuit_open";
+  }
+
+  if (stale) {
+    return buildOverlayStatus(
+      "stale",
+      buildStaleOverlayDetail(label, failureKind, staleAt),
+      reason
+    );
+  }
+
+  return buildOverlayStatus(
+    failureKind,
+    buildOverlayFailureDetail(label, failureKind),
+    reason
+  );
+}
+
+function buildOverlayFailureDetail(label, kind) {
+  const namedLabel = capitalizeLabel(label);
+  if (kind === "timed_out") {
+    return `${namedLabel} refresh timed out before fresh broker data loaded.`;
+  }
+  if (kind === "circuit_open") {
+    return `${namedLabel} refresh is paused while the Longbridge circuit breaker cools down.`;
+  }
+  return `${namedLabel} refresh failed before fresh broker data loaded.`;
+}
+
+function buildStaleOverlayDetail(label, failureKind, staleAt) {
+  let failureText = "failed";
+  if (failureKind === "timed_out") {
+    failureText = "timed out";
+  } else if (failureKind === "circuit_open") {
+    failureText = "hit the Longbridge circuit breaker";
+  }
+  const lastSuccess = staleAt ? ` Last success ${formatDateTime(staleAt)}.` : "";
+  return `Showing the last successful ${label} while the latest refresh ${failureText}.${lastSuccess}`;
+}
+
+function renderOverlayReason(status) {
+  if (!status?.reason || status.kind === "idle" || status.kind === "loading" || status.kind === "live") {
+    return "";
+  }
+  return `<p class="overlay-reason">Latest refresh: ${escapeHtml(status.reason)}</p>`;
+}
+
+function capitalizeLabel(value) {
+  const text = String(value || "");
+  if (!text) {
+    return "";
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function formatSyncHeadline(lastSyncedAt, lastAttemptAt) {

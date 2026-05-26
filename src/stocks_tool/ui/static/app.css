@@ -482,6 +482,39 @@ a {
   color: var(--text-soft);
 }
 
+.overlay-status-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overlay-status-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.overlay-status-copy span {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.overlay-detail,
+.overlay-reason {
+  margin: 0;
+  color: var(--text-soft);
+}
+
+.overlay-detail {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.overlay-reason {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .strategy-journal-entry {
   padding-top: 12px;
   border-top: 1px solid rgba(197, 190, 175, 0.72);
