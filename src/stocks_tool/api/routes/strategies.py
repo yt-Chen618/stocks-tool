@@ -159,6 +159,7 @@ def preview_bull_put_spread(
 @router.get("/bull-put/readiness", response_model=BullPutStrategyReadinessResult)
 def check_bull_put_readiness(
     external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    symbol: str | None = Query(default=None, description="Optional configured symbol to check first, e.g. QQQ.US"),
     mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     as_of: datetime | None = Query(
         default=None,
@@ -169,6 +170,7 @@ def check_bull_put_readiness(
     try:
         return service.check_entry_readiness(
             external_account_id=external_account_id,
+            symbol=symbol,
             mode=mode,
             as_of=as_of,
         )

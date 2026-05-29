@@ -22,8 +22,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
+    parser.add_argument("--symbol", default="QQQ.US", help="Configured symbol to check. Use an empty string to scan all configured symbols.")
     parser.add_argument("--mode", default="paper")
     parser.add_argument("--as-of", default=None, help="Optional UTC timestamp, e.g. 2026-05-29T14:45:00Z.")
+    parser.add_argument("--timeout-seconds", type=float, default=240.0)
     parser.add_argument("--json-output", type=Path, default=None)
     return parser.parse_args()
 
@@ -54,7 +56,7 @@ def summarize(readiness: dict[str, Any]) -> str:
 def main() -> None:
     args = parse_args()
     base_url = args.base_url.rstrip("/")
-    client = httpx.Client(base_url=base_url, timeout=90)
+    client = httpx.Client(base_url=base_url, timeout=args.timeout_seconds)
     try:
         try:
             health = require_json(client.get("/health"))
@@ -62,6 +64,8 @@ def main() -> None:
                 "external_account_id": args.account_id,
                 "mode": args.mode,
             }
+            if args.symbol:
+                params["symbol"] = args.symbol
             if args.as_of:
                 params["as_of"] = args.as_of
             readiness = require_json(client.get("/strategies/bull-put/readiness", params=params))

@@ -98,6 +98,7 @@ def test_bull_put_readiness_route_returns_preflight_result() -> None:
             "/strategies/bull-put/readiness",
             params={
                 "external_account_id": "LBPT10087357",
+                "symbol": "QQQ.US",
                 "mode": "paper",
                 "as_of": "2026-05-22T14:45:00Z",
             },
@@ -111,6 +112,7 @@ def test_bull_put_readiness_route_returns_preflight_result() -> None:
     assert body["preferred_symbol"] == "QQQ.US"
     request = service.check_entry_readiness.call_args.kwargs
     assert request["external_account_id"] == "LBPT10087357"
+    assert request["symbol"] == "QQQ.US"
 
 
 def test_pre_open_risk_route_returns_assessment() -> None:

@@ -247,6 +247,7 @@ class BullPutStrategyService:
         external_account_id: str,
         mode: ExecutionMode = ExecutionMode.PAPER,
         as_of: datetime | None = None,
+        symbol: str | None = None,
     ) -> BullPutStrategyReadinessResult:
         evaluated_at = as_of or datetime.now(timezone.utc)
         if evaluated_at.tzinfo is None:
@@ -255,6 +256,13 @@ class BullPutStrategyService:
         checks: list[BullPutStrategyReadinessCheck] = []
         previews: list[BullPutSpreadScanResult] = []
         strategy = self.settings.bull_put_strategy
+        target_symbols = (symbol,) if symbol is not None else strategy.symbols
+        unsupported_symbols = [target for target in target_symbols if target not in strategy.symbols]
+        if unsupported_symbols:
+            unsupported = ", ".join(unsupported_symbols)
+            raise ValueError(
+                f"Symbol '{unsupported}' is outside the configured bull put spread universe: {', '.join(strategy.symbols)}."
+            )
 
         def add_check(name: str, status: str, detail: str, *, blocking: bool = False) -> None:
             checks.append(
@@ -324,7 +332,7 @@ class BullPutStrategyService:
         eligible_previews: list[BullPutSpreadScanResult] = []
         capacity_block: str | None = None
         preview_errors: list[str] = []
-        for symbol in strategy.symbols:
+        for symbol in target_symbols:
             try:
                 preview = self.preview_spread(
                     external_account_id=external_account_id,

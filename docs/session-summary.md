@@ -320,7 +320,7 @@ Frontend files:
 - Added holiday-aware target-session handling so the pre-open board and persisted runs correctly treat `2026-05-25` as a Memorial Day closure with the next open on `2026-05-26`.
 - Added a `Stored Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
 - Split the dashboard macro workflow into `Load Live Macro` for the fast real-time proxy board, `Load Option Overlays` for slower option-chain detail, and `Save Current Board` for persisting the current live/partial read.
-- Added `GET /strategies/bull-put/readiness` plus `scripts/run_bull_put_readiness_check.py` / `scripts/run_regression.py bull-put-readiness` so opening readiness can be checked without submitting orders.
+- Added `GET /strategies/bull-put/readiness` plus `scripts/run_bull_put_readiness_check.py` / `scripts/run_regression.py bull-put-readiness` so opening readiness can be checked without submitting orders; the script defaults to `QQQ.US` to avoid full-universe option-chain scans before the open.
 - Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays stay manual.
 - Added `GET /account-snapshots/latest` so the dashboard can fetch the latest local snapshot summary without reloading the full snapshot-history payload on each refresh.
 - Added explicit dashboard overlay states for `Quick Quote` and the real-time macro board, including `Live`, `Refreshing`, `Partial`, `Timed Out`, `Circuit Open`, and `Stale`, while preserving the last successful broker-backed data when a later refresh fails.
