@@ -23,7 +23,9 @@ from stocks_tool.domain.enums import (
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
+    CloseCoveredCallProposalRequest,
     CoveredCallCandidate,
+    CoveredCallCloseResult,
     CoveredCallExecutionResult,
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
@@ -383,6 +385,95 @@ class CoveredCallStrategyService:
             signal=signal,
         )
 
+    def close_proposal(
+        self,
+        proposal_id: str,
+        request: CloseCoveredCallProposalRequest,
+    ) -> CoveredCallCloseResult:
+        if self.order_service is None:
+            raise RuntimeError("Covered call close requires an order service.")
+        proposal = self.experiments.get_proposal(proposal_id)
+        if proposal is None:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        if proposal.strategy_id != self.strategy_id:
+            raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
+        if proposal.status != StrategyProposalStatus.EXECUTED:
+            raise ValueError(f"Strategy proposal '{proposal_id}' must be executed before close.")
+        if proposal.candidate_payload is None:
+            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+
+        candidate = CoveredCallCandidate.model_validate(proposal.candidate_payload)
+        limit_price = request.limit_price or self._current_call_mark(
+            candidate=candidate,
+            mode=proposal.mode,
+        )
+        if limit_price is None or limit_price <= Decimal("0"):
+            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive close limit price.")
+
+        order = self.order_service.submit_order(
+            CreateOrderRequest(
+                external_account_id=proposal.external_account_id,
+                broker=BrokerName.LONGBRIDGE,
+                symbol=candidate.call_symbol,
+                asset_type=AssetType.OPTION,
+                side=OrderSide.BUY,
+                quantity=candidate.contracts,
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
+                mode=proposal.mode,
+                limit_price=limit_price,
+                option_contract=OptionContractRef(
+                    underlying_symbol=candidate.underlying_symbol,
+                    expiration_date=candidate.expiration_date,
+                    strike=candidate.call_strike,
+                    right=OptionRight.CALL,
+                ),
+                remark=request.remark or "covered-call-close",
+            )
+        )
+        now = datetime.now(timezone.utc)
+        run = self.experiments.create_run(
+            CreateStrategyRunRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                run_type="proposal_close",
+                status=StrategyRunStatus.EXECUTED,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                order_id=order.id,
+                started_at=now,
+                completed_at=now,
+                summary=f"Submitted covered call buy-to-close order for {candidate.call_symbol}.",
+                metrics_payload={
+                    "proposal_id": proposal.id,
+                    "order_id": order.id,
+                    "limit_price": str(limit_price),
+                    "candidate": candidate.model_dump(mode="json"),
+                },
+            )
+        )
+        signal = self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.EXECUTION,
+                symbol=proposal.symbol,
+                run_id=run.id,
+                proposal_id=proposal.id,
+                summary=f"Covered call close order submitted for {candidate.call_symbol}.",
+                source="covered_call_v1",
+                signal_payload={"order_id": order.id, "candidate": candidate.model_dump(mode="json")},
+            )
+        )
+        return CoveredCallCloseResult(
+            proposal=proposal,
+            order=order,
+            run=run,
+            signal=signal,
+        )
+
     def monitor_proposal(
         self,
         proposal_id: str,
@@ -678,6 +769,21 @@ class CoveredCallStrategyService:
             return quote
         bid, ask = self.longbridge_adapter.get_best_bid_ask(symbol=quote.symbol, mode=mode)
         return quote.model_copy(update={"bid": bid, "ask": ask})
+
+    def _current_call_mark(
+        self,
+        *,
+        candidate: CoveredCallCandidate,
+        mode: ExecutionMode,
+    ) -> Decimal | None:
+        quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=[candidate.call_symbol],
+            mode=mode,
+        )
+        if not quotes:
+            return None
+        quote = self._with_top_of_book(quotes[0], mode=mode)
+        return self._quote_mid(quote)
 
     def _passes_liquidity_filter(self, quote: OptionMarketSnapshot) -> bool:
         strategy = self.settings.covered_call_strategy

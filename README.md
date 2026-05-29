@@ -116,6 +116,7 @@ Then open:
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
+- `POST /strategies/covered-call/proposals/{proposal_id}/close`
 - `GET /strategies/experiment`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
@@ -183,7 +184,7 @@ The bull put spread workflow is currently paper-only:
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
 - market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters
-- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance
+- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed proposal
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
 - dashboard event calendar: `/` now shows upcoming market events so strategy proposal risk warnings have a visible source
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
@@ -247,6 +248,6 @@ Useful examples:
 
 ## Next milestones
 
-1. Add covered-call close / roll order execution paths after monitor guidance.
+1. Add covered-call roll order execution after close guidance.
 2. Add scheduler and ingestion workers for market/news/event data so proposal generation can avoid earnings and macro-event traps.
 3. Add authentication, audit logging, and strategy-level permission controls before any live execution path expands.

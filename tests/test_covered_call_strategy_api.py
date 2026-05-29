@@ -19,6 +19,7 @@ from stocks_tool.domain.enums import (
 from stocks_tool.domain.models import (
     CoveredCallExecutionResult,
     CoveredCallCandidate,
+    CoveredCallCloseResult,
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
@@ -239,3 +240,57 @@ def test_covered_call_monitor_route_returns_management_guidance() -> None:
     request = service.monitor_proposal.call_args
     assert request.args[0] == "proposal-1"
     assert request.kwargs["record_signal"] is False
+
+
+def test_covered_call_close_route_submits_buyback_order() -> None:
+    service = Mock()
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Executed covered call proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.close_proposal.return_value = CoveredCallCloseResult(
+        proposal=proposal,
+        order=Order(
+            id="order-close-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-close-1",
+            symbol="UNH260626C105000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("0.55"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        submitted_at=NOW,
+    )
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-1/close",
+            json={"limit_price": "0.55"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["order"]["side"] == "buy"
+    assert body["order"]["limit_price"] == "0.55"
+    request = service.close_proposal.call_args.args[1]
+    assert request.limit_price == Decimal("0.55")

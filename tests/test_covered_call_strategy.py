@@ -23,6 +23,7 @@ from stocks_tool.domain.enums import (
 from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
+    CloseCoveredCallProposalRequest,
     ExecuteCoveredCallProposalRequest,
     MarketEvent,
     OptionMarketSnapshot,
@@ -459,3 +460,72 @@ def test_covered_call_monitor_records_take_profit_guidance() -> None:
     assert result.premium_capture_pct == Decimal("54.17")
     assert result.signal is not None
     assert experiments.signal_request.signal_type == StrategySignalType.MONITOR
+
+
+def test_covered_call_close_submits_buy_to_close_order() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Executed covered call proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        candidate_payload={
+            "underlying_symbol": "UNH.US",
+            "expiration_date": "2026-06-26",
+            "days_to_expiration": 28,
+            "contracts": 1,
+            "covered_shares": 100,
+            "share_quantity": "100",
+            "average_cost": "90",
+            "underlying_price": "100",
+            "call_symbol": "UNH260626C105000.US",
+            "call_strike": "105",
+            "call_bid": "1.20",
+            "call_ask": "1.30",
+            "call_mid": "1.25",
+            "premium_income": "120.00",
+            "delta": "0.30",
+            "open_interest": 800,
+            "volume": 25,
+            "quote_timestamp": "2026-05-29T15:00:00Z",
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    order_service.submit_order.return_value = Order(
+        id="order-close-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-close-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("0.55"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.close_proposal(
+        "proposal-1",
+        request=CloseCoveredCallProposalRequest(limit_price=Decimal("0.55")),
+    )
+
+    assert result.order.id == "order-close-1"
+    request = order_service.submit_order.call_args.args[0]
+    assert request.symbol == "UNH260626C105000.US"
+    assert request.side == OrderSide.BUY
+    assert request.limit_price == Decimal("0.55")
+    assert experiments.run_request.run_type == "proposal_close"
+    assert experiments.signal_request.signal_type == StrategySignalType.EXECUTION
