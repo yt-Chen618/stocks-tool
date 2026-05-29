@@ -29,6 +29,10 @@ const TRANSLATIONS = {
     "Ready": "就绪",
     "Strategy": "策略",
     "Strategy Center": "策略中心",
+    "Risk Calendar": "风险日历",
+    "Market Event Calendar": "市场事件日历",
+    "Events": "事件",
+    "Upcoming Events": "即将到来的事件",
     "Experiment": "实验",
     "Strategy Experiment Bench": "策略实验台",
     "Active Proposals": "待处理提案",
@@ -49,6 +53,8 @@ const TRANSLATIONS = {
     "No strategy signals recorded yet.": "尚无策略信号记录。",
     "Review Feed": "复盘流",
     "No strategy reviews recorded yet.": "尚无策略复盘记录。",
+    "No market events loaded yet.": "尚未加载市场事件。",
+    "No upcoming market events recorded.": "尚无即将到来的市场事件。",
     "Bull Put": "牛市看跌价差",
     "Bull Put Strategy": "牛市看跌策略",
     "Entry Status": "入场状态",
@@ -411,6 +417,7 @@ const state = {
   spreads: [],
   runtime: null,
   strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
+  marketEvents: [],
   executions: [],
   journals: [],
   brokerStatus: null,
@@ -468,6 +475,7 @@ function bindElements() {
   els.strategyRunsCard = document.getElementById("strategy-runs-card");
   els.strategySignalsCard = document.getElementById("strategy-signals-card");
   els.strategyReviewsCard = document.getElementById("strategy-reviews-card");
+  els.marketEventsCard = document.getElementById("market-events-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
   els.ordersBody = document.getElementById("orders-body");
@@ -956,6 +964,7 @@ async function loadAccountData() {
     state.spreads = [];
     state.runtime = null;
     state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
+    state.marketEvents = [];
     state.executions = [];
     state.journals = [];
     state.preOpenRuns = [];
@@ -970,6 +979,7 @@ async function loadAccountData() {
     renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderStrategyExperiment();
+    renderMarketEvents();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -981,12 +991,13 @@ async function loadAccountData() {
   }
 
   try {
-    const [latestSnapshot, orders, spreads, runtime, strategyExperiment, executions, journals, preOpenRuns] = await Promise.all([
+    const [latestSnapshot, orders, spreads, runtime, strategyExperiment, marketEvents, executions, journals, preOpenRuns] = await Promise.all([
       fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/experiment?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=6`),
+      fetchJson("/market-events?limit=8"),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
@@ -995,6 +1006,7 @@ async function loadAccountData() {
     state.spreads = spreads;
     state.runtime = runtime;
     state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
+    state.marketEvents = Array.isArray(marketEvents) ? marketEvents : [];
     state.executions = executions;
     state.journals = journals;
     state.preOpenRuns = preOpenRuns;
@@ -1012,6 +1024,7 @@ async function loadAccountData() {
     renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderStrategyExperiment();
+    renderMarketEvents();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -2047,6 +2060,34 @@ function renderStrategyExperimentList({ element, items, emptyText, renderItem })
   }
   element.className = "strategy-note-body";
   element.innerHTML = items.slice(0, 4).map(renderItem).join("");
+}
+
+function renderMarketEvents() {
+  if (!els.marketEventsCard) {
+    return;
+  }
+  const events = Array.isArray(state.marketEvents) ? state.marketEvents : [];
+  if (!events.length) {
+    els.marketEventsCard.className = "strategy-note-body empty";
+    els.marketEventsCard.textContent = "No upcoming market events recorded.";
+    return;
+  }
+  els.marketEventsCard.className = "strategy-note-body";
+  els.marketEventsCard.innerHTML = events
+    .slice(0, 6)
+    .map(
+      (event) => `
+        <article class="strategy-journal-entry">
+          <div class="strategy-journal-head">
+            <strong>${escapeHtml(event.title)}</strong>
+            <span class="pill ${strategyStatusClass(event.severity)}">${escapeHtml(formatStrategyStatusLabel(event.severity))}</span>
+          </div>
+          <p>${escapeHtml([event.symbol || "Market", event.event_type, event.source].filter(Boolean).join(" / "))}</p>
+          <span>${escapeHtml(formatDateTime(event.scheduled_at))}</span>
+        </article>
+      `
+    )
+    .join("");
 }
 
 function renderSpreads() {
@@ -4007,13 +4048,13 @@ function statusClass(status) {
 }
 
 function strategyStatusClass(status) {
-  if (status === "approved" || status === "executed" || status === "reviewed" || status === "suggested") {
+  if (status === "approved" || status === "executed" || status === "reviewed" || status === "suggested" || status === "low") {
     return "success";
   }
-  if (status === "pending" || status === "planned" || status === "running" || status === "candidate" || status === "risk_check") {
+  if (status === "pending" || status === "planned" || status === "running" || status === "candidate" || status === "risk_check" || status === "medium") {
     return "warning";
   }
-  if (status === "rejected" || status === "expired" || status === "failed" || status === "blocked") {
+  if (status === "rejected" || status === "expired" || status === "failed" || status === "blocked" || status === "high") {
     return "error";
   }
   return "neutral";

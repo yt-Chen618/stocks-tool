@@ -483,6 +483,34 @@ class MockDashboardState:
                 "updated_at": "2026-05-20T20:10:00Z",
             }
         ]
+        self.market_events = [
+            {
+                "id": "mock-event-0001",
+                "symbol": "UNH.US",
+                "event_type": "earnings",
+                "title": "UNH earnings window",
+                "scheduled_at": "2026-06-01T13:30:00Z",
+                "source": "mock-ui",
+                "severity": "high",
+                "notes": "Avoid opening fresh short-volatility premium without explicit approval.",
+                "raw_payload": None,
+                "created_at": "2026-05-29T14:00:00Z",
+                "updated_at": "2026-05-29T14:00:00Z",
+            },
+            {
+                "id": "mock-event-0002",
+                "symbol": None,
+                "event_type": "fomc",
+                "title": "FOMC minutes",
+                "scheduled_at": "2026-06-03T18:00:00Z",
+                "source": "mock-ui",
+                "severity": "medium",
+                "notes": "Macro volatility window.",
+                "raw_payload": None,
+                "created_at": "2026-05-29T14:00:00Z",
+                "updated_at": "2026-05-29T14:00:00Z",
+            },
+        ]
         self.strategy_proposals = [
             {
                 "id": "mock-proposal-0001",
@@ -953,6 +981,17 @@ class MockDashboardState:
             rows = [row for row in rows if row["strategy_id"] == strategy_id]
         return deepcopy(sorted(rows, key=lambda item: item["reviewed_at"], reverse=True)[:limit])
 
+    def list_market_events(
+        self,
+        symbol: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        rows = self.market_events
+        if symbol is not None:
+            normalized_symbol = symbol.upper()
+            rows = [row for row in rows if row["symbol"] in {None, normalized_symbol}]
+        return deepcopy(sorted(rows, key=lambda item: item["scheduled_at"])[:limit])
+
     def list_spreads(
         self,
         external_account_id: str | None = None,
@@ -1357,6 +1396,13 @@ def create_app() -> FastAPI:
             strategy_id=strategy_id,
             limit=limit,
         )
+
+    @app.get("/market-events")
+    def market_events(
+        symbol: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[dict[str, Any]]:
+        return state.list_market_events(symbol=symbol, limit=limit)
 
     @app.post("/strategies/pre-open-runs/{external_account_id}/capture")
     def capture_pre_open_run(

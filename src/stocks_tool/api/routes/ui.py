@@ -286,6 +286,26 @@ def render_dashboard() -> HTMLResponse:
                         <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
+                              <span class="section-kicker">Risk Calendar</span>
+                              <h2>Market Event Calendar</h2>
+                            </div>
+                          </div>
+                          <div class="strategy-notes-grid experiment-grid">
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Events</span>
+                                <h3>Upcoming Events</h3>
+                              </div>
+                              <div id="market-events-card" class="strategy-note-body empty">
+                                No market events loaded yet.
+                              </div>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
                               <span class="section-kicker">Experiment</span>
                               <h2>Strategy Experiment Bench</h2>
                             </div>

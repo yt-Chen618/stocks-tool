@@ -327,6 +327,7 @@ Current dashboard capabilities:
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View strategy experiment proposals, runs, signals, and reviews for the selected account
+- View upcoming market events used by strategy proposal risk warnings
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View a pre-open risk board with macro proxies plus `QQQ / SPY` directional put checks
 - View plain-put action guidance, gap-chase risk, opening checkpoints, richer `QQQ / SPY` reference-put liquidity summaries, and a deeper option-chain analysis layer inside the pre-open board
@@ -389,6 +390,7 @@ Frontend files:
 - Added approved-proposal-only covered-call paper execution through `POST /strategies/covered-call/proposals/{proposal_id}/execute`.
 - Added covered-call monitoring guidance through `POST /strategies/covered-call/proposals/{proposal_id}/monitor`.
 - Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
+- Added a dashboard market-event calendar panel and mock UI regression coverage for upcoming events.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
