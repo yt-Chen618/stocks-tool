@@ -23,6 +23,7 @@ from stocks_tool.domain.models import (
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
+    CoveredCallRollProposalResult,
     CoveredCallRiskSummary,
     Order,
     StrategyProposal,
@@ -240,6 +241,82 @@ def test_covered_call_monitor_route_returns_management_guidance() -> None:
     request = service.monitor_proposal.call_args
     assert request.args[0] == "proposal-1"
     assert request.kwargs["record_signal"] is False
+
+
+def test_covered_call_roll_propose_route_returns_roll_proposal() -> None:
+    service = Mock()
+    preview = build_preview()
+    roll_candidate = preview.candidate.model_copy(
+        update={
+            "expiration_date": date(2026, 7, 10),
+            "days_to_expiration": 42,
+            "call_symbol": "UNH260710C110000.US",
+            "call_strike": Decimal("110"),
+            "call_bid": Decimal("1.10"),
+            "call_ask": Decimal("1.20"),
+            "call_mid": Decimal("1.15"),
+            "premium_income": Decimal("110.00"),
+        }
+    )
+    next_preview = preview.model_copy(
+        update={
+            "selected_expiration_date": date(2026, 7, 10),
+            "days_to_expiration": 42,
+            "candidate": roll_candidate,
+        }
+    )
+    proposal = StrategyProposal(
+        id="proposal-2",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Buy back the current call and sell a later call.",
+        status=StrategyProposalStatus.PENDING,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.create_roll_proposal.return_value = CoveredCallRollProposalResult(
+        current_monitor=CoveredCallMonitorResult(
+            proposal_id="proposal-1",
+            external_account_id="LBPT10087357",
+            symbol="UNH.US",
+            evaluated_at=NOW,
+            candidate=preview.candidate,
+            underlying_price=Decimal("100"),
+            call_mark=Decimal("0.55"),
+            estimated_buyback_debit=Decimal("55.00"),
+            estimated_open_pnl=Decimal("65.00"),
+            premium_capture_pct=Decimal("54.17"),
+            days_to_expiration=28,
+            action="consider_buyback_take_profit",
+            reasons=["At least 50% of the original premium is captured."],
+        ),
+        next_preview=next_preview,
+        proposal=proposal,
+    )
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-1/roll-propose",
+            json={
+                "as_of": "2026-05-29T15:00:00Z",
+                "min_new_expiration_date": "2026-07-01",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposal"]["proposed_action"] == "roll_covered_call"
+    assert body["next_preview"]["candidate"]["call_symbol"] == "UNH260710C110000.US"
+    request = service.create_roll_proposal.call_args.args[1]
+    assert service.create_roll_proposal.call_args.args[0] == "proposal-1"
+    assert request.min_new_expiration_date == date(2026, 7, 1)
 
 
 def test_covered_call_close_route_submits_buyback_order() -> None:

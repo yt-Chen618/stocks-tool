@@ -22,7 +22,7 @@ This repository currently contains:
 - a paper bull put spread workflow with preview, two-leg entry, exit monitoring, rollback, and spread persistence
 - a bull put runtime-state layer with scheduled entry scans, review generation, kill-switch style controls, and strategy journaling
 - a strategy experiment ledger for proposals, runs, signals, and reviews before new strategies are automated
-- a first-pass `covered_call_v1` proposal workflow that records covered-call candidates without submitting orders
+- a first-pass `covered_call_v1` proposal workflow that records covered-call candidates and roll candidates before order execution
 - a local market-event calendar for earnings and macro risk windows
 - a pre-open downside board with SPY / QQQ option-chain analysis for directional long-put checks
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
@@ -116,6 +116,7 @@ Then open:
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
+- `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/close`
 - `GET /strategies/experiment`
 - `GET /strategies/proposals`
@@ -184,7 +185,7 @@ The bull put spread workflow is currently paper-only:
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
 - market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters
-- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed proposal
+- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance; `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose` records a manual-approval roll proposal with current buyback estimate and next OTM call candidate; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed proposal
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
 - dashboard event calendar: `/` now shows upcoming market events so strategy proposal risk warnings have a visible source
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
@@ -254,6 +255,6 @@ Market events can also be imported from a local CSV:
 
 ## Next milestones
 
-1. Add covered-call roll order execution after close guidance.
+1. Add approved covered-call roll order execution that sequences buy-to-close before sell-to-open.
 2. Add scheduler and ingestion workers for market/news/event data so proposal generation can avoid earnings and macro-event traps.
 3. Add authentication, audit logging, and strategy-level permission controls before any live execution path expands.

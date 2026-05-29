@@ -33,11 +33,13 @@ from stocks_tool.domain.models import (
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     CloseCoveredCallProposalRequest,
+    CreateCoveredCallRollProposalRequest,
     CoveredCallCloseResult,
     CoveredCallExecutionResult,
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
+    CoveredCallRollProposalResult,
     ExecuteBullPutSpreadRequest,
     ExecuteCoveredCallProposalRequest,
     StrategyExperimentSnapshot,
@@ -140,6 +142,26 @@ def monitor_covered_call_proposal(
             as_of=as_of,
             record_signal=record_signal,
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/covered-call/proposals/{proposal_id}/roll-propose", response_model=CoveredCallRollProposalResult)
+def propose_covered_call_roll(
+    proposal_id: str,
+    request: CreateCoveredCallRollProposalRequest,
+    service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+) -> CoveredCallRollProposalResult:
+    try:
+        return service.create_roll_proposal(proposal_id, request)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

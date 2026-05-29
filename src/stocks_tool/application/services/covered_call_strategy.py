@@ -30,8 +30,10 @@ from stocks_tool.domain.models import (
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
+    CoveredCallRollProposalResult,
     CoveredCallRiskSummary,
     CreateOrderRequest,
+    CreateCoveredCallRollProposalRequest,
     CreateStrategyProposalRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
@@ -474,6 +476,153 @@ class CoveredCallStrategyService:
             signal=signal,
         )
 
+    def create_roll_proposal(
+        self,
+        proposal_id: str,
+        request: CreateCoveredCallRollProposalRequest,
+    ) -> CoveredCallRollProposalResult:
+        proposal = self.experiments.get_proposal(proposal_id)
+        if proposal is None:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        if proposal.strategy_id != self.strategy_id:
+            raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
+        if proposal.status != StrategyProposalStatus.EXECUTED:
+            raise ValueError(f"Strategy proposal '{proposal_id}' must be executed before roll proposal.")
+        if proposal.candidate_payload is None:
+            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+
+        current_candidate = CoveredCallCandidate.model_validate(proposal.candidate_payload)
+        current_monitor = self.monitor_proposal(
+            proposal_id,
+            as_of=request.as_of,
+            record_signal=False,
+        )
+        next_preview = self._preview_roll_candidate(
+            external_account_id=proposal.external_account_id,
+            symbol=current_candidate.underlying_symbol,
+            mode=proposal.mode,
+            current_candidate=current_candidate,
+            as_of=request.as_of,
+            min_new_expiration_date=request.min_new_expiration_date,
+        )
+        now = datetime.now(timezone.utc)
+        run = self.experiments.create_run(
+            CreateStrategyRunRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                run_type="roll_proposal_preview",
+                status=StrategyRunStatus.EXECUTED if next_preview.eligible else StrategyRunStatus.SKIPPED,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                started_at=next_preview.evaluated_at,
+                completed_at=now,
+                summary=(
+                    f"Covered call roll candidate found for {current_candidate.underlying_symbol}."
+                    if next_preview.eligible
+                    else "Covered call roll scan did not find an eligible next call."
+                ),
+                reason="; ".join(next_preview.reasons) if next_preview.reasons else None,
+                metrics_payload={
+                    "current_monitor": current_monitor.model_dump(mode="json", exclude={"signal"}),
+                    "next_preview": next_preview.model_dump(mode="json"),
+                    "source_proposal_id": proposal.id,
+                },
+            )
+        )
+        signal = self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.CANDIDATE if next_preview.eligible else StrategySignalType.RISK_CHECK,
+                symbol=proposal.symbol,
+                run_id=run.id,
+                proposal_id=proposal.id,
+                strength=self._signal_strength(next_preview),
+                summary=(
+                    f"Covered call roll candidate: buy back {current_candidate.call_symbol} and sell "
+                    f"{next_preview.candidate.call_symbol}."
+                    if next_preview.candidate is not None
+                    else "Covered call roll candidate blocked by readiness filters."
+                ),
+                detail="; ".join([*next_preview.reasons, *next_preview.warnings]) or None,
+                source="covered_call_v1",
+                signal_payload={
+                    "current_monitor": current_monitor.model_dump(mode="json", exclude={"signal"}),
+                    "next_preview": next_preview.model_dump(mode="json"),
+                    "source_proposal_id": proposal.id,
+                },
+                emitted_at=next_preview.evaluated_at,
+            )
+        )
+        if not next_preview.eligible or next_preview.candidate is None or next_preview.risk is None:
+            return CoveredCallRollProposalResult(
+                current_monitor=current_monitor,
+                next_preview=next_preview,
+                run=run,
+                signal=signal,
+            )
+
+        roll_proposal = self.experiments.create_proposal(
+            CreateStrategyProposalRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                symbol=current_candidate.underlying_symbol,
+                title=f"Roll covered call on {current_candidate.underlying_symbol}",
+                proposed_action="roll_covered_call",
+                thesis=(
+                    "Buy back the current short call and sell a later out-of-the-money call while keeping "
+                    "the position covered."
+                ),
+                rationale=self._roll_proposal_rationale(
+                    current_candidate=current_candidate,
+                    current_monitor=current_monitor,
+                    next_preview=next_preview,
+                ),
+                confidence=self._proposal_confidence(next_preview),
+                expected_max_loss=next_preview.risk.max_loss_if_zero,
+                expected_max_profit=next_preview.risk.max_assignment_profit,
+                approval_required=True,
+                source="covered_call_v1",
+                source_run_id=run.id,
+                candidate_payload={
+                    "roll_from": current_candidate.model_dump(mode="json"),
+                    "roll_to": next_preview.candidate.model_dump(mode="json"),
+                    "source_proposal_id": proposal.id,
+                },
+                risk_payload={
+                    "next_risk": next_preview.risk.model_dump(mode="json"),
+                    "current_monitor": current_monitor.model_dump(mode="json", exclude={"signal"}),
+                    "estimated_buyback_debit": (
+                        str(current_monitor.estimated_buyback_debit)
+                        if current_monitor.estimated_buyback_debit is not None
+                        else None
+                    ),
+                    "estimated_open_pnl": (
+                        str(current_monitor.estimated_open_pnl)
+                        if current_monitor.estimated_open_pnl is not None
+                        else None
+                    ),
+                },
+                checks=[
+                    "current_call_identified",
+                    "local_position_covered",
+                    "roll_out_candidate",
+                    "liquidity_filter",
+                    "manual_approval_required",
+                ],
+            )
+        )
+        return CoveredCallRollProposalResult(
+            current_monitor=current_monitor,
+            next_preview=next_preview,
+            proposal=roll_proposal,
+            run=run,
+            signal=signal,
+        )
+
     def monitor_proposal(
         self,
         proposal_id: str,
@@ -632,6 +781,161 @@ class CoveredCallStrategyService:
         if not candidates:
             return None
         return min(candidates, key=lambda expiry_date: (expiry_date - evaluated_date).days)
+
+    def _select_roll_expiration(
+        self,
+        expiry_dates: list[date],
+        *,
+        evaluated_at: datetime,
+        current_expiration_date: date,
+        min_new_expiration_date: date | None,
+    ) -> date | None:
+        strategy = self.settings.covered_call_strategy
+        evaluated_date = evaluated_at.astimezone(self.new_york).date()
+        lower_bound = min_new_expiration_date or (current_expiration_date + timedelta(days=1))
+        candidates = [
+            expiry_date
+            for expiry_date in expiry_dates
+            if expiry_date >= lower_bound
+            and strategy.min_dte <= (expiry_date - evaluated_date).days <= strategy.max_dte
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda expiry_date: (expiry_date - evaluated_date).days)
+
+    def _preview_roll_candidate(
+        self,
+        *,
+        external_account_id: str,
+        symbol: str,
+        mode: ExecutionMode,
+        current_candidate: CoveredCallCandidate,
+        as_of: datetime | None,
+        min_new_expiration_date: date | None,
+    ) -> CoveredCallPreviewResult:
+        evaluated_at = self._reference_time(as_of)
+        self._ensure_account(external_account_id)
+        account_snapshot = self._get_latest_account_snapshot(external_account_id)
+        position = self._select_position(account_snapshot, symbol=symbol)
+        normalized_symbol = self._normalize_symbol(symbol)
+        if position is None:
+            return CoveredCallPreviewResult(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                eligible=False,
+                symbol=normalized_symbol,
+                reasons=[
+                    "No stock or ETF position with at least 100 shares was found for the current covered-call symbol."
+                ],
+            )
+
+        share_quantity = int(position.quantity)
+        if share_quantity < current_candidate.covered_shares:
+            return CoveredCallPreviewResult(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                eligible=False,
+                symbol=normalized_symbol,
+                reasons=[
+                    f"{normalized_symbol} has {position.quantity} shares; roll requires "
+                    f"{current_candidate.covered_shares} covered shares."
+                ],
+            )
+
+        underlying_quote = self.longbridge_adapter.get_quote(symbol=normalized_symbol, mode=mode)
+        expiry_date = self._select_roll_expiration(
+            self.longbridge_adapter.list_option_expiry_dates(symbol=normalized_symbol, mode=mode),
+            evaluated_at=evaluated_at,
+            current_expiration_date=current_candidate.expiration_date,
+            min_new_expiration_date=min_new_expiration_date,
+        )
+        if expiry_date is None:
+            return CoveredCallPreviewResult(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                eligible=False,
+                symbol=normalized_symbol,
+                reasons=["No later covered-call expiration was available inside the configured DTE window."],
+            )
+
+        chain = self.longbridge_adapter.list_option_chain(
+            symbol=normalized_symbol,
+            expiry_date=expiry_date,
+            mode=mode,
+        )
+        call_symbols = [entry.call_symbol for entry in chain if entry.standard and entry.call_symbol]
+        if not call_symbols:
+            return CoveredCallPreviewResult(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                eligible=False,
+                symbol=normalized_symbol,
+                selected_expiration_date=expiry_date,
+                days_to_expiration=self._days_to_expiration(expiry_date, evaluated_at),
+                reasons=["The selected roll option chain did not include standard call contracts."],
+            )
+
+        option_quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=call_symbols,
+            mode=mode,
+        )
+        candidate_quote = self._select_call_quote(
+            quotes=option_quotes,
+            underlying_price=underlying_quote.last_done,
+            evaluated_at=evaluated_at,
+            mode=mode,
+        )
+        if candidate_quote is None:
+            return CoveredCallPreviewResult(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                eligible=False,
+                symbol=normalized_symbol,
+                selected_expiration_date=expiry_date,
+                days_to_expiration=self._days_to_expiration(expiry_date, evaluated_at),
+                reasons=[
+                    "No later out-of-the-money call passed the configured delta, OI, volume, and bid/ask filters."
+                ],
+            )
+
+        contracts = min(
+            current_candidate.contracts,
+            share_quantity // 100,
+            self.settings.covered_call_strategy.max_contracts_per_symbol,
+        )
+        candidate = self._build_candidate(
+            position=position,
+            quote=candidate_quote,
+            underlying_price=underlying_quote.last_done,
+            contracts=contracts,
+            evaluated_at=evaluated_at,
+        )
+        risk = self._build_risk_summary(position=position, candidate=candidate)
+        event_warnings = self._event_warnings(symbol=normalized_symbol, evaluated_at=evaluated_at)
+        if event_warnings:
+            risk = risk.model_copy(
+                update={
+                    "status": RiskStatus.WARN,
+                    "warnings": [*risk.warnings, *event_warnings],
+                }
+            )
+        return CoveredCallPreviewResult(
+            external_account_id=external_account_id,
+            mode=mode,
+            evaluated_at=evaluated_at,
+            eligible=risk.status != RiskStatus.BLOCK,
+            symbol=normalized_symbol,
+            selected_expiration_date=expiry_date,
+            days_to_expiration=candidate.days_to_expiration,
+            warnings=risk.warnings,
+            candidate=candidate,
+            risk=risk,
+        )
 
     def _select_call_quote(
         self,
@@ -820,6 +1124,27 @@ class CoveredCallStrategyService:
             f"Sell {candidate.contracts} {candidate.call_symbol} against {candidate.covered_shares} existing "
             f"{candidate.underlying_symbol} shares. Bid premium is ${candidate.call_bid} with "
             f"{candidate.days_to_expiration} DTE and delta {candidate.delta}."
+        )
+
+    def _roll_proposal_rationale(
+        self,
+        *,
+        current_candidate: CoveredCallCandidate,
+        current_monitor: CoveredCallMonitorResult,
+        next_preview: CoveredCallPreviewResult,
+    ) -> str:
+        next_candidate = next_preview.candidate
+        if next_candidate is None:
+            return "Covered call roll filters did not produce a next-call candidate."
+        buyback = (
+            f"${current_monitor.estimated_buyback_debit}"
+            if current_monitor.estimated_buyback_debit is not None
+            else "an unavailable buyback debit"
+        )
+        return (
+            f"Buy back {current_candidate.contracts} {current_candidate.call_symbol} at an estimated {buyback}, "
+            f"then sell {next_candidate.contracts} {next_candidate.call_symbol} for about "
+            f"${next_candidate.premium_income} bid premium. Monitor action is {current_monitor.action}."
         )
 
     def _proposal_confidence(self, preview: CoveredCallPreviewResult) -> Decimal:

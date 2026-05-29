@@ -761,6 +761,19 @@ class CoveredCallMonitorResult(BaseModel):
     signal: StrategySignal | None = None
 
 
+class CreateCoveredCallRollProposalRequest(BaseModel):
+    as_of: datetime | None = None
+    min_new_expiration_date: date | None = None
+
+
+class CoveredCallRollProposalResult(BaseModel):
+    current_monitor: CoveredCallMonitorResult
+    next_preview: CoveredCallPreviewResult
+    proposal: StrategyProposal | None = None
+    run: StrategyRun | None = None
+    signal: StrategySignal | None = None
+
+
 class CloseCoveredCallProposalRequest(BaseModel):
     limit_price: Decimal | None = Field(default=None, gt=0)
     remark: str | None = Field(default=None, max_length=64)

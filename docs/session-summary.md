@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-05-29
+Last updated: 2026-05-30
 
 ## Project
 
@@ -79,6 +79,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
+- `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/close`
 - `GET /market-events`
 - `POST /market-events`
@@ -157,8 +158,9 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
   - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
   - `monitor` reloads the underlying and short-call quote, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
+  - `roll-propose` creates a manual-approval strategy proposal that combines the current buyback estimate with a later OTM covered-call candidate
   - `close` submits a paper buy-to-close limit order for an executed proposal
-  - no automatic covered-call scheduler or roll order path exists yet
+  - no automatic covered-call scheduler or approved roll order execution path exists yet
 
 ### Market event calendar
 
@@ -395,6 +397,7 @@ Frontend files:
 - Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
 - Added a dashboard market-event calendar panel and mock UI regression coverage for upcoming events.
 - Added covered-call buy-to-close order submission for executed proposals.
+- Added covered-call roll proposal generation for executed proposals; the route records buyback estimate, next-call candidate, run, signal, and pending strategy proposal without submitting either roll leg.
 - Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
@@ -517,6 +520,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add covered-call roll order execution after close guidance.
+1. Add approved covered-call roll order execution that sequences buy-to-close before sell-to-open.
 2. Add automated market/news/event ingestion workers to populate the local event calendar.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

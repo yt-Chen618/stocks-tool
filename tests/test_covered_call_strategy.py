@@ -24,6 +24,7 @@ from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
     CloseCoveredCallProposalRequest,
+    CreateCoveredCallRollProposalRequest,
     ExecuteCoveredCallProposalRequest,
     MarketEvent,
     OptionMarketSnapshot,
@@ -67,6 +68,7 @@ class FakeAccountSnapshots:
 class FakeExperiments:
     def __init__(self, proposal: StrategyProposal | None = None) -> None:
         self.proposal = proposal
+        self.proposal_counter = 1 if proposal is None else 2
         self.run_request = None
         self.signal_request = None
         self.proposal_request = None
@@ -105,8 +107,10 @@ class FakeExperiments:
 
     def create_proposal(self, request):
         self.proposal_request = request
+        proposal_id = f"proposal-{self.proposal_counter}"
+        self.proposal_counter += 1
         self.proposal = StrategyProposal(
-            id="proposal-1",
+            id=proposal_id,
             strategy_id=request.strategy_id,
             external_account_id=request.external_account_id,
             mode=request.mode,
@@ -460,6 +464,110 @@ def test_covered_call_monitor_records_take_profit_guidance() -> None:
     assert result.premium_capture_pct == Decimal("54.17")
     assert result.signal is not None
     assert experiments.signal_request.signal_type == StrategySignalType.MONITOR
+
+
+def test_covered_call_roll_proposal_records_buyback_and_next_call_candidate() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Executed covered call proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        candidate_payload={
+            "underlying_symbol": "UNH.US",
+            "expiration_date": "2026-06-26",
+            "days_to_expiration": 28,
+            "contracts": 1,
+            "covered_shares": 100,
+            "share_quantity": "100",
+            "average_cost": "90",
+            "underlying_price": "100",
+            "call_symbol": "UNH260626C105000.US",
+            "call_strike": "105",
+            "call_bid": "1.20",
+            "call_ask": "1.30",
+            "call_mid": "1.25",
+            "premium_income": "120.00",
+            "delta": "0.30",
+            "open_interest": 800,
+            "volume": 25,
+            "quote_timestamp": "2026-05-29T15:00:00Z",
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    adapter = build_adapter()
+    adapter.list_option_expiry_dates.return_value = [date(2026, 6, 26), date(2026, 7, 10)]
+    adapter.list_option_chain.return_value = [
+        Mock(standard=True, call_symbol="UNH260710C110000.US")
+    ]
+    adapter.get_option_market_snapshots.side_effect = [
+        [
+            OptionMarketSnapshot(
+                symbol="UNH260626C105000.US",
+                underlying_symbol="UNH.US",
+                expiration_date=date(2026, 6, 26),
+                strike=Decimal("105"),
+                right=OptionRight.CALL,
+                last_done=Decimal("0.55"),
+                prev_close=Decimal("1.20"),
+                open=Decimal("0.80"),
+                high=Decimal("0.90"),
+                low=Decimal("0.50"),
+                timestamp=NOW,
+                volume=20,
+                turnover=Decimal("1100"),
+                bid=Decimal("0.50"),
+                ask=Decimal("0.60"),
+                open_interest=700,
+                delta=Decimal("0.15"),
+            )
+        ],
+        [
+            OptionMarketSnapshot(
+                symbol="UNH260710C110000.US",
+                underlying_symbol="UNH.US",
+                expiration_date=date(2026, 7, 10),
+                strike=Decimal("110"),
+                right=OptionRight.CALL,
+                last_done=Decimal("1.15"),
+                prev_close=Decimal("1.05"),
+                open=Decimal("1.00"),
+                high=Decimal("1.30"),
+                low=Decimal("0.95"),
+                timestamp=NOW,
+                volume=35,
+                turnover=Decimal("4025"),
+                bid=Decimal("1.10"),
+                ask=Decimal("1.20"),
+                open_interest=900,
+                delta=Decimal("0.30"),
+            )
+        ],
+    ]
+    experiments = FakeExperiments(proposal)
+    service = build_service(experiments=experiments, adapter=adapter)
+
+    result = service.create_roll_proposal(
+        "proposal-1",
+        request=CreateCoveredCallRollProposalRequest(as_of=NOW),
+    )
+
+    assert result.proposal is not None
+    assert result.proposal.id == "proposal-2"
+    assert result.proposal.proposed_action == "roll_covered_call"
+    assert result.current_monitor.estimated_buyback_debit == Decimal("55.00")
+    assert result.next_preview.candidate is not None
+    assert result.next_preview.candidate.call_symbol == "UNH260710C110000.US"
+    assert result.proposal.candidate_payload["source_proposal_id"] == "proposal-1"
+    assert result.proposal.candidate_payload["roll_from"]["call_symbol"] == "UNH260626C105000.US"
+    assert result.proposal.candidate_payload["roll_to"]["call_symbol"] == "UNH260710C110000.US"
+    assert experiments.run_request.run_type == "roll_proposal_preview"
+    assert experiments.signal_request.signal_type == StrategySignalType.CANDIDATE
 
 
 def test_covered_call_close_submits_buy_to_close_order() -> None:
