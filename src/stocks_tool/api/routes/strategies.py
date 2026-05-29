@@ -7,8 +7,13 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeDependencyError,
     LongbridgeIntegrationError,
 )
-from stocks_tool.api.dependencies import get_bull_put_strategy_service, get_strategy_experiment_service
+from stocks_tool.api.dependencies import (
+    get_bull_put_strategy_service,
+    get_covered_call_strategy_service,
+    get_strategy_experiment_service,
+)
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
+from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.domain.enums import ExecutionMode, SpreadStatus, StrategyProposalStatus
 from stocks_tool.domain.models import (
@@ -27,6 +32,8 @@ from stocks_tool.domain.models import (
     BullPutStrategyReadinessResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
+    CoveredCallPreviewResult,
+    CoveredCallProposalResult,
     ExecuteBullPutSpreadRequest,
     StrategyExperimentSnapshot,
     StrategyProposal,
@@ -37,6 +44,60 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+
+@router.get("/covered-call/preview", response_model=CoveredCallPreviewResult)
+def preview_covered_call(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    symbol: str | None = Query(default=None, description="Optional held stock/ETF symbol, e.g. UNH.US"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    as_of: datetime | None = Query(default=None),
+    service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+) -> CoveredCallPreviewResult:
+    try:
+        return service.preview(
+            external_account_id=external_account_id,
+            symbol=symbol,
+            mode=mode,
+            as_of=as_of,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/covered-call/propose", response_model=CoveredCallProposalResult)
+def propose_covered_call(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    symbol: str | None = Query(default=None, description="Optional held stock/ETF symbol, e.g. UNH.US"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    as_of: datetime | None = Query(default=None),
+    service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+) -> CoveredCallProposalResult:
+    try:
+        return service.create_proposal(
+            external_account_id=external_account_id,
+            symbol=symbol,
+            mode=mode,
+            as_of=as_of,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/experiment", response_model=StrategyExperimentSnapshot)

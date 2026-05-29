@@ -120,6 +120,36 @@ class BullPutSpreadStrategySettings(BaseModel):
         return Decimal("3")
 
 
+class CoveredCallStrategySettings(BaseModel):
+    enabled: bool = True
+    min_shares: int = Field(default=100, ge=100)
+    min_dte: int = Field(default=21, ge=1)
+    max_dte: int = Field(default=45, ge=1)
+    delta_target: Decimal = Field(default=Decimal("0.30"), gt=0)
+    delta_min: Decimal = Field(default=Decimal("0.20"), gt=0)
+    delta_max: Decimal = Field(default=Decimal("0.35"), gt=0)
+    min_otm_pct: Decimal = Field(default=Decimal("0.02"), ge=0)
+    max_otm_pct: Decimal = Field(default=Decimal("0.12"), gt=0)
+    min_open_interest: int = Field(default=100, ge=0)
+    min_volume: int = Field(default=1, ge=0)
+    min_bid: Decimal = Field(default=Decimal("0.10"), gt=0)
+    max_bid_ask_spread_pct: Decimal = Field(default=Decimal("0.15"), gt=0)
+    max_option_quote_age_seconds: int = Field(default=1800, ge=1)
+    max_contracts_per_symbol: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> "CoveredCallStrategySettings":
+        if self.min_dte > self.max_dte:
+            raise ValueError("Covered call min_dte must be less than or equal to max_dte.")
+        if self.delta_min > self.delta_target:
+            raise ValueError("Covered call delta_min cannot exceed delta_target.")
+        if self.delta_target > self.delta_max:
+            raise ValueError("Covered call delta_target cannot exceed delta_max.")
+        if self.min_otm_pct > self.max_otm_pct:
+            raise ValueError("Covered call min_otm_pct must be less than or equal to max_otm_pct.")
+        return self
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -163,6 +193,9 @@ class Settings(BaseSettings):
     longbridge_executor_max_workers: int = 2
     bull_put_strategy: BullPutSpreadStrategySettings = Field(
         default_factory=BullPutSpreadStrategySettings
+    )
+    covered_call_strategy: CoveredCallStrategySettings = Field(
+        default_factory=CoveredCallStrategySettings
     )
 
 

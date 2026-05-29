@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
+from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
@@ -209,6 +210,22 @@ def get_strategy_experiment_service(
     return StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,
+    )
+
+
+def get_covered_call_strategy_service(
+    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
+    experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
+    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+) -> CoveredCallStrategyService:
+    settings: Settings = get_settings()
+    return CoveredCallStrategyService(
+        settings=settings,
+        broker_accounts=broker_accounts,
+        account_snapshots=account_snapshots,
+        experiments=experiments,
+        longbridge_adapter=adapter,
     )
 
 

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
@@ -643,6 +645,62 @@ class OptionMarketSnapshot(BaseModel):
     contract_multiplier: Decimal = Decimal("100")
     contract_size: Decimal | None = None
     raw_payload: dict | None = None
+
+
+class CoveredCallCandidate(BaseModel):
+    underlying_symbol: str
+    expiration_date: date
+    days_to_expiration: int
+    contracts: int
+    covered_shares: int
+    share_quantity: Decimal
+    average_cost: Decimal
+    underlying_price: Decimal
+    call_symbol: str
+    call_strike: Decimal
+    call_bid: Decimal
+    call_ask: Decimal
+    call_mid: Decimal
+    premium_income: Decimal
+    annualized_income_yield: Decimal | None = None
+    if_called_return_pct: Decimal | None = None
+    delta: Decimal | None = None
+    open_interest: int | None = None
+    volume: int = 0
+    quote_timestamp: datetime
+
+
+class CoveredCallRiskSummary(BaseModel):
+    status: RiskStatus
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    max_income: Decimal
+    max_assignment_profit: Decimal | None = None
+    max_loss_if_zero: Decimal | None = None
+    break_even: Decimal | None = None
+    shares_not_covered: Decimal = Decimal("0")
+
+
+class CoveredCallPreviewResult(BaseModel):
+    strategy_id: str = "covered_call_v1"
+    external_account_id: str
+    mode: ExecutionMode
+    evaluated_at: datetime
+    eligible: bool
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    symbol: str | None = None
+    selected_expiration_date: date | None = None
+    days_to_expiration: int | None = None
+    candidate: CoveredCallCandidate | None = None
+    risk: CoveredCallRiskSummary | None = None
+
+
+class CoveredCallProposalResult(BaseModel):
+    preview: CoveredCallPreviewResult
+    proposal: StrategyProposal | None = None
+    run: StrategyRun | None = None
+    signal: StrategySignal | None = None
 
 
 class BullPutSpreadCandidate(BaseModel):

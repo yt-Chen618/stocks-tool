@@ -29,6 +29,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `brokers/longbridge`
 - `strategies`
 - `strategies/experiment`
+- `strategies/covered-call`
 - `executions`
 - `journals`
 - `orders`
@@ -73,6 +74,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/experiment`
+- `GET /strategies/covered-call/preview`
+- `POST /strategies/covered-call/propose`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -132,6 +135,20 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - records strategy runs, signals, and reviews independently from the current bull put runtime table
   - dashboard renders the selected account's pending proposals, latest runs, signal feed, and review feed
   - approval/rejection is persisted, but approval still does not bypass any local strategy-specific readiness or risk checks
+
+### Covered call proposals
+
+- `covered_call_v1` now has a first-pass read-only proposal workflow on top of the strategy experiment ledger.
+- Routes:
+  - `GET /strategies/covered-call/preview?external_account_id=LBPT10087357&symbol=UNH.US&mode=paper`
+  - `POST /strategies/covered-call/propose?external_account_id=LBPT10087357&symbol=UNH.US&mode=paper`
+- Current scope:
+  - reads the latest local account snapshot and requires an existing stock / ETF covered lot of at least `100` shares
+  - loads Longbridge quote, option expiries, option chain, and call market snapshots
+  - selects a liquid out-of-the-money call using configured DTE, delta, OI, volume, bid, and bid/ask spread filters
+  - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
+  - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
+  - no covered-call order is submitted yet; execution remains a future approval-to-order step
 
 ### Automatic reconciliation
 
@@ -347,6 +364,7 @@ Frontend files:
 - Added strategy experiment persistence through `strategy_proposals`, `strategy_runs`, `strategy_signals`, and `strategy_reviews` plus Alembic migration `20260529_0009_strategy_experiment_tables`.
 - Added strategy experiment routes under `/strategies/experiment`, `/strategies/proposals`, `/strategies/runs`, `/strategies/signals`, and `/strategies/reviews`.
 - Added a dashboard strategy experiment bench for pending proposals, recent runs, signal feed, and review feed.
+- Added `covered_call_v1` preview/propose routes that create strategy experiment runs, signals, and proposals for covered-call candidates without submitting orders.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -468,6 +486,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Implement `covered_call_v1` on top of the strategy experiment ledger.
+1. Add covered-call approval-to-paper-order execution and post-entry monitoring.
 2. Add market/news/event ingestion so proposals can avoid earnings and macro-event traps.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
