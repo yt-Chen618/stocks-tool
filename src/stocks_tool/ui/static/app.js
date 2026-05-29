@@ -673,6 +673,21 @@ function wireEvents() {
     }
   });
 
+  if (els.strategyProposalsCard) {
+    els.strategyProposalsCard.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-proposal-action]");
+      if (!button) {
+        return;
+      }
+
+      const { proposalAction, proposalId } = button.dataset;
+      if (!proposalAction || !proposalId) {
+        return;
+      }
+      await handleStrategyProposalAction(proposalAction, proposalId);
+    });
+  }
+
   els.selectedOrderCard.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-selected-action]");
     if (!button) {
@@ -1331,6 +1346,69 @@ async function runStrategyReview() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
+  }
+}
+
+async function handleStrategyProposalAction(action, proposalId) {
+  const actionLabels = {
+    approve: "Approving strategy proposal",
+    reject: "Rejecting strategy proposal",
+    execute_covered_call: "Executing covered call proposal",
+    monitor_covered_call: "Monitoring covered call proposal",
+    close_covered_call: "Closing covered call proposal",
+    roll_propose: "Creating covered call roll proposal",
+    roll_execute: "Executing covered call roll proposal",
+    roll_continue: "Continuing covered call roll proposal",
+  };
+  setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
+  try {
+    let result = null;
+    if (action === "approve" || action === "reject") {
+      result = await fetchJson(`/strategies/proposals/${encodeURIComponent(proposalId)}/${action}`, {
+        method: "POST",
+      });
+    } else if (action === "execute_covered_call") {
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/execute`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } else if (action === "monitor_covered_call") {
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/monitor`, {
+        method: "POST",
+      });
+    } else if (action === "close_covered_call") {
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/close`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } else if (action === "roll_propose") {
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-propose`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } else if (action === "roll_execute") {
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-execute`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } else if (action === "roll_continue") {
+      const buybackOrderId = window.prompt("Buyback order id to refresh before opening the rolled call:");
+      if (!buybackOrderId) {
+        setStatus("Covered call roll continuation canceled.", "warning");
+        return;
+      }
+      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-continue`, {
+        method: "POST",
+        body: JSON.stringify({ buyback_order_id: buybackOrderId.trim() }),
+      });
+    } else {
+      throw new Error(`Unsupported proposal action: ${action}`);
+    }
+    await loadAccountData();
+    setStatus(formatStrategyProposalActionResult(action, result), "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Strategy proposal action failed.", "error");
   }
 }
 
@@ -1999,6 +2077,7 @@ function renderStrategyExperiment() {
         </div>
         <p>${escapeHtml(proposal.rationale)}</p>
         <span>${escapeHtml([proposal.strategy_id, proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</span>
+        ${renderStrategyProposalActions(proposal)}
       </article>
     `,
   });
@@ -2060,6 +2139,44 @@ function renderStrategyExperimentList({ element, items, emptyText, renderItem })
   }
   element.className = "strategy-note-body";
   element.innerHTML = items.slice(0, 4).map(renderItem).join("");
+}
+
+function renderStrategyProposalActions(proposal) {
+  const actions = [];
+  if (proposal.status === "pending") {
+    actions.push(["approve", "Approve", "primary"]);
+    actions.push(["reject", "Reject", "danger"]);
+  }
+  if (proposal.strategy_id === "covered_call_v1" && proposal.proposed_action === "sell_covered_call") {
+    if (proposal.status === "approved") {
+      actions.push(["execute_covered_call", "Execute", "primary"]);
+    }
+    if (proposal.status === "executed") {
+      actions.push(["monitor_covered_call", "Monitor", ""]);
+      actions.push(["roll_propose", "Roll", "primary"]);
+      actions.push(["close_covered_call", "Close", "danger"]);
+    }
+  }
+  if (proposal.strategy_id === "covered_call_v1" && proposal.proposed_action === "roll_covered_call" && proposal.status === "approved") {
+    actions.push(["roll_execute", "Execute Roll", "primary"]);
+    actions.push(["roll_continue", "Continue Roll", ""]);
+  }
+  if (!actions.length) {
+    return "";
+  }
+  return `
+    <div class="table-actions">
+      ${actions
+        .map(
+          ([action, label, tone]) => `
+            <button class="table-action ${tone}" type="button" data-proposal-action="${escapeHtml(action)}" data-proposal-id="${escapeHtml(proposal.id)}">
+              ${escapeHtml(label)}
+            </button>
+          `
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderMarketEvents() {
@@ -3980,6 +4097,33 @@ function capitalizeLabel(value) {
     return "";
   }
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function formatStrategyProposalActionResult(action, result) {
+  if (action === "approve" || action === "reject") {
+    return `Strategy proposal ${result?.status || "updated"}.`;
+  }
+  if (action === "monitor_covered_call") {
+    return `Covered call monitor action: ${formatStrategyStatusLabel(result?.action)}.`;
+  }
+  if (action === "roll_propose") {
+    return result?.proposal?.id
+      ? `Covered call roll proposal created: ${result.proposal.id}.`
+      : "Covered call roll proposal scan completed without an eligible next call.";
+  }
+  if (action === "roll_execute" || action === "roll_continue") {
+    const status = result?.sequence_status ? formatStrategyStatusLabel(result.sequence_status) : "submitted";
+    const buyback = result?.buyback_order?.id ? ` Buyback order: ${result.buyback_order.id}.` : "";
+    const sell = result?.sell_order?.id ? ` Sell order: ${result.sell_order.id}.` : "";
+    return `Covered call roll ${status}.${buyback}${sell}`;
+  }
+  if (action === "execute_covered_call") {
+    return `Covered call order submitted: ${result?.order?.id || "created"}.`;
+  }
+  if (action === "close_covered_call") {
+    return `Covered call close order submitted: ${result?.order?.id || "created"}.`;
+  }
+  return "Strategy proposal action completed.";
 }
 
 function formatSyncHeadline(lastSyncedAt, lastAttemptAt) {

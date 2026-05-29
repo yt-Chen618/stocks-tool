@@ -336,6 +336,7 @@ Current dashboard capabilities:
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View strategy experiment proposals, runs, signals, and reviews for the selected account
+- Approve / reject strategy proposals and run covered-call proposal actions from the strategy experiment bench
 - View upcoming market events used by strategy proposal risk warnings
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View a pre-open risk board with macro proxies plus `QQQ / SPY` directional put checks
@@ -404,6 +405,7 @@ Frontend files:
 - Added covered-call roll proposal generation for executed proposals; the route records buyback estimate, next-call candidate, run, signal, and pending strategy proposal without submitting either roll leg.
 - Added approved covered-call roll execution; the route submits buy-to-close first and only submits sell-to-open when the buyback order is already filled.
 - Added covered-call roll continuation for buyback orders that remain working after the initial roll submission.
+- Added dashboard strategy proposal controls for approval / rejection plus covered-call execute, monitor, close, roll-propose, roll-execute, and roll-continue actions.
 - Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
@@ -527,5 +529,5 @@ Frontend files:
 ## Recommended next steps
 
 1. Add automated market/news/event ingestion workers to populate the local event calendar.
-2. Add dashboard controls for covered-call proposal approval, roll execution, and roll continuation.
+2. Add richer covered-call dashboards for proposal payload inspection, limit-price overrides, and roll-chain history.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
