@@ -23,6 +23,7 @@ from stocks_tool.domain.models import (
     CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
+    CoveredCallRollExecutionResult,
     CoveredCallRollProposalResult,
     CoveredCallRiskSummary,
     Order,
@@ -317,6 +318,81 @@ def test_covered_call_roll_propose_route_returns_roll_proposal() -> None:
     request = service.create_roll_proposal.call_args.args[1]
     assert service.create_roll_proposal.call_args.args[0] == "proposal-1"
     assert request.min_new_expiration_date == date(2026, 7, 1)
+
+
+def test_covered_call_roll_execute_route_sequences_approved_roll() -> None:
+    service = Mock()
+    proposal = StrategyProposal(
+        id="proposal-2",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.execute_approved_roll_proposal.return_value = CoveredCallRollExecutionResult(
+        proposal=proposal,
+        buyback_order=Order(
+            id="buyback-order-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-buyback-1",
+            symbol="UNH260626C105000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("0.55"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        sell_order=Order(
+            id="roll-open-order-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-roll-open-1",
+            symbol="UNH260710C110000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.SELL,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.10"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        sequence_status="roll_submitted",
+        submitted_at=NOW,
+    )
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-2/roll-execute",
+            json={"buyback_limit_price": "0.55", "sell_limit_price": "1.10"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sequence_status"] == "roll_submitted"
+    assert body["buyback_order"]["side"] == "buy"
+    assert body["sell_order"]["side"] == "sell"
+    request = service.execute_approved_roll_proposal.call_args.args[1]
+    assert service.execute_approved_roll_proposal.call_args.args[0] == "proposal-2"
+    assert request.buyback_limit_price == Decimal("0.55")
+    assert request.sell_limit_price == Decimal("1.10")
 
 
 def test_covered_call_close_route_submits_buyback_order() -> None:

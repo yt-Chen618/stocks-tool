@@ -774,6 +774,23 @@ class CoveredCallRollProposalResult(BaseModel):
     signal: StrategySignal | None = None
 
 
+class ExecuteCoveredCallRollProposalRequest(BaseModel):
+    buyback_limit_price: Decimal | None = Field(default=None, gt=0)
+    sell_limit_price: Decimal | None = Field(default=None, gt=0)
+    remark: str | None = Field(default=None, max_length=64)
+
+
+class CoveredCallRollExecutionResult(BaseModel):
+    proposal: StrategyProposal
+    buyback_order: Order
+    sell_order: Order | None = None
+    run: StrategyRun | None = None
+    signal: StrategySignal | None = None
+    sequence_status: str
+    reason: str | None = None
+    submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class CloseCoveredCallProposalRequest(BaseModel):
     limit_price: Decimal | None = Field(default=None, gt=0)
     remark: str | None = Field(default=None, max_length=64)

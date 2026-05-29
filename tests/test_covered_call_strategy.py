@@ -26,6 +26,7 @@ from stocks_tool.domain.models import (
     CloseCoveredCallProposalRequest,
     CreateCoveredCallRollProposalRequest,
     ExecuteCoveredCallProposalRequest,
+    ExecuteCoveredCallRollProposalRequest,
     MarketEvent,
     OptionMarketSnapshot,
     Order,
@@ -84,6 +85,8 @@ class FakeExperiments:
             run_type=request.run_type,
             status=request.status,
             symbol=request.symbol,
+            proposal_id=request.proposal_id,
+            order_id=request.order_id,
             summary=request.summary,
             created_at=NOW,
             updated_at=NOW,
@@ -568,6 +571,220 @@ def test_covered_call_roll_proposal_records_buyback_and_next_call_candidate() ->
     assert result.proposal.candidate_payload["roll_to"]["call_symbol"] == "UNH260710C110000.US"
     assert experiments.run_request.run_type == "roll_proposal_preview"
     assert experiments.signal_request.signal_type == StrategySignalType.CANDIDATE
+
+
+def test_covered_call_roll_execute_submits_sell_to_open_after_buyback_fills() -> None:
+    proposal = StrategyProposal(
+        id="proposal-2",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "roll_from": {
+                "underlying_symbol": "UNH.US",
+                "expiration_date": "2026-06-26",
+                "days_to_expiration": 28,
+                "contracts": 1,
+                "covered_shares": 100,
+                "share_quantity": "100",
+                "average_cost": "90",
+                "underlying_price": "100",
+                "call_symbol": "UNH260626C105000.US",
+                "call_strike": "105",
+                "call_bid": "1.20",
+                "call_ask": "1.30",
+                "call_mid": "1.25",
+                "premium_income": "120.00",
+                "delta": "0.30",
+                "open_interest": 800,
+                "volume": 25,
+                "quote_timestamp": "2026-05-29T15:00:00Z",
+            },
+            "roll_to": {
+                "underlying_symbol": "UNH.US",
+                "expiration_date": "2026-07-10",
+                "days_to_expiration": 42,
+                "contracts": 1,
+                "covered_shares": 100,
+                "share_quantity": "100",
+                "average_cost": "90",
+                "underlying_price": "100",
+                "call_symbol": "UNH260710C110000.US",
+                "call_strike": "110",
+                "call_bid": "1.10",
+                "call_ask": "1.20",
+                "call_mid": "1.15",
+                "premium_income": "110.00",
+                "delta": "0.30",
+                "open_interest": 900,
+                "volume": 35,
+                "quote_timestamp": "2026-05-29T15:00:00Z",
+            },
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    order_service.submit_order.side_effect = [
+        Order(
+            id="buyback-order-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-buyback-1",
+            symbol="UNH260626C105000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("0.55"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        Order(
+            id="roll-open-order-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-roll-open-1",
+            symbol="UNH260710C110000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.SELL,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.10"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+    ]
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.execute_approved_roll_proposal(
+        "proposal-2",
+        ExecuteCoveredCallRollProposalRequest(
+            buyback_limit_price=Decimal("0.55"),
+            sell_limit_price=Decimal("1.10"),
+        ),
+    )
+
+    assert result.sequence_status == "roll_submitted"
+    assert result.proposal.status == StrategyProposalStatus.EXECUTED
+    assert result.buyback_order.id == "buyback-order-1"
+    assert result.sell_order is not None
+    assert result.sell_order.id == "roll-open-order-1"
+    assert order_service.submit_order.call_count == 2
+    buyback_request = order_service.submit_order.call_args_list[0].args[0]
+    sell_request = order_service.submit_order.call_args_list[1].args[0]
+    assert buyback_request.symbol == "UNH260626C105000.US"
+    assert buyback_request.side == OrderSide.BUY
+    assert sell_request.symbol == "UNH260710C110000.US"
+    assert sell_request.side == OrderSide.SELL
+    assert experiments.updated_status == StrategyProposalStatus.EXECUTED
+    assert experiments.run_request.run_type == "roll_execution"
+    assert experiments.signal_request.signal_type == StrategySignalType.EXECUTION
+
+
+def test_covered_call_roll_execute_waits_when_buyback_does_not_fill() -> None:
+    proposal = StrategyProposal(
+        id="proposal-2",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "roll_from": {
+                "underlying_symbol": "UNH.US",
+                "expiration_date": "2026-06-26",
+                "days_to_expiration": 28,
+                "contracts": 1,
+                "covered_shares": 100,
+                "share_quantity": "100",
+                "average_cost": "90",
+                "underlying_price": "100",
+                "call_symbol": "UNH260626C105000.US",
+                "call_strike": "105",
+                "call_bid": "1.20",
+                "call_ask": "1.30",
+                "call_mid": "1.25",
+                "premium_income": "120.00",
+                "delta": "0.30",
+                "open_interest": 800,
+                "volume": 25,
+                "quote_timestamp": "2026-05-29T15:00:00Z",
+            },
+            "roll_to": {
+                "underlying_symbol": "UNH.US",
+                "expiration_date": "2026-07-10",
+                "days_to_expiration": 42,
+                "contracts": 1,
+                "covered_shares": 100,
+                "share_quantity": "100",
+                "average_cost": "90",
+                "underlying_price": "100",
+                "call_symbol": "UNH260710C110000.US",
+                "call_strike": "110",
+                "call_bid": "1.10",
+                "call_ask": "1.20",
+                "call_mid": "1.15",
+                "premium_income": "110.00",
+                "delta": "0.30",
+                "open_interest": 900,
+                "volume": 35,
+                "quote_timestamp": "2026-05-29T15:00:00Z",
+            },
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    order_service.submit_order.return_value = Order(
+        id="buyback-order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-buyback-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("0.55"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.execute_approved_roll_proposal(
+        "proposal-2",
+        ExecuteCoveredCallRollProposalRequest(
+            buyback_limit_price=Decimal("0.55"),
+            sell_limit_price=Decimal("1.10"),
+        ),
+    )
+
+    assert result.sequence_status == "buyback_submitted_waiting_fill"
+    assert result.proposal.status == StrategyProposalStatus.APPROVED
+    assert result.sell_order is None
+    assert result.reason is not None
+    assert order_service.submit_order.call_count == 1
+    assert experiments.updated_status is None
 
 
 def test_covered_call_close_submits_buy_to_close_order() -> None:
