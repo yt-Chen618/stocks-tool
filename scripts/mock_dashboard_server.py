@@ -483,6 +483,98 @@ class MockDashboardState:
                 "updated_at": "2026-05-20T20:10:00Z",
             }
         ]
+        self.strategy_proposals = [
+            {
+                "id": "mock-proposal-0001",
+                "strategy_id": "paper_bull_put_v1",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "symbol": "QQQ.US",
+                "title": "Locked QQQ bull put candidate",
+                "proposed_action": "execute_locked_preview",
+                "thesis": "Trend and risk filters produced an eligible paper spread candidate.",
+                "rationale": "Use the existing preview lock and minimum credit guard before any paper execution.",
+                "status": "pending",
+                "confidence": "0.680000",
+                "expected_max_loss": "248.0000",
+                "expected_max_profit": "52.0000",
+                "approval_required": True,
+                "approved_at": None,
+                "rejected_at": None,
+                "expires_at": "2026-05-29T20:00:00Z",
+                "source": "mock-ui",
+                "source_run_id": None,
+                "candidate_payload": {"short": "QQQ260626P708000.US", "long": "QQQ260626P705000.US"},
+                "risk_payload": {"max_loss": "248.0000", "break_even": "707.4800"},
+                "checks": ["candidate_token", "minimum_net_credit", "quote_freshness"],
+                "created_at": "2026-05-29T14:45:00Z",
+                "updated_at": "2026-05-29T14:45:00Z",
+            }
+        ]
+        self.strategy_runs = [
+            {
+                "id": "mock-run-0001",
+                "strategy_id": "paper_bull_put_v1",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "run_type": "monitor",
+                "status": "reviewed",
+                "symbol": "QQQ.US",
+                "proposal_id": "mock-proposal-0001",
+                "trade_plan_id": None,
+                "order_id": None,
+                "spread_id": "mock-spread-0001",
+                "started_at": "2026-05-29T14:50:00Z",
+                "completed_at": "2026-05-29T14:50:03Z",
+                "summary": "Open paper spread monitor snapshot refreshed.",
+                "reason": None,
+                "metrics_payload": {"estimated_pnl": "-30.0000"},
+                "raw_payload": None,
+                "created_at": "2026-05-29T14:50:00Z",
+                "updated_at": "2026-05-29T14:50:03Z",
+            }
+        ]
+        self.strategy_signals = [
+            {
+                "id": "mock-signal-0001",
+                "strategy_id": "paper_bull_put_v1",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "signal_type": "monitor",
+                "symbol": "QQQ.US",
+                "run_id": "mock-run-0001",
+                "proposal_id": "mock-proposal-0001",
+                "strength": "0.300000",
+                "summary": "Open spread remains above short strike.",
+                "detail": "Monitor snapshot did not request a close.",
+                "source": "mock-ui",
+                "signal_payload": {"should_close": False},
+                "emitted_at": "2026-05-29T14:50:03Z",
+                "created_at": "2026-05-29T14:50:03Z",
+            }
+        ]
+        self.strategy_reviews = [
+            {
+                "id": "mock-review-0001",
+                "strategy_id": "paper_bull_put_v1",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "review_type": "runtime",
+                "status": "observed",
+                "summary": "Paper strategy is monitoring one open spread.",
+                "recommendation": "Do not add another correlated QQQ/SMH/SOXL spread while the current QQQ spread is open.",
+                "parameter_name": None,
+                "current_value": None,
+                "suggested_value": None,
+                "run_id": "mock-run-0001",
+                "proposal_id": "mock-proposal-0001",
+                "journal_entry_id": None,
+                "metrics_payload": {"open_spread_count": 1},
+                "reviewed_at": "2026-05-29T14:50:03Z",
+                "created_at": "2026-05-29T14:50:03Z",
+                "updated_at": "2026-05-29T14:50:03Z",
+            }
+        ]
         self.spreads = [
             {
                 "id": "mock-spread-0001",
@@ -794,6 +886,72 @@ class MockDashboardState:
         }
         self.journals.insert(0, entry)
         return deepcopy(entry)
+
+    def strategy_experiment_snapshot(
+        self,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        return {
+            "external_account_id": external_account_id,
+            "proposals": self.list_strategy_proposals(external_account_id, strategy_id, limit=limit),
+            "runs": self.list_strategy_runs(external_account_id, strategy_id, limit=limit),
+            "signals": self.list_strategy_signals(external_account_id, strategy_id, limit=limit),
+            "reviews": self.list_strategy_reviews(external_account_id, strategy_id, limit=limit),
+        }
+
+    def list_strategy_proposals(
+        self,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.strategy_proposals
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if strategy_id is not None:
+            rows = [row for row in rows if row["strategy_id"] == strategy_id]
+        return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True)[:limit])
+
+    def list_strategy_runs(
+        self,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.strategy_runs
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if strategy_id is not None:
+            rows = [row for row in rows if row["strategy_id"] == strategy_id]
+        return deepcopy(sorted(rows, key=lambda item: item["created_at"], reverse=True)[:limit])
+
+    def list_strategy_signals(
+        self,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.strategy_signals
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if strategy_id is not None:
+            rows = [row for row in rows if row["strategy_id"] == strategy_id]
+        return deepcopy(sorted(rows, key=lambda item: item["emitted_at"], reverse=True)[:limit])
+
+    def list_strategy_reviews(
+        self,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows = self.strategy_reviews
+        if external_account_id is not None:
+            rows = [row for row in rows if row["external_account_id"] == external_account_id]
+        if strategy_id is not None:
+            rows = [row for row in rows if row["strategy_id"] == strategy_id]
+        return deepcopy(sorted(rows, key=lambda item: item["reviewed_at"], reverse=True)[:limit])
 
     def list_spreads(
         self,
@@ -1139,6 +1297,66 @@ def create_app() -> FastAPI:
         limit: int = Query(default=20, ge=1, le=100),
     ) -> list[dict[str, Any]]:
         return state.list_pre_open_runs(external_account_id=external_account_id, limit=limit)
+
+    @app.get("/strategies/experiment")
+    def strategy_experiment(
+        external_account_id: str | None = Query(default=None),
+        strategy_id: str | None = Query(default=None),
+        limit: int = Query(default=10, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return state.strategy_experiment_snapshot(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    @app.get("/strategies/proposals")
+    def strategy_proposals(
+        external_account_id: str | None = Query(default=None),
+        strategy_id: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        return state.list_strategy_proposals(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    @app.get("/strategies/runs")
+    def strategy_runs(
+        external_account_id: str | None = Query(default=None),
+        strategy_id: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        return state.list_strategy_runs(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    @app.get("/strategies/signals")
+    def strategy_signals(
+        external_account_id: str | None = Query(default=None),
+        strategy_id: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        return state.list_strategy_signals(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    @app.get("/strategies/reviews")
+    def strategy_reviews(
+        external_account_id: str | None = Query(default=None),
+        strategy_id: str | None = Query(default=None),
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[dict[str, Any]]:
+        return state.list_strategy_reviews(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            limit=limit,
+        )
 
     @app.post("/strategies/pre-open-runs/{external_account_id}/capture")
     def capture_pre_open_run(

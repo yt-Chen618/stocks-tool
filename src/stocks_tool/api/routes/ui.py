@@ -286,6 +286,75 @@ def render_dashboard() -> HTMLResponse:
                         <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
+                              <span class="section-kicker">Experiment</span>
+                              <h2>Strategy Experiment Bench</h2>
+                            </div>
+                          </div>
+                          <div id="strategy-experiment-strip" class="mini-metric-strip strategy-summary-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Active Proposals</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No strategy proposals loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Latest Run</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No strategy runs recorded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Signals</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No strategy signals recorded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Reviews</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No strategy reviews recorded.</span>
+                            </article>
+                          </div>
+                          <div class="strategy-notes-grid experiment-grid">
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Proposals</span>
+                                <h3>Strategy Proposals</h3>
+                              </div>
+                              <div id="strategy-proposals-card" class="strategy-note-body empty">
+                                No strategy experiment proposals yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Runs</span>
+                                <h3>Strategy Runs</h3>
+                              </div>
+                              <div id="strategy-runs-card" class="strategy-note-body empty">
+                                No strategy runs recorded yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Signals</span>
+                                <h3>Signal Feed</h3>
+                              </div>
+                              <div id="strategy-signals-card" class="strategy-note-body empty">
+                                No strategy signals recorded yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Reviews</span>
+                                <h3>Review Feed</h3>
+                              </div>
+                              <div id="strategy-reviews-card" class="strategy-note-body empty">
+                                No strategy reviews recorded yet.
+                              </div>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
                               <span class="section-kicker">Spreads</span>
                               <h2>Bull Put Monitor</h2>
                             </div>

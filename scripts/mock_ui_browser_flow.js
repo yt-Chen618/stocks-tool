@@ -41,6 +41,7 @@ async function main() {
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Execution Desk");
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
+    await expectText(page.locator("#strategy-experiment-strip"), "Active Proposals");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
     await page.getByRole("button", { name: "Load Live Macro" }).click();
     await expectText(page.locator("#preopen-summary-strip"), "Board Status");

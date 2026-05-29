@@ -14,6 +14,7 @@ from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.core.config import Settings, get_settings
 from stocks_tool.db.session import get_db_session
 from stocks_tool.ports.repository import (
@@ -25,6 +26,7 @@ from stocks_tool.ports.repository import (
     JournalRepository,
     OrderRepository,
     PreOpenAssessmentRunRepository,
+    StrategyExperimentRepository,
     TradePlanRepository,
     WatchlistRepository,
 )
@@ -57,6 +59,9 @@ from stocks_tool.repositories.sqlalchemy_watchlist_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
     SQLAlchemyPreOpenAssessmentRunRepository,
+)
+from stocks_tool.repositories.sqlalchemy_strategy_experiment_repository import (
+    SQLAlchemyStrategyExperimentRepository,
 )
 
 
@@ -141,6 +146,12 @@ def get_pre_open_assessment_run_repository(
     return SQLAlchemyPreOpenAssessmentRunRepository(session)
 
 
+def get_strategy_experiment_repository(
+    session: Session = Depends(get_db_session),
+) -> StrategyExperimentRepository:
+    return SQLAlchemyStrategyExperimentRepository(session)
+
+
 @lru_cache
 def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
     settings: Settings = get_settings()
@@ -188,6 +199,16 @@ def get_journal_service(
         orders=orders,
         trade_plans=trade_plans,
         executions=executions,
+    )
+
+
+def get_strategy_experiment_service(
+    experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
+    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+) -> StrategyExperimentService:
+    return StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
     )
 
 

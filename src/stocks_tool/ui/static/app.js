@@ -29,6 +29,26 @@ const TRANSLATIONS = {
     "Ready": "就绪",
     "Strategy": "策略",
     "Strategy Center": "策略中心",
+    "Experiment": "实验",
+    "Strategy Experiment Bench": "策略实验台",
+    "Active Proposals": "待处理提案",
+    "Latest Run": "最近运行",
+    "Signals": "信号",
+    "Reviews": "复盘",
+    "No strategy proposals loaded.": "尚未加载策略提案。",
+    "No strategy runs recorded.": "尚无策略运行记录。",
+    "No strategy signals recorded.": "尚无策略信号记录。",
+    "No strategy reviews recorded.": "尚无策略复盘记录。",
+    "Proposals": "提案",
+    "Strategy Proposals": "策略提案",
+    "No strategy experiment proposals yet.": "尚无策略实验提案。",
+    "Runs": "运行",
+    "Strategy Runs": "策略运行",
+    "No strategy runs recorded yet.": "尚无策略运行记录。",
+    "Signal Feed": "信号流",
+    "No strategy signals recorded yet.": "尚无策略信号记录。",
+    "Review Feed": "复盘流",
+    "No strategy reviews recorded yet.": "尚无策略复盘记录。",
     "Bull Put": "牛市看跌价差",
     "Bull Put Strategy": "牛市看跌策略",
     "Entry Status": "入场状态",
@@ -390,6 +410,7 @@ const state = {
   orders: [],
   spreads: [],
   runtime: null,
+  strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
   executions: [],
   journals: [],
   brokerStatus: null,
@@ -442,6 +463,11 @@ function bindElements() {
   els.strategySkipCard = document.getElementById("strategy-skip-card");
   els.strategyJournalFeed = document.getElementById("strategy-journal-feed");
   els.strategyReviewCard = document.getElementById("strategy-review-card");
+  els.strategyExperimentStrip = document.getElementById("strategy-experiment-strip");
+  els.strategyProposalsCard = document.getElementById("strategy-proposals-card");
+  els.strategyRunsCard = document.getElementById("strategy-runs-card");
+  els.strategySignalsCard = document.getElementById("strategy-signals-card");
+  els.strategyReviewsCard = document.getElementById("strategy-reviews-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
   els.ordersBody = document.getElementById("orders-body");
@@ -929,6 +955,7 @@ async function loadAccountData() {
     state.orders = [];
     state.spreads = [];
     state.runtime = null;
+    state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
     state.executions = [];
     state.journals = [];
     state.preOpenRuns = [];
@@ -942,6 +969,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderStrategyExperiment();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -953,11 +981,12 @@ async function loadAccountData() {
   }
 
   try {
-    const [latestSnapshot, orders, spreads, runtime, executions, journals, preOpenRuns] = await Promise.all([
+    const [latestSnapshot, orders, spreads, runtime, strategyExperiment, executions, journals, preOpenRuns] = await Promise.all([
       fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/strategies/experiment?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=6`),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
@@ -965,6 +994,7 @@ async function loadAccountData() {
     state.orders = orders;
     state.spreads = spreads;
     state.runtime = runtime;
+    state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
     state.executions = executions;
     state.journals = journals;
     state.preOpenRuns = preOpenRuns;
@@ -981,6 +1011,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderStrategyExperiment();
     renderSpreads();
     renderOrders();
     renderPositions();
@@ -1890,6 +1921,132 @@ function renderStrategyRuntime() {
   }
 
   updateStrategyButtons();
+}
+
+function renderStrategyExperiment() {
+  const experiment = state.strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
+  const proposals = Array.isArray(experiment.proposals) ? experiment.proposals : [];
+  const runs = Array.isArray(experiment.runs) ? experiment.runs : [];
+  const signals = Array.isArray(experiment.signals) ? experiment.signals : [];
+  const reviews = Array.isArray(experiment.reviews) ? experiment.reviews : [];
+  const pendingProposals = proposals.filter((proposal) => proposal.status === "pending");
+  const latestRun = runs[0] || null;
+  const latestSignal = signals[0] || null;
+  const latestReview = reviews[0] || null;
+
+  if (els.strategyExperimentStrip) {
+    const summaryValues = [
+      {
+        label: "Active Proposals",
+        value: String(pendingProposals.length),
+        tone: pendingProposals.length ? "warning" : "",
+        detail: proposals.length ? `${proposals.length} tracked proposal${proposals.length === 1 ? "" : "s"}` : "No strategy proposals loaded.",
+      },
+      {
+        label: "Latest Run",
+        value: latestRun ? formatStrategyStatusLabel(latestRun.status) : "--",
+        tone: latestRun ? strategyStatusClass(latestRun.status) : "",
+        detail: latestRun ? `${latestRun.strategy_id} / ${formatDateTime(latestRun.created_at)}` : "No strategy runs recorded.",
+      },
+      {
+        label: "Signals",
+        value: String(signals.length),
+        tone: latestSignal ? strategyStatusClass(latestSignal.signal_type) : "",
+        detail: latestSignal ? `${latestSignal.signal_type} / ${formatDateTime(latestSignal.emitted_at)}` : "No strategy signals recorded.",
+      },
+      {
+        label: "Reviews",
+        value: String(reviews.length),
+        tone: latestReview ? strategyStatusClass(latestReview.status) : "",
+        detail: latestReview ? `${latestReview.review_type} / ${formatDateTime(latestReview.reviewed_at)}` : "No strategy reviews recorded.",
+      },
+    ];
+    els.strategyExperimentStrip.innerHTML = summaryValues
+      .map(
+        (item) => `
+          <article class="mini-metric-tile">
+            <span class="metric-label">${escapeHtml(item.label)}</span>
+            <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+            <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+          </article>
+        `
+      )
+      .join("");
+  }
+
+  renderStrategyExperimentList({
+    element: els.strategyProposalsCard,
+    items: proposals,
+    emptyText: "No strategy experiment proposals yet.",
+    renderItem: (proposal) => `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>${escapeHtml(proposal.title)}</strong>
+          <span class="pill ${strategyStatusClass(proposal.status)}">${escapeHtml(formatStrategyStatusLabel(proposal.status))}</span>
+        </div>
+        <p>${escapeHtml(proposal.rationale)}</p>
+        <span>${escapeHtml([proposal.strategy_id, proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</span>
+      </article>
+    `,
+  });
+  renderStrategyExperimentList({
+    element: els.strategyRunsCard,
+    items: runs,
+    emptyText: "No strategy runs recorded yet.",
+    renderItem: (run) => `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>${escapeHtml(`${run.strategy_id} / ${run.run_type}`)}</strong>
+          <span class="pill ${strategyStatusClass(run.status)}">${escapeHtml(formatStrategyStatusLabel(run.status))}</span>
+        </div>
+        <p>${escapeHtml(run.summary || run.reason || "Run recorded without a summary.")}</p>
+        <span>${escapeHtml(formatDateTime(run.completed_at || run.started_at || run.created_at))}</span>
+      </article>
+    `,
+  });
+  renderStrategyExperimentList({
+    element: els.strategySignalsCard,
+    items: signals,
+    emptyText: "No strategy signals recorded yet.",
+    renderItem: (signal) => `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>${escapeHtml(signal.summary)}</strong>
+          <span class="pill neutral">${escapeHtml(formatStrategyStatusLabel(signal.signal_type))}</span>
+        </div>
+        <p>${escapeHtml(signal.detail || [signal.strategy_id, signal.symbol].filter(Boolean).join(" / ") || "Signal recorded.")}</p>
+        <span>${escapeHtml(formatDateTime(signal.emitted_at))}</span>
+      </article>
+    `,
+  });
+  renderStrategyExperimentList({
+    element: els.strategyReviewsCard,
+    items: reviews,
+    emptyText: "No strategy reviews recorded yet.",
+    renderItem: (review) => `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>${escapeHtml(review.review_type)}</strong>
+          <span class="pill ${strategyStatusClass(review.status)}">${escapeHtml(formatStrategyStatusLabel(review.status))}</span>
+        </div>
+        <p>${escapeHtml(review.recommendation || review.summary)}</p>
+        <span>${escapeHtml(formatDateTime(review.reviewed_at))}</span>
+      </article>
+    `,
+  });
+}
+
+function renderStrategyExperimentList({ element, items, emptyText, renderItem }) {
+  if (!element) {
+    return;
+  }
+  if (!items.length) {
+    element.className = "strategy-note-body empty";
+    element.textContent = emptyText;
+    return;
+  }
+  element.className = "strategy-note-body";
+  element.innerHTML = items.slice(0, 4).map(renderItem).join("");
 }
 
 function renderSpreads() {
@@ -3849,6 +4006,19 @@ function statusClass(status) {
   return "neutral";
 }
 
+function strategyStatusClass(status) {
+  if (status === "approved" || status === "executed" || status === "reviewed" || status === "suggested") {
+    return "success";
+  }
+  if (status === "pending" || status === "planned" || status === "running" || status === "candidate" || status === "risk_check") {
+    return "warning";
+  }
+  if (status === "rejected" || status === "expired" || status === "failed" || status === "blocked") {
+    return "error";
+  }
+  return "neutral";
+}
+
 function journalEntryTone(entryType) {
   if (entryType === "review") {
     return "warning";
@@ -3878,6 +4048,12 @@ function spreadStatusClass(status) {
 }
 
 function formatSpreadStatusLabel(status) {
+  return String(status || "--")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatStrategyStatusLabel(status) {
   return String(status || "--")
     .replaceAll("_", " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());

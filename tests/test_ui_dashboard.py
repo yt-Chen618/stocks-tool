@@ -31,6 +31,11 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Review Workflow" in response.text
     assert "Save Entry" in response.text
     assert "Bull Put Strategy" in response.text
+    assert "Strategy Experiment Bench" in response.text
+    assert "Strategy Proposals" in response.text
+    assert "Strategy Runs" in response.text
+    assert "Signal Feed" in response.text
+    assert "Review Feed" in response.text
     assert "Entry Status" in response.text
     assert "Next Action" in response.text
     assert "Latest Skip Reason" in response.text

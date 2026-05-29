@@ -19,6 +19,15 @@ This project assumes a local PostgreSQL instance managed by Docker Compose for d
 - `account_snapshots`
 - `position_snapshots`
 - `orders`
+- `executions`
+- `journal_entries`
+- `bull_put_spreads`
+- `bull_put_strategy_runtime`
+- `pre_open_assessment_runs`
+- `strategy_proposals`
+- `strategy_runs`
+- `strategy_signals`
+- `strategy_reviews`
 
 ## Local startup
 

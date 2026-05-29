@@ -24,6 +24,38 @@ class JournalEntryType(str, Enum):
     NOTE = "note"
 
 
+class StrategyProposalStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    EXECUTED = "executed"
+
+
+class StrategyRunStatus(str, Enum):
+    PLANNED = "planned"
+    RUNNING = "running"
+    SKIPPED = "skipped"
+    EXECUTED = "executed"
+    FAILED = "failed"
+    REVIEWED = "reviewed"
+
+
+class StrategySignalType(str, Enum):
+    CANDIDATE = "candidate"
+    RISK_CHECK = "risk_check"
+    EXECUTION = "execution"
+    MONITOR = "monitor"
+    REVIEW = "review"
+
+
+class StrategyReviewStatus(str, Enum):
+    OBSERVED = "observed"
+    SUGGESTED = "suggested"
+    NO_CHANGE = "no_change"
+    BLOCKED = "blocked"
+
+
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
     FILING = "filing"

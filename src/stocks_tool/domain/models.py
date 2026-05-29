@@ -19,6 +19,10 @@ from stocks_tool.domain.enums import (
     ReconciliationStatus,
     RiskStatus,
     SpreadStatus,
+    StrategyProposalStatus,
+    StrategyReviewStatus,
+    StrategyRunStatus,
+    StrategySignalType,
     TimeInForce,
     TradeStructure,
 )
@@ -314,6 +318,176 @@ class JournalEntry(BaseModel):
     tags: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+
+class CreateStrategyProposalRequest(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    symbol: str | None = Field(default=None, max_length=32)
+    title: str = Field(min_length=1, max_length=160)
+    proposed_action: str = Field(min_length=1, max_length=64)
+    thesis: str | None = None
+    rationale: str = Field(min_length=1)
+    confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    expected_max_loss: Decimal | None = Field(default=None, ge=0)
+    expected_max_profit: Decimal | None = None
+    approval_required: bool = True
+    expires_at: datetime | None = None
+    source: str | None = Field(default=None, max_length=64)
+    source_run_id: str | None = Field(default=None, max_length=36)
+    candidate_payload: dict | None = None
+    risk_payload: dict | None = None
+    checks: list[str] = Field(default_factory=list)
+
+
+class StrategyProposal(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    symbol: str | None = None
+    title: str
+    proposed_action: str
+    thesis: str | None = None
+    rationale: str
+    status: StrategyProposalStatus = StrategyProposalStatus.PENDING
+    confidence: Decimal | None = None
+    expected_max_loss: Decimal | None = None
+    expected_max_profit: Decimal | None = None
+    approval_required: bool = True
+    approved_at: datetime | None = None
+    rejected_at: datetime | None = None
+    expires_at: datetime | None = None
+    source: str | None = None
+    source_run_id: str | None = None
+    candidate_payload: dict | None = None
+    risk_payload: dict | None = None
+    checks: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CreateStrategyRunRequest(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    run_type: str = Field(min_length=1, max_length=64)
+    status: StrategyRunStatus = StrategyRunStatus.PLANNED
+    symbol: str | None = Field(default=None, max_length=32)
+    proposal_id: str | None = Field(default=None, max_length=36)
+    trade_plan_id: str | None = Field(default=None, max_length=36)
+    order_id: str | None = Field(default=None, max_length=36)
+    spread_id: str | None = Field(default=None, max_length=36)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    summary: str | None = None
+    reason: str | None = None
+    metrics_payload: dict | None = None
+    raw_payload: dict | None = None
+
+
+class StrategyRun(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    run_type: str
+    status: StrategyRunStatus
+    symbol: str | None = None
+    proposal_id: str | None = None
+    trade_plan_id: str | None = None
+    order_id: str | None = None
+    spread_id: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    summary: str | None = None
+    reason: str | None = None
+    metrics_payload: dict | None = None
+    raw_payload: dict | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CreateStrategySignalRequest(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    signal_type: StrategySignalType
+    symbol: str | None = Field(default=None, max_length=32)
+    run_id: str | None = Field(default=None, max_length=36)
+    proposal_id: str | None = Field(default=None, max_length=36)
+    strength: Decimal | None = Field(default=None, ge=-1, le=1)
+    summary: str = Field(min_length=1, max_length=240)
+    detail: str | None = None
+    source: str | None = Field(default=None, max_length=64)
+    signal_payload: dict | None = None
+    emitted_at: datetime | None = None
+
+
+class StrategySignal(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    signal_type: StrategySignalType
+    symbol: str | None = None
+    run_id: str | None = None
+    proposal_id: str | None = None
+    strength: Decimal | None = None
+    summary: str
+    detail: str | None = None
+    source: str | None = None
+    signal_payload: dict | None = None
+    emitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CreateStrategyReviewRequest(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    review_type: str = Field(min_length=1, max_length=64)
+    status: StrategyReviewStatus
+    summary: str = Field(min_length=1)
+    recommendation: str | None = None
+    parameter_name: str | None = Field(default=None, max_length=64)
+    current_value: str | None = Field(default=None, max_length=120)
+    suggested_value: str | None = Field(default=None, max_length=120)
+    run_id: str | None = Field(default=None, max_length=36)
+    proposal_id: str | None = Field(default=None, max_length=36)
+    journal_entry_id: str | None = Field(default=None, max_length=36)
+    metrics_payload: dict | None = None
+    reviewed_at: datetime | None = None
+
+
+class StrategyReview(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    strategy_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    review_type: str
+    status: StrategyReviewStatus
+    summary: str
+    recommendation: str | None = None
+    parameter_name: str | None = None
+    current_value: str | None = None
+    suggested_value: str | None = None
+    run_id: str | None = None
+    proposal_id: str | None = None
+    journal_entry_id: str | None = None
+    metrics_payload: dict | None = None
+    reviewed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StrategyExperimentSnapshot(BaseModel):
+    external_account_id: str | None = None
+    proposals: list[StrategyProposal] = Field(default_factory=list)
+    runs: list[StrategyRun] = Field(default_factory=list)
+    signals: list[StrategySignal] = Field(default_factory=list)
+    reviews: list[StrategyReview] = Field(default_factory=list)
 
 
 class BrokerCapability(BaseModel):

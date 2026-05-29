@@ -6,6 +6,7 @@ from stocks_tool.domain.enums import (
     OrderStatus,
     ReconciliationStatus,
     SpreadStatus,
+    StrategyProposalStatus,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -14,11 +15,19 @@ from stocks_tool.domain.models import (
     PreOpenAssessmentRun,
     BullPutSpread,
     BullPutStrategyRuntimeState,
+    CreateStrategyProposalRequest,
+    CreateStrategyReviewRequest,
+    CreateStrategyRunRequest,
+    CreateStrategySignalRequest,
     Execution,
     CreateWatchlistRequest,
     CreateBrokerAccountRequest,
     JournalEntry,
     Order,
+    StrategyProposal,
+    StrategyReview,
+    StrategyRun,
+    StrategySignal,
     TradePlan,
     Watchlist,
 )
@@ -246,4 +255,78 @@ class PreOpenAssessmentRunRepository(ABC):
         self,
         run: PreOpenAssessmentRun,
     ) -> PreOpenAssessmentRun:
+        raise NotImplementedError
+
+
+class StrategyExperimentRepository(ABC):
+    @abstractmethod
+    def create_proposal(self, request: CreateStrategyProposalRequest) -> StrategyProposal:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_proposal(self, proposal_id: str) -> StrategyProposal | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_proposal_status(
+        self,
+        proposal_id: str,
+        *,
+        status: StrategyProposalStatus,
+        approved_at: datetime | None = None,
+        rejected_at: datetime | None = None,
+    ) -> StrategyProposal:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_proposals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        status: StrategyProposalStatus | None = None,
+        limit: int = 20,
+    ) -> list[StrategyProposal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_run(self, request: CreateStrategyRunRequest) -> StrategyRun:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_signals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategySignal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_reviews(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategyReview]:
         raise NotImplementedError

@@ -421,6 +421,126 @@ class PreOpenAssessmentRunRecord(TimestampMixin, Base):
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 
 
+class StrategyProposalRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_proposals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    proposed_action: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    thesis: Mapped[str | None] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        index=True,
+        default="pending",
+        server_default="pending",
+    )
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    expected_max_loss: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    expected_max_profit: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source: Mapped[str | None] = mapped_column(String(64))
+    source_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    candidate_payload: Mapped[dict | None] = mapped_column(JSONB)
+    risk_payload: Mapped[dict | None] = mapped_column(JSONB)
+    checks: Mapped[list[str] | None] = mapped_column(JSONB)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class StrategyRunRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    run_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), index=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    trade_plan_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    order_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    spread_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    metrics_payload: Mapped[dict | None] = mapped_column(JSONB)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class StrategySignalRecord(Base):
+    __tablename__ = "strategy_signals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    symbol: Mapped[str | None] = mapped_column(String(32), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    strength: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    summary: Mapped[str] = mapped_column(String(240), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(64))
+    signal_payload: Mapped[dict | None] = mapped_column(JSONB)
+    emitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class StrategyReviewRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_reviews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    strategy_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    review_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    recommendation: Mapped[str | None] = mapped_column(Text)
+    parameter_name: Mapped[str | None] = mapped_column(String(64))
+    current_value: Mapped[str | None] = mapped_column(String(120))
+    suggested_value: Mapped[str | None] = mapped_column(String(120))
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    journal_entry_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    metrics_payload: Mapped[dict | None] = mapped_column(JSONB)
+    reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
 class JournalEntryRecord(TimestampMixin, Base):
     __tablename__ = "journal_entries"
 

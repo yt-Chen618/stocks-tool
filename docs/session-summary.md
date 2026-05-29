@@ -28,6 +28,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `account-snapshots/latest`
 - `brokers/longbridge`
 - `strategies`
+- `strategies/experiment`
 - `executions`
 - `journals`
 - `orders`
@@ -71,6 +72,17 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/bull-put/runtime/{external_account_id}`
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
+- `GET /strategies/experiment`
+- `GET /strategies/proposals`
+- `POST /strategies/proposals`
+- `POST /strategies/proposals/{proposal_id}/approve`
+- `POST /strategies/proposals/{proposal_id}/reject`
+- `GET /strategies/runs`
+- `POST /strategies/runs`
+- `GET /strategies/signals`
+- `POST /strategies/signals`
+- `GET /strategies/reviews`
+- `POST /strategies/reviews`
 - `GET /strategies/pre-open-risk`
 - `GET /strategies/pre-open-runs`
 - `POST /strategies/pre-open-runs/{external_account_id}/capture`
@@ -106,7 +118,20 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - holiday-aware scheduling now distinguishes normal Mondays from exchange holidays; for example, `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26`
 - Current limitations:
   - the workflow still coordinates two separate option orders rather than a broker-native combo order
-  - real Longbridge paper preview now works, but the latest execute attempts on `QQQ.US` still ended `long_entry_unfilled`, so no bull put spread has opened end to end yet
+
+### Strategy experiment ledger
+
+- A first-pass strategy experiment foundation now exists for future strategy families and LLM-assisted proposals.
+- Tables:
+  - `strategy_proposals`
+  - `strategy_runs`
+  - `strategy_signals`
+  - `strategy_reviews`
+- Current scope:
+  - records proposals before execution, including action, rationale, confidence, expected max loss/profit, checks, and raw candidate/risk payloads
+  - records strategy runs, signals, and reviews independently from the current bull put runtime table
+  - dashboard renders the selected account's pending proposals, latest runs, signal feed, and review feed
+  - approval/rejection is persisted, but approval still does not bypass any local strategy-specific readiness or risk checks
 
 ### Automatic reconciliation
 
@@ -263,6 +288,7 @@ Current dashboard capabilities:
 - View account metrics
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
+- View strategy experiment proposals, runs, signals, and reviews for the selected account
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
 - View a pre-open risk board with macro proxies plus `QQQ / SPY` directional put checks
 - View plain-put action guidance, gap-chase risk, opening checkpoints, richer `QQQ / SPY` reference-put liquidity summaries, and a deeper option-chain analysis layer inside the pre-open board
@@ -318,6 +344,9 @@ Frontend files:
 - Added option-leg liquidity and quote-freshness filters for bull put candidates, with configurable minimum same-day volume per leg.
 - Added bull put preview timing visibility through `timing_ms` and short-lived locked-preview cache reuse for execute requests that include `candidate_token`.
 - Added computed runtime-state fields for open-position awareness, daily-cap status, entry-block reason, next action, active/open spread counts, and next monitor time.
+- Added strategy experiment persistence through `strategy_proposals`, `strategy_runs`, `strategy_signals`, and `strategy_reviews` plus Alembic migration `20260529_0009_strategy_experiment_tables`.
+- Added strategy experiment routes under `/strategies/experiment`, `/strategies/proposals`, `/strategies/runs`, `/strategies/signals`, and `/strategies/reviews`.
+- Added a dashboard strategy experiment bench for pending proposals, recent runs, signal feed, and review feed.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -341,6 +370,7 @@ Frontend files:
 - Added `tests/test_journal_service.py` for order / execution linkage validation.
 - Added `tests/test_bull_put_strategy.py` for spread selection, risk gating, paper entry success, short-leg rollback, exit-monitor flows, and strategy review suggestions.
 - Added `tests/test_strategies_api.py` for strategy preview, execute, monitor, and runtime-review route coverage.
+- Added `tests/test_strategy_experiments_api.py` for the unified strategy experiment routes.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
 - Latest local verification run after the dashboard macro-board and Longbridge scheduler updates:
@@ -349,14 +379,14 @@ Frontend files:
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `75 passed`
+- Result: `88 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the macro board state surfaces
+- Result: `passed` and now includes the strategy experiment bench, real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the macro board state surfaces
 - Latest real local pre-open board regression:
 
 ```powershell
@@ -391,7 +421,7 @@ Frontend files:
 .venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh
 ```
 
-- Result from the long-running local `127.0.0.1:8000` instance: `passed`
+- Result from the long-running local `127.0.0.1:8000` instance: `passed`; after the strategy experiment ledger landed, repeated dashboard refreshes showed `dashboard-ready 78-358 ms`, `overlay-settled 88-418 ms`, and `/strategies/experiment` averaging about `39 ms`.
 - Warm-instance timing from repeated default-threshold runs:
   - dashboard-ready: `115-246 ms`
   - overlay-settled: `121-262 ms`
@@ -438,5 +468,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Improve real paper bull put entry quality so the first protective long leg can fill more reliably during regular hours.
-2. Add runtime controls and strategy activity views to any future authenticated user/session layer.
+1. Implement `covered_call_v1` on top of the strategy experiment ledger.
+2. Add market/news/event ingestion so proposals can avoid earnings and macro-event traps.
+3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

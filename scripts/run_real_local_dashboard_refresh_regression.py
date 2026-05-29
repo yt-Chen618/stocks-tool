@@ -177,6 +177,7 @@ def summarize_runs(
             "/orders",
             "/strategies/bull-put/spreads",
             "/strategies/bull-put/runtime",
+            "/strategies/experiment",
             "/executions",
             "/journals",
             "/strategies/pre-open-runs",
