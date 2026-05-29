@@ -217,6 +217,7 @@ def get_covered_call_strategy_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
+    order_service: OrderService = Depends(get_order_service),
     adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
 ) -> CoveredCallStrategyService:
     settings: Settings = get_settings()
@@ -226,6 +227,7 @@ def get_covered_call_strategy_service(
         account_snapshots=account_snapshots,
         experiments=experiments,
         longbridge_adapter=adapter,
+        order_service=order_service,
     )
 
 

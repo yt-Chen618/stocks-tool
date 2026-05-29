@@ -5,12 +5,24 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_covered_call_strategy_service
-from stocks_tool.domain.enums import ExecutionMode, RiskStatus
+from stocks_tool.domain.enums import (
+    AssetType,
+    BrokerName,
+    ExecutionMode,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    RiskStatus,
+    StrategyProposalStatus,
+    TimeInForce,
+)
 from stocks_tool.domain.models import (
+    CoveredCallExecutionResult,
     CoveredCallCandidate,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
     CoveredCallRiskSummary,
+    Order,
     StrategyProposal,
 )
 from stocks_tool.main import app
@@ -134,3 +146,58 @@ def test_covered_call_propose_route_returns_ledger_proposal() -> None:
     assert body["proposal"]["proposed_action"] == "sell_covered_call"
     request = service.create_proposal.call_args.kwargs
     assert request["external_account_id"] == "LBPT10087357"
+
+
+def test_covered_call_execute_route_submits_approved_proposal() -> None:
+    service = Mock()
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Approved covered call proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service.execute_approved_proposal.return_value = CoveredCallExecutionResult(
+        proposal=proposal,
+        order=Order(
+            id="order-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-order-1",
+            symbol="UNH260626C105000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.SELL,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("1.20"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        submitted_at=NOW,
+    )
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-1/execute",
+            json={"limit_price": "1.20", "remark": "approved-test"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposal"]["status"] == "executed"
+    assert body["order"]["symbol"] == "UNH260626C105000.US"
+    request = service.execute_approved_proposal.call_args.args[1]
+    assert request.limit_price == Decimal("1.20")
+    assert request.remark == "approved-test"

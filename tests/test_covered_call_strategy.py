@@ -8,16 +8,22 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    OrderSide,
+    OrderStatus,
+    OrderType,
     OptionRight,
     RiskStatus,
     StrategyProposalStatus,
     StrategyRunStatus,
     StrategySignalType,
+    TimeInForce,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
+    ExecuteCoveredCallProposalRequest,
     OptionMarketSnapshot,
+    Order,
     PositionSnapshot,
     SecurityQuoteSnapshot,
     StrategyProposal,
@@ -55,10 +61,12 @@ class FakeAccountSnapshots:
 
 
 class FakeExperiments:
-    def __init__(self) -> None:
+    def __init__(self, proposal: StrategyProposal | None = None) -> None:
+        self.proposal = proposal
         self.run_request = None
         self.signal_request = None
         self.proposal_request = None
+        self.updated_status = None
 
     def create_run(self, request):
         self.run_request = request
@@ -93,7 +101,7 @@ class FakeExperiments:
 
     def create_proposal(self, request):
         self.proposal_request = request
-        return StrategyProposal(
+        self.proposal = StrategyProposal(
             id="proposal-1",
             strategy_id=request.strategy_id,
             external_account_id=request.external_account_id,
@@ -112,6 +120,19 @@ class FakeExperiments:
             created_at=NOW,
             updated_at=NOW,
         )
+        return self.proposal
+
+    def get_proposal(self, proposal_id: str):
+        if self.proposal is not None and self.proposal.id == proposal_id:
+            return self.proposal
+        return None
+
+    def update_proposal_status(self, proposal_id: str, *, status, approved_at=None, rejected_at=None):
+        if self.proposal is None or self.proposal.id != proposal_id:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        self.updated_status = status
+        self.proposal = self.proposal.model_copy(update={"status": status, "updated_at": NOW})
+        return self.proposal
 
 
 def build_snapshot(*, quantity: Decimal = Decimal("100")) -> AccountSnapshot:
@@ -182,6 +203,7 @@ def build_service(
     *,
     snapshot: AccountSnapshot | None = None,
     experiments: FakeExperiments | None = None,
+    order_service: Mock | None = None,
 ) -> CoveredCallStrategyService:
     return CoveredCallStrategyService(
         settings=Settings(),
@@ -189,6 +211,7 @@ def build_service(
         account_snapshots=FakeAccountSnapshots(snapshot or build_snapshot()),
         experiments=experiments or FakeExperiments(),
         longbridge_adapter=build_adapter(),
+        order_service=order_service,
     )
 
 
@@ -252,3 +275,74 @@ def test_covered_call_proposal_writes_strategy_experiment_records() -> None:
         "liquidity_filter",
         "manual_approval_required",
     ]
+
+
+def test_covered_call_execute_requires_approved_proposal_and_submits_option_order() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "underlying_symbol": "UNH.US",
+            "expiration_date": "2026-06-26",
+            "days_to_expiration": 28,
+            "contracts": 1,
+            "covered_shares": 100,
+            "share_quantity": "100",
+            "average_cost": "90",
+            "underlying_price": "100",
+            "call_symbol": "UNH260626C105000.US",
+            "call_strike": "105",
+            "call_bid": "1.20",
+            "call_ask": "1.30",
+            "call_mid": "1.25",
+            "premium_income": "120.00",
+            "delta": "0.30",
+            "open_interest": 800,
+            "volume": 25,
+            "quote_timestamp": "2026-05-29T15:00:00Z",
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    order_service.submit_order.return_value = Order(
+        id="order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-order-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.SELL,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.20"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.execute_approved_proposal(
+        "proposal-1",
+        request=ExecuteCoveredCallProposalRequest(),
+    )
+
+    assert result.proposal.status == StrategyProposalStatus.EXECUTED
+    assert result.order.id == "order-1"
+    request = order_service.submit_order.call_args.args[0]
+    assert request.symbol == "UNH260626C105000.US"
+    assert request.asset_type == AssetType.OPTION
+    assert request.side == OrderSide.SELL
+    assert request.limit_price == Decimal("1.20")
+    assert request.option_contract.underlying_symbol == "UNH.US"
+    assert experiments.updated_status == StrategyProposalStatus.EXECUTED

@@ -703,6 +703,19 @@ class CoveredCallProposalResult(BaseModel):
     signal: StrategySignal | None = None
 
 
+class ExecuteCoveredCallProposalRequest(BaseModel):
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    remark: str | None = Field(default=None, max_length=64)
+
+
+class CoveredCallExecutionResult(BaseModel):
+    proposal: StrategyProposal
+    order: Order
+    run: StrategyRun | None = None
+    signal: StrategySignal | None = None
+    submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class BullPutSpreadCandidate(BaseModel):
     underlying_symbol: str
     expiration_date: date

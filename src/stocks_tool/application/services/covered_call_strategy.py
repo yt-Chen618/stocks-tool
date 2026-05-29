@@ -5,25 +5,34 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.application.services.orders import OrderService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
     OptionRight,
+    OrderSide,
+    OrderType,
     RiskStatus,
+    StrategyProposalStatus,
     StrategyRunStatus,
     StrategySignalType,
+    TimeInForce,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
     CoveredCallCandidate,
+    CoveredCallExecutionResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
     CoveredCallRiskSummary,
+    CreateOrderRequest,
     CreateStrategyProposalRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
+    ExecuteCoveredCallProposalRequest,
+    OptionContractRef,
     OptionMarketSnapshot,
     PositionSnapshot,
 )
@@ -45,12 +54,14 @@ class CoveredCallStrategyService:
         account_snapshots: AccountSnapshotRepository,
         experiments: StrategyExperimentRepository,
         longbridge_adapter: LongbridgeBrokerAdapter,
+        order_service: OrderService | None = None,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
         self.account_snapshots = account_snapshots
         self.experiments = experiments
         self.longbridge_adapter = longbridge_adapter
+        self.order_service = order_service
         self.new_york = ZoneInfo("America/New_York")
 
     def preview(
@@ -263,6 +274,99 @@ class CoveredCallStrategyService:
             signal=signal,
         )
 
+    def execute_approved_proposal(
+        self,
+        proposal_id: str,
+        request: ExecuteCoveredCallProposalRequest,
+    ) -> CoveredCallExecutionResult:
+        if self.order_service is None:
+            raise RuntimeError("Covered call execution requires an order service.")
+        proposal = self.experiments.get_proposal(proposal_id)
+        if proposal is None:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        if proposal.strategy_id != self.strategy_id:
+            raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
+        if proposal.status != StrategyProposalStatus.APPROVED:
+            raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before execution.")
+        if proposal.candidate_payload is None:
+            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+
+        candidate = CoveredCallCandidate.model_validate(proposal.candidate_payload)
+        self._ensure_latest_position_still_covers(
+            external_account_id=proposal.external_account_id,
+            candidate=candidate,
+        )
+        limit_price = request.limit_price or candidate.call_bid
+        if limit_price <= Decimal("0"):
+            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive limit price.")
+
+        order = self.order_service.submit_order(
+            CreateOrderRequest(
+                external_account_id=proposal.external_account_id,
+                broker=BrokerName.LONGBRIDGE,
+                symbol=candidate.call_symbol,
+                asset_type=AssetType.OPTION,
+                side=OrderSide.SELL,
+                quantity=candidate.contracts,
+                order_type=OrderType.LIMIT,
+                time_in_force=TimeInForce.DAY,
+                mode=proposal.mode,
+                limit_price=limit_price,
+                option_contract=OptionContractRef(
+                    underlying_symbol=candidate.underlying_symbol,
+                    expiration_date=candidate.expiration_date,
+                    strike=candidate.call_strike,
+                    right=OptionRight.CALL,
+                ),
+                remark=request.remark or "covered-call",
+            )
+        )
+        run = self.experiments.create_run(
+            CreateStrategyRunRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                run_type="proposal_execution",
+                status=StrategyRunStatus.EXECUTED,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                order_id=order.id,
+                started_at=datetime.now(timezone.utc),
+                completed_at=datetime.now(timezone.utc),
+                summary=f"Submitted covered call sell order for {candidate.call_symbol}.",
+                metrics_payload={
+                    "proposal_id": proposal.id,
+                    "order_id": order.id,
+                    "limit_price": str(limit_price),
+                    "candidate": candidate.model_dump(mode="json"),
+                },
+            )
+        )
+        signal = self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.EXECUTION,
+                symbol=proposal.symbol,
+                run_id=run.id,
+                proposal_id=proposal.id,
+                summary=f"Covered call order submitted for {candidate.call_symbol}.",
+                source="covered_call_v1",
+                signal_payload={"order_id": order.id, "candidate": candidate.model_dump(mode="json")},
+            )
+        )
+        executed_proposal = self.experiments.update_proposal_status(
+            proposal.id,
+            status=StrategyProposalStatus.EXECUTED,
+        )
+        return CoveredCallExecutionResult(
+            proposal=executed_proposal,
+            order=order,
+            run=run,
+            signal=signal,
+        )
+
     def _ensure_account(self, external_account_id: str) -> None:
         account = self.broker_accounts.get_by_external_account_id(external_account_id)
         if account is None or account.broker != BrokerName.LONGBRIDGE:
@@ -297,6 +401,28 @@ class CoveredCallStrategyService:
         if not eligible_positions:
             return None
         return max(eligible_positions, key=lambda position: position.market_value)
+
+    def _ensure_latest_position_still_covers(
+        self,
+        *,
+        external_account_id: str,
+        candidate: CoveredCallCandidate,
+    ) -> None:
+        snapshot = self._get_latest_account_snapshot(external_account_id)
+        position = next(
+            (
+                position
+                for position in snapshot.positions
+                if position.symbol.upper() == candidate.underlying_symbol.upper()
+                and position.asset_type in {AssetType.STOCK, AssetType.ETF}
+            ),
+            None,
+        )
+        if position is None or int(position.quantity) < candidate.covered_shares:
+            raise ValueError(
+                f"Latest local snapshot no longer covers {candidate.covered_shares} shares of "
+                f"{candidate.underlying_symbol}."
+            )
 
     def _select_expiration(self, expiry_dates: list[date], evaluated_at: datetime) -> date | None:
         strategy = self.settings.covered_call_strategy

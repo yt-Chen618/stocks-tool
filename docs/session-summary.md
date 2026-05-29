@@ -76,6 +76,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /strategies/experiment`
 - `GET /strategies/covered-call/preview`
 - `POST /strategies/covered-call/propose`
+- `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -148,7 +149,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - selects a liquid out-of-the-money call using configured DTE, delta, OI, volume, bid, and bid/ask spread filters
   - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
   - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
-  - no covered-call order is submitted yet; execution remains a future approval-to-order step
+  - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
+  - no automatic covered-call scheduler or close/roll monitor exists yet
 
 ### Automatic reconciliation
 
@@ -364,7 +366,8 @@ Frontend files:
 - Added strategy experiment persistence through `strategy_proposals`, `strategy_runs`, `strategy_signals`, and `strategy_reviews` plus Alembic migration `20260529_0009_strategy_experiment_tables`.
 - Added strategy experiment routes under `/strategies/experiment`, `/strategies/proposals`, `/strategies/runs`, `/strategies/signals`, and `/strategies/reviews`.
 - Added a dashboard strategy experiment bench for pending proposals, recent runs, signal feed, and review feed.
-- Added `covered_call_v1` preview/propose routes that create strategy experiment runs, signals, and proposals for covered-call candidates without submitting orders.
+- Added `covered_call_v1` preview/propose routes that create strategy experiment runs, signals, and proposals for covered-call candidates.
+- Added approved-proposal-only covered-call paper execution through `POST /strategies/covered-call/proposals/{proposal_id}/execute`.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -486,6 +489,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add covered-call approval-to-paper-order execution and post-entry monitoring.
+1. Add covered-call post-entry monitoring and close/roll guidance.
 2. Add market/news/event ingestion so proposals can avoid earnings and macro-event traps.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

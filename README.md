@@ -111,6 +111,7 @@ Then open:
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/covered-call/preview`
 - `POST /strategies/covered-call/propose`
+- `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `GET /strategies/experiment`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
@@ -177,7 +178,7 @@ The bull put spread workflow is currently paper-only:
 - bull put performance visibility: previews include `timing_ms`, and locked execute can reuse the cached candidate while refreshing only the two selected option legs before submission
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
-- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval
+- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades
@@ -240,6 +241,6 @@ Useful examples:
 
 ## Next milestones
 
-1. Add covered-call approval-to-paper-order execution and post-entry monitoring.
+1. Add covered-call post-entry monitoring and close/roll guidance.
 2. Add scheduler and ingestion workers for market/news/event data so proposal generation can avoid earnings and macro-event traps.
 3. Add authentication, audit logging, and strategy-level permission controls before any live execution path expands.
