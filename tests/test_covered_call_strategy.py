@@ -204,13 +204,14 @@ def build_service(
     snapshot: AccountSnapshot | None = None,
     experiments: FakeExperiments | None = None,
     order_service: Mock | None = None,
+    adapter: Mock | None = None,
 ) -> CoveredCallStrategyService:
     return CoveredCallStrategyService(
         settings=Settings(),
         broker_accounts=FakeBrokerAccounts(),
         account_snapshots=FakeAccountSnapshots(snapshot or build_snapshot()),
         experiments=experiments or FakeExperiments(),
-        longbridge_adapter=build_adapter(),
+        longbridge_adapter=adapter or build_adapter(),
         order_service=order_service,
     )
 
@@ -346,3 +347,72 @@ def test_covered_call_execute_requires_approved_proposal_and_submits_option_orde
     assert request.limit_price == Decimal("1.20")
     assert request.option_contract.underlying_symbol == "UNH.US"
     assert experiments.updated_status == StrategyProposalStatus.EXECUTED
+
+
+def test_covered_call_monitor_records_take_profit_guidance() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Approved covered call proposal.",
+        status=StrategyProposalStatus.EXECUTED,
+        candidate_payload={
+            "underlying_symbol": "UNH.US",
+            "expiration_date": "2026-06-26",
+            "days_to_expiration": 28,
+            "contracts": 1,
+            "covered_shares": 100,
+            "share_quantity": "100",
+            "average_cost": "90",
+            "underlying_price": "100",
+            "call_symbol": "UNH260626C105000.US",
+            "call_strike": "105",
+            "call_bid": "1.20",
+            "call_ask": "1.30",
+            "call_mid": "1.25",
+            "premium_income": "120.00",
+            "delta": "0.30",
+            "open_interest": 800,
+            "volume": 25,
+            "quote_timestamp": "2026-05-29T15:00:00Z",
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    adapter = build_adapter()
+    adapter.get_option_market_snapshots.return_value = [
+        OptionMarketSnapshot(
+            symbol="UNH260626C105000.US",
+            underlying_symbol="UNH.US",
+            expiration_date=date(2026, 6, 26),
+            strike=Decimal("105"),
+            right=OptionRight.CALL,
+            last_done=Decimal("0.55"),
+            prev_close=Decimal("1.20"),
+            open=Decimal("0.80"),
+            high=Decimal("0.90"),
+            low=Decimal("0.50"),
+            timestamp=NOW,
+            volume=20,
+            turnover=Decimal("1100"),
+            bid=Decimal("0.50"),
+            ask=Decimal("0.60"),
+            open_interest=700,
+            delta=Decimal("0.15"),
+        )
+    ]
+    experiments = FakeExperiments(proposal)
+    service = build_service(experiments=experiments, adapter=adapter)
+
+    result = service.monitor_proposal("proposal-1", as_of=NOW)
+
+    assert result.action == "consider_buyback_take_profit"
+    assert result.estimated_buyback_debit == Decimal("55.00")
+    assert result.estimated_open_pnl == Decimal("65.00")
+    assert result.premium_capture_pct == Decimal("54.17")
+    assert result.signal is not None
+    assert experiments.signal_request.signal_type == StrategySignalType.MONITOR

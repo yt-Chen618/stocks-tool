@@ -24,6 +24,7 @@ from stocks_tool.domain.models import (
     AccountSnapshot,
     CoveredCallCandidate,
     CoveredCallExecutionResult,
+    CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
     CoveredCallRiskSummary,
@@ -367,6 +368,96 @@ class CoveredCallStrategyService:
             signal=signal,
         )
 
+    def monitor_proposal(
+        self,
+        proposal_id: str,
+        *,
+        as_of: datetime | None = None,
+        record_signal: bool = True,
+    ) -> CoveredCallMonitorResult:
+        evaluated_at = self._reference_time(as_of)
+        proposal = self.experiments.get_proposal(proposal_id)
+        if proposal is None:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        if proposal.strategy_id != self.strategy_id:
+            raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
+        if proposal.candidate_payload is None:
+            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+
+        candidate = CoveredCallCandidate.model_validate(proposal.candidate_payload)
+        underlying_quote = self.longbridge_adapter.get_quote(
+            symbol=candidate.underlying_symbol,
+            mode=proposal.mode,
+        )
+        call_quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=[candidate.call_symbol],
+            mode=proposal.mode,
+        )
+        call_quote = call_quotes[0] if call_quotes else None
+        if call_quote is not None:
+            call_quote = self._with_top_of_book(call_quote, mode=proposal.mode)
+        call_mark = self._quote_mid(call_quote) if call_quote is not None else None
+        estimated_buyback_debit = (
+            (call_mark * Decimal(candidate.covered_shares)).quantize(Decimal("0.01"))
+            if call_mark is not None
+            else None
+        )
+        estimated_open_pnl = (
+            (candidate.premium_income - estimated_buyback_debit).quantize(Decimal("0.01"))
+            if estimated_buyback_debit is not None
+            else None
+        )
+        premium_capture_pct = self._safe_pct(estimated_open_pnl, candidate.premium_income)
+        days_to_expiration = self._days_to_expiration(candidate.expiration_date, evaluated_at)
+        action, reasons = self._covered_call_monitor_action(
+            candidate=candidate,
+            underlying_price=underlying_quote.last_done,
+            premium_capture_pct=premium_capture_pct,
+            days_to_expiration=days_to_expiration,
+        )
+        signal = None
+        if record_signal:
+            signal = self.experiments.create_signal(
+                CreateStrategySignalRequest(
+                    strategy_id=self.strategy_id,
+                    external_account_id=proposal.external_account_id,
+                    mode=proposal.mode,
+                    signal_type=StrategySignalType.MONITOR,
+                    symbol=proposal.symbol,
+                    proposal_id=proposal.id,
+                    summary=f"Covered call monitor action: {action}.",
+                    detail="; ".join(reasons),
+                    source="covered_call_v1",
+                    signal_payload={
+                        "proposal_id": proposal.id,
+                        "underlying_price": str(underlying_quote.last_done),
+                        "call_mark": str(call_mark) if call_mark is not None else None,
+                        "premium_capture_pct": str(premium_capture_pct)
+                        if premium_capture_pct is not None
+                        else None,
+                        "days_to_expiration": days_to_expiration,
+                        "action": action,
+                    },
+                    emitted_at=evaluated_at,
+                )
+            )
+        return CoveredCallMonitorResult(
+            proposal_id=proposal.id,
+            external_account_id=proposal.external_account_id,
+            symbol=candidate.underlying_symbol,
+            evaluated_at=evaluated_at,
+            candidate=candidate,
+            underlying_price=underlying_quote.last_done,
+            call_mark=call_mark,
+            estimated_buyback_debit=estimated_buyback_debit,
+            estimated_open_pnl=estimated_open_pnl,
+            premium_capture_pct=premium_capture_pct,
+            days_to_expiration=days_to_expiration,
+            action=action,
+            reasons=reasons,
+            signal=signal,
+        )
+
     def _ensure_account(self, external_account_id: str) -> None:
         account = self.broker_accounts.get_by_external_account_id(external_account_id)
         if account is None or account.broker != BrokerName.LONGBRIDGE:
@@ -597,6 +688,30 @@ class CoveredCallStrategyService:
         if preview.candidate.open_interest and preview.candidate.open_interest >= 500:
             confidence += Decimal("0.03")
         return min(confidence, Decimal("0.75"))
+
+    def _covered_call_monitor_action(
+        self,
+        *,
+        candidate: CoveredCallCandidate,
+        underlying_price: Decimal,
+        premium_capture_pct: Decimal | None,
+        days_to_expiration: int,
+    ) -> tuple[str, list[str]]:
+        reasons: list[str] = []
+        if premium_capture_pct is not None and premium_capture_pct >= Decimal("50"):
+            reasons.append("At least 50% of the original premium is captured.")
+            return "consider_buyback_take_profit", reasons
+        if underlying_price >= candidate.call_strike:
+            reasons.append("Underlying is trading at or above the short call strike.")
+            return "assignment_or_roll_review", reasons
+        if underlying_price >= candidate.call_strike * Decimal("0.995"):
+            reasons.append("Underlying is within 0.5% of the short call strike.")
+            return "watch_assignment_pressure", reasons
+        if days_to_expiration <= 7:
+            reasons.append("Covered call is inside the final 7 DTE management window.")
+            return "expiration_week_review", reasons
+        reasons.append("No take-profit, assignment-pressure, or expiration-week trigger is active.")
+        return "hold", reasons
 
     def _signal_strength(self, preview: CoveredCallPreviewResult) -> Decimal:
         if not preview.eligible or preview.candidate is None:

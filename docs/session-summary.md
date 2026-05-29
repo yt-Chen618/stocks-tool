@@ -77,6 +77,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /strategies/covered-call/preview`
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
+- `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -150,7 +151,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
   - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
   - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
-  - no automatic covered-call scheduler or close/roll monitor exists yet
+  - `monitor` reloads the underlying and short-call quote, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
+  - no automatic covered-call scheduler or close / roll order path exists yet
 
 ### Automatic reconciliation
 
@@ -368,6 +370,7 @@ Frontend files:
 - Added a dashboard strategy experiment bench for pending proposals, recent runs, signal feed, and review feed.
 - Added `covered_call_v1` preview/propose routes that create strategy experiment runs, signals, and proposals for covered-call candidates.
 - Added approved-proposal-only covered-call paper execution through `POST /strategies/covered-call/proposals/{proposal_id}/execute`.
+- Added covered-call monitoring guidance through `POST /strategies/covered-call/proposals/{proposal_id}/monitor`.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -489,6 +492,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add covered-call post-entry monitoring and close/roll guidance.
+1. Add covered-call close / roll order execution paths after monitor guidance.
 2. Add market/news/event ingestion so proposals can avoid earnings and macro-event traps.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

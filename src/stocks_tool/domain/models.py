@@ -716,6 +716,24 @@ class CoveredCallExecutionResult(BaseModel):
     submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class CoveredCallMonitorResult(BaseModel):
+    strategy_id: str = "covered_call_v1"
+    proposal_id: str
+    external_account_id: str
+    symbol: str
+    evaluated_at: datetime
+    candidate: CoveredCallCandidate
+    underlying_price: Decimal
+    call_mark: Decimal | None = None
+    estimated_buyback_debit: Decimal | None = None
+    estimated_open_pnl: Decimal | None = None
+    premium_capture_pct: Decimal | None = None
+    days_to_expiration: int
+    action: str
+    reasons: list[str] = Field(default_factory=list)
+    signal: StrategySignal | None = None
+
+
 class BullPutSpreadCandidate(BaseModel):
     underlying_symbol: str
     expiration_date: date

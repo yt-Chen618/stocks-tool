@@ -33,6 +33,7 @@ from stocks_tool.domain.models import (
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     CoveredCallExecutionResult,
+    CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
     ExecuteBullPutSpreadRequest,
@@ -114,6 +115,31 @@ def execute_covered_call_proposal(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/covered-call/proposals/{proposal_id}/monitor", response_model=CoveredCallMonitorResult)
+def monitor_covered_call_proposal(
+    proposal_id: str,
+    as_of: datetime | None = Query(default=None),
+    record_signal: bool = Query(default=True),
+    service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+) -> CoveredCallMonitorResult:
+    try:
+        return service.monitor_proposal(
+            proposal_id,
+            as_of=as_of,
+            record_signal=record_signal,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:

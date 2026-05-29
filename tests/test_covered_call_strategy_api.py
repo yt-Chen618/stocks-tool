@@ -19,6 +19,7 @@ from stocks_tool.domain.enums import (
 from stocks_tool.domain.models import (
     CoveredCallExecutionResult,
     CoveredCallCandidate,
+    CoveredCallMonitorResult,
     CoveredCallPreviewResult,
     CoveredCallProposalResult,
     CoveredCallRiskSummary,
@@ -201,3 +202,40 @@ def test_covered_call_execute_route_submits_approved_proposal() -> None:
     request = service.execute_approved_proposal.call_args.args[1]
     assert request.limit_price == Decimal("1.20")
     assert request.remark == "approved-test"
+
+
+def test_covered_call_monitor_route_returns_management_guidance() -> None:
+    service = Mock()
+    preview = build_preview()
+    service.monitor_proposal.return_value = CoveredCallMonitorResult(
+        proposal_id="proposal-1",
+        external_account_id="LBPT10087357",
+        symbol="UNH.US",
+        evaluated_at=NOW,
+        candidate=preview.candidate,
+        underlying_price=Decimal("100"),
+        call_mark=Decimal("0.55"),
+        estimated_buyback_debit=Decimal("55.00"),
+        estimated_open_pnl=Decimal("65.00"),
+        premium_capture_pct=Decimal("54.17"),
+        days_to_expiration=28,
+        action="consider_buyback_take_profit",
+        reasons=["At least 50% of the original premium is captured."],
+    )
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-1/monitor",
+            params={"record_signal": "false"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["action"] == "consider_buyback_take_profit"
+    assert body["premium_capture_pct"] == "54.17"
+    request = service.monitor_proposal.call_args
+    assert request.args[0] == "proposal-1"
+    assert request.kwargs["record_signal"] is False
