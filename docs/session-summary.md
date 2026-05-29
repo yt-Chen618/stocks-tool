@@ -85,6 +85,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - same-expiry bull put spread only
   - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
   - short leg selection uses `abs(delta) 0.18-0.28` plus `open_interest >= 200`
+  - option-leg liquidity checks now require tight positive bid/ask, fresh quote timestamps, and configured same-day volume minimums before a candidate can execute
   - trend filter uses price vs `20 DMA / 50 DMA`, prior-close drift, and gap-down guard
   - risk preview computes spread credit, max profit, max loss, break-even, and account risk percentage
   - new entries are hard-gated to regular U.S. options hours: `09:30-16:00 ET`
@@ -314,6 +315,9 @@ Frontend files:
 - Added dashboard bull put runtime cards, control form, last skip reason, latest review, and recent strategy-note feed.
 - Added `GET /strategies/pre-open-risk` plus a dashboard pre-open risk board that summarizes proxy tape weakness and short-dated `QQQ / SPY` reference puts.
 - Added regular-session entry gating and bounded repricing ladders for bull put entry legs.
+- Added option-leg liquidity and quote-freshness filters for bull put candidates, with configurable minimum same-day volume per leg.
+- Added bull put preview timing visibility through `timing_ms` and short-lived locked-preview cache reuse for execute requests that include `candidate_token`.
+- Added computed runtime-state fields for open-position awareness, daily-cap status, entry-block reason, next action, active/open spread counts, and next monitor time.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -413,9 +417,17 @@ Frontend files:
 - Note for local manual verification:
   - the user-facing `127.0.0.1:8000` process may still need a restart if it was not launched with `uvicorn --reload`; static `app.js` changes can appear immediately while the Python route/service changes stay on the older process
 - Latest real execute attempts:
-  - selected candidate remained `QQQ.US` bull put
-  - no naked short was left behind
-  - latest spread execute ended `entry_failed` with `long_entry_unfilled`
+  - first end-to-end Longbridge paper bull put entry succeeded on `2026-05-29`
+  - open spread id: `f9956612-218a-4b20-94f7-66ce556a202c`
+  - selected spread: `QQQ.US` `708 / 705` put spread expiring `2026-06-26`
+  - both entry legs filled, no working order was left behind
+  - actual entry credit is `0.5200`; the spread now stores fill-based `max_profit`, `max_loss`, and `break_even`
+  - preview/execute drift is now guarded by optional `candidate_token` and `minimum_net_credit` request fields
+  - locked execute can now reuse the short-lived preview candidate and refresh only the selected option legs before order submission
+  - future candidates are blocked when option quotes are stale, top-of-book is too wide, or same-day volume is below the configured minimums
+  - runtime responses now report whether an open spread is being monitored, whether the daily entry cap is reached, and what next strategy action is expected
+  - latest monitor snapshots are persisted in spread `raw_payload.monitor` and rendered in the dashboard monitor table
+  - Longbridge SDK timestamps are normalized from broker wall-clock time into UTC before local persistence
 
 ## Known cleanup items
 

@@ -121,6 +121,8 @@ def run_browser_flow(
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env={**os.environ},
     )
     if completed.returncode != 0:

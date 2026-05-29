@@ -32,6 +32,11 @@ const TRANSLATIONS = {
     "Bull Put": "牛市看跌价差",
     "Bull Put Strategy": "牛市看跌策略",
     "Entry Status": "入场状态",
+    "Monitoring": "监控中",
+    "Daily Cap": "日内上限",
+    "Scan Ready": "可扫描",
+    "Resolve Controls": "处理控制项",
+    "Next Action": "下一步",
     "No runtime state loaded.": "尚未加载运行状态。",
     "Daily Entries": "今日入场",
     "Waiting for first scan.": "等待首次扫描。",
@@ -76,6 +81,10 @@ const TRANSLATIONS = {
     "Width": "宽度",
     "Status": "状态",
     "Entry Credit": "入场权利金",
+    "Entry / Risk": "入场/风险",
+    "Monitor Mark": "监控估值",
+    "PnL / Exit Distance": "盈亏/退出距离",
+    "Credit": "权利金",
     "Latest Action": "最近动作",
     "Actions": "操作",
     "No bull put spreads loaded.": "尚未加载牛市看跌价差。",
@@ -296,11 +305,27 @@ const TRANSLATIONS = {
     "No open positions": "暂无持仓",
     "No ranked holdings": "暂无持仓排序",
     "No active spreads": "暂无活跃价差",
+    "Daily cap reached": "已达到日内上限",
+    "Monitor open spread": "监控当前价差",
+    "Wait next session": "等待下一交易日",
+    "Scan for entry": "扫描入场",
+    "Resolve runtime controls": "处理运行控制",
+    "Entry blocked": "入场受阻",
     "No pending spread exits": "暂无待处理平仓",
     "No exit actions recorded yet": "暂无平仓动作",
     "Waiting for first monitor run": "等待首次监控运行",
     "No open or exit-pending spreads are being monitored.": "当前没有打开或平仓待处理价差在监控中。",
     "Last Update": "最近更新",
+    "Mark": "估值",
+    "P/L": "盈亏",
+    "BE": "盈亏平衡",
+    "Max Loss": "最大亏损",
+    "TP Gap": "止盈距离",
+    "SL Gap": "止损距离",
+    "Next Check": "下次检查",
+    "No monitor snapshot": "暂无监控快照",
+    "No monitor snapshot.": "暂无监控快照。",
+    "Within thresholds": "未触发退出",
     "Live board loaded with partial coverage. Option overlays skipped for fast macro refresh.": "实时宏观代理已加载；为保持刷新速度，本次跳过期权叠加层。",
     "Option overlays were skipped so the macro board can refresh without waiting on slow option-chain calls.": "已跳过期权叠加层，避免宏观板等待较慢的期权链请求。",
     "Option overlays were skipped for fast macro refresh. Use Load Option Overlays to inspect QQQ / SPY puts.": "为保持宏观板快速刷新，本次跳过期权叠加层。需要查看 QQQ / SPY 看跌期权时请点击“加载期权叠加层”。",
@@ -1787,7 +1812,11 @@ function renderStrategyRuntime() {
       label: "Daily Entries",
       value: `${runtime.daily_entry_count}`,
       tone: runtime.daily_entry_count > 0 ? "success" : "",
-      detail: `Cap ${state.spreads.length ? "tracked with active spreads" : "ready for first spread"}`,
+      detail: runtime.daily_entry_cap_reached
+        ? "Daily cap reached"
+        : runtime.active_spread_count
+          ? `${runtime.active_spread_count} active spread${runtime.active_spread_count === 1 ? "" : "s"}`
+          : "ready for first spread",
     },
     {
       label: "Daily Realized PnL",
@@ -1796,12 +1825,14 @@ function renderStrategyRuntime() {
       detail: runtime.current_session_date ? `Session ${runtime.current_session_date}` : "No tracked session date",
     },
     {
-      label: "Last Scan",
-      value: runtime.last_scan_result ? formatRuntimeScanResult(runtime.last_scan_result) : "--",
+      label: "Next Action",
+      value: runtime.next_action ? formatRuntimeNextAction(runtime.next_action) : "--",
       tone: runtime.last_scan_result === "executed" ? "success" : runtime.last_scan_result === "skipped" ? "warning" : "",
-      detail: runtime.last_scan_at
-        ? `${runtime.last_scan_symbol || "Account"} / ${formatDateTime(runtime.last_scan_at)}`
-        : "Waiting for first bull put scan",
+      detail: runtime.next_monitor_after
+        ? `Next monitor ${formatDateTime(runtime.next_monitor_after)}`
+        : runtime.last_scan_at
+          ? `Last scan ${runtime.last_scan_symbol || "Account"} / ${formatDateTime(runtime.last_scan_at)}`
+          : "Waiting for first bull put scan",
     },
   ];
 
@@ -1868,8 +1899,8 @@ function renderSpreads() {
   const activeSpreads = spreads.filter(isActiveSpread);
   const exitPendingSpreads = spreads.filter(isExitPendingSpread);
   const monitorableSpreads = spreads.filter(isMonitorableSpread);
-  const latestExitActionSpread =
-    spreads.find((spread) => spread.exit_reason && (spread.status === "closed" || isExitPendingSpread(spread))) || null;
+  const monitoredOpenSpread = activeSpreads.find((spread) => spread.raw_payload?.monitor) || null;
+  const monitoredSnapshot = monitoredOpenSpread ? monitoredOpenSpread.raw_payload.monitor : null;
   const lastMonitoredSpread = monitorableSpreads.find((spread) => spread.last_synced_at) || null;
 
   const summaryValues = [
@@ -1882,20 +1913,20 @@ function renderSpreads() {
         : "No active spreads",
     },
     {
-      label: "Exit Pending",
-      value: String(exitPendingSpreads.length),
-      tone: exitPendingSpreads.length ? "warning" : "",
-      detail: exitPendingSpreads.length
-        ? `${exitPendingSpreads.map((spread) => spread.underlying_symbol).slice(0, 3).join(", ")}`
-        : "No pending spread exits",
+      label: "Monitor Mark",
+      value: monitoredSnapshot?.estimated_exit_debit ? formatSpreadCredit(monitoredSnapshot.estimated_exit_debit) : "--",
+      tone: monitoredSnapshot?.exit_reason ? "warning" : "",
+      detail: monitoredOpenSpread
+        ? `${monitoredOpenSpread.underlying_symbol} / ${formatDateTime(monitoredSnapshot.evaluated_at)}`
+        : "No monitor snapshot",
     },
     {
-      label: "Latest Exit Action",
-      value: latestExitActionSpread ? formatSpreadExitReason(latestExitActionSpread.exit_reason) : "--",
-      tone: latestExitActionSpread ? spreadStatusClass(latestExitActionSpread.status) : "",
-      detail: latestExitActionSpread
-        ? `${latestExitActionSpread.underlying_symbol} / ${formatDateTime(latestExitActionSpread.updated_at)}`
-        : "No exit actions recorded yet",
+      label: "P/L",
+      value: monitoredSnapshot?.estimated_pnl ? formatSignedCurrency(monitoredSnapshot.estimated_pnl, "USD") : "--",
+      tone: monitoredSnapshot?.estimated_pnl ? pnlTone(monitoredSnapshot.estimated_pnl) : "",
+      detail: monitoredSnapshot
+        ? `TP Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_take_profit_debit)} / SL Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_stop_loss_debit)}`
+        : "No monitor snapshot",
     },
     {
       label: "Last Monitor",
@@ -1930,9 +1961,36 @@ function renderSpreads() {
     .map((spread) => {
       const monitorable = isMonitorableSpread(spread);
       const statusTone = spreadStatusClass(spread.status);
-      const actionText = spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--";
+      const monitor = spread.raw_payload?.monitor || null;
       const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
       const lastUpdatedAt = spread.last_synced_at || spread.updated_at || spread.created_at;
+      const maxLoss = toNumber(spread.max_loss);
+      const entryRiskLines = [
+        `Credit ${formatSpreadCredit(spread.entry_net_credit)}`,
+        `Max Loss ${Number.isFinite(maxLoss) ? formatSignedCurrency(-Math.abs(maxLoss), "USD") : "--"}`,
+        `BE ${formatSpreadStrike(spread.break_even)}`,
+      ];
+      const monitorMark = monitor
+        ? [
+            `Mark ${formatSpreadCredit(monitor.estimated_exit_debit)}`,
+            `Spot ${formatSpreadStrike(monitor.underlying_price)}`,
+            `${monitor.days_to_expiration ?? "--"} DTE`,
+          ]
+        : ["No monitor snapshot"];
+      const distanceLines = monitor
+        ? [
+            `P/L ${formatSignedCurrency(monitor.estimated_pnl, "USD")}`,
+            `TP Gap ${formatSpreadCredit(monitor.distance_to_take_profit_debit)}`,
+            `SL Gap ${formatSpreadCredit(monitor.distance_to_stop_loss_debit)}`,
+          ]
+        : [spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--"];
+      const monitorLines = monitor
+        ? [
+            monitor.exit_reason ? formatSpreadExitReason(monitor.exit_reason) : "Within thresholds",
+            `Next Check ${formatDateTime(monitor.next_monitor_after)}`,
+            `Updated ${formatDateTime(monitor.evaluated_at)}`,
+          ]
+        : [`Updated ${formatDateTime(lastUpdatedAt)}`];
       return `
         <tr>
           <td>
@@ -1942,15 +2000,18 @@ function renderSpreads() {
             </div>
           </td>
           <td>${escapeHtml(formatSpreadDate(spread.expiration_date))}</td>
-          <td>${escapeHtml(formatSpreadStrike(spread.width))}</td>
           <td><span class="pill ${statusTone}">${escapeHtml(formatSpreadStatusLabel(spread.status))}</span></td>
-          <td>${escapeHtml(formatSpreadCredit(spread.entry_net_credit))}</td>
-          <td>${escapeHtml(formatDateTime(lastUpdatedAt))}</td>
           <td>
-            <div class="strategy-action-cell">
-              <strong>${escapeHtml(actionText)}</strong>
-              <span>${escapeHtml(formatDateTime(spread.updated_at))}</span>
-            </div>
+            ${renderSpreadDetailCell(entryRiskLines)}
+          </td>
+          <td>
+            ${renderSpreadDetailCell(monitorMark)}
+          </td>
+          <td>
+            ${renderSpreadDetailCell(distanceLines, monitor?.estimated_pnl)}
+          </td>
+          <td>
+            ${renderSpreadDetailCell(monitorLines)}
           </td>
           <td>
             <div class="table-actions">
@@ -1968,6 +2029,17 @@ function renderSpreads() {
       `;
     })
     .join("");
+}
+
+function renderSpreadDetailCell(lines, pnlValue = null) {
+  const [primary = "--", ...secondary] = lines;
+  const toneClass = pnlValue !== null && pnlValue !== undefined ? ` is-${pnlTone(toNumber(pnlValue))}` : "";
+  return `
+    <div class="spread-detail-cell">
+      <strong class="${toneClass.trim()}">${escapeHtml(primary)}</strong>
+      ${secondary.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}
+    </div>
+  `;
 }
 
 function renderOrders() {
@@ -3160,6 +3232,20 @@ function pnlTone(value) {
 }
 
 function describeStrategyStatus(runtime) {
+  if (runtime.holding_open_position) {
+    return {
+      value: "Monitoring",
+      tone: "warning",
+      detail: `${runtime.open_spread_count || 1} open / next ${formatDateTime(runtime.next_monitor_after)}`,
+    };
+  }
+  if (runtime.daily_entry_cap_reached) {
+    return {
+      value: "Daily Cap",
+      tone: "warning",
+      detail: runtime.next_action ? formatRuntimeNextAction(runtime.next_action) : "Wait next session",
+    };
+  }
   if (runtime.kill_switch_active) {
     return {
       value: "Kill Switch",
@@ -3189,9 +3275,9 @@ function describeStrategyStatus(runtime) {
     };
   }
   return {
-    value: "Running",
+    value: runtime.next_action ? formatRuntimeNextAction(runtime.next_action) : "Running",
     tone: "success",
-    detail: "Automatic bull put entry is enabled for this account.",
+    detail: runtime.entry_block_reason || "Automatic bull put entry is enabled for this account.",
   };
 }
 
@@ -3367,6 +3453,25 @@ function formatRuntimeScanResult(value) {
   return String(value || "--")
     .replaceAll("_", " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatRuntimeNextAction(value) {
+  if (value === "monitor_open_spread") {
+    return "Monitor open spread";
+  }
+  if (value === "wait_next_session") {
+    return "Wait next session";
+  }
+  if (value === "scan_for_entry") {
+    return "Scan for entry";
+  }
+  if (value === "resolve_runtime_controls") {
+    return "Resolve runtime controls";
+  }
+  if (value === "entry_blocked") {
+    return "Entry blocked";
+  }
+  return formatRuntimeScanResult(value);
 }
 
 function formatSignedCurrency(value, currency = "USD") {

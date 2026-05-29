@@ -514,6 +514,8 @@ class BullPutSpreadScanResult(BaseModel):
     moving_average_50: Decimal | None = None
     candidate: BullPutSpreadCandidate | None = None
     risk: BullPutSpreadRiskSummary | None = None
+    candidate_token: str | None = None
+    timing_ms: dict[str, int] = Field(default_factory=dict)
 
 
 class BullPutStrategyReadinessCheck(BaseModel):
@@ -541,6 +543,8 @@ class ExecuteBullPutSpreadRequest(BaseModel):
     symbol: str
     mode: ExecutionMode = ExecutionMode.PAPER
     as_of: datetime | None = None
+    candidate_token: str | None = Field(default=None, max_length=96)
+    minimum_net_credit: Decimal | None = Field(default=None, gt=0)
     remark: str | None = Field(default=None, max_length=64)
 
 
@@ -613,6 +617,13 @@ class BullPutStrategyRuntimeState(BaseModel):
     last_review_status: str | None = None
     last_review_summary: str | None = None
     last_error: str | None = None
+    holding_open_position: bool = False
+    daily_entry_cap_reached: bool = False
+    entry_block_reason: str | None = None
+    next_action: str | None = None
+    active_spread_count: int = 0
+    open_spread_count: int = 0
+    next_monitor_after: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

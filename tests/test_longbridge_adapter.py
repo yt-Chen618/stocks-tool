@@ -203,3 +203,12 @@ def test_option_market_snapshot_maps_bid_ask_from_quote_payload() -> None:
     assert snapshot.raw_payload["quote"]["bid"] == "2.40"
     assert snapshot.raw_payload["quote"]["ask"] == "2.60"
     adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_longbridge_datetime_normalizes_broker_wall_clock_labeled_as_utc() -> None:
+    adapter = build_adapter()
+
+    normalized = adapter._to_datetime(datetime(2026, 5, 29, 21, 56, tzinfo=timezone.utc))
+
+    assert normalized == datetime(2026, 5, 29, 13, 56, tzinfo=timezone.utc)
+    adapter._executor.shutdown(wait=False, cancel_futures=True)

@@ -32,13 +32,16 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Save Entry" in response.text
     assert "Bull Put Strategy" in response.text
     assert "Entry Status" in response.text
+    assert "Next Action" in response.text
     assert "Latest Skip Reason" in response.text
     assert "Run Scan" in response.text
     assert "Run Review" in response.text
     assert "Latest Review" in response.text
     assert "Bull Put Monitor" in response.text
-    assert "Latest Exit Action" in response.text
-    assert "Last Update" in response.text
+    assert "Entry / Risk" in response.text
+    assert "Monitor Mark" in response.text
+    assert "PnL / Exit Distance" in response.text
+    assert "Last Monitor" in response.text
     assert "Orders" in response.text
     assert "Positions" in response.text
     assert response.text.index("Bull Put Strategy") < response.text.index("Real-time Macro Board")

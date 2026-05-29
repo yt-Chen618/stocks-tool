@@ -136,6 +136,7 @@ The bull put spread workflow is currently paper-only:
 - daily caps and controls: at most `1` new spread per day, a runtime-tracked realized loss stop, per-account manual pause, kill switch, and paused-symbol list
 - target expiration window: `28-35 DTE`
 - short-leg filter: `abs(delta)` in `0.18-0.28`, `open_interest >= 200`
+- liquidity filter: both legs must have a tight positive bid/ask, fresh option quote timestamps, and configured minimum same-day volume
 - width rule: `<75 -> 1`, `75-249.99 -> 2`, `>=250 -> 3`
 - trend filter: price above `20 DMA`, `20 DMA > 50 DMA`, not more than `0.5%` below prior close, and not more than `2%` below the open
 - risk model: conservative credit and per-trade account risk cap are enforced before the spread is marked eligible
@@ -157,6 +158,9 @@ The bull put spread workflow is currently paper-only:
 - dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run render first; Longbridge-backed `Quick Quote` and the real-time macro board are manual so `/` stays usable even when broker quote calls are slow
 - dashboard strategy-first behavior: `/` now loads bull put runtime, spreads, orders, executions, journals, and stored pre-open runs first; `Load Live Macro` uses the fast macro path, `Load Option Overlays` fetches slower option-chain layers on demand, and `Save Current Board` persists the current live/partial macro read for follow-through review
 - bull put readiness: `GET /strategies/bull-put/readiness` performs a read-only opening readiness check across account configuration, runtime controls, entry window, candidate preview, capacity, and next action before any paper order is submitted
+- bull put execution lock: previews return a `candidate_token`; execute requests can include that token plus `minimum_net_credit` so a manual submit cannot silently switch to a different spread candidate
+- bull put performance visibility: previews include `timing_ms`, and locked execute can reuse the cached candidate while refreshing only the two selected option legs before submission
+- bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades
 - scheduler resilience: automatic Longbridge tasks now add an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not keep retrying every poll while the broker is unstable

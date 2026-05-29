@@ -1037,6 +1037,34 @@ a {
   font-size: 12px;
 }
 
+.spread-detail-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 116px;
+}
+
+.spread-detail-cell strong {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.spread-detail-cell strong.is-success {
+  color: var(--success-text);
+}
+
+.spread-detail-cell strong.is-warning {
+  color: var(--warn-text);
+}
+
+.spread-detail-cell strong.is-error {
+  color: var(--danger-text);
+}
+
+.spread-detail-cell span {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
 .table-action {
   min-height: 30px;
   padding: 0 10px;

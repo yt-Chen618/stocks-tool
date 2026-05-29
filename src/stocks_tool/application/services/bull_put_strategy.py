@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
@@ -156,6 +157,8 @@ def _us_options_holidays(year: int) -> frozenset[date]:
 
 
 class BullPutStrategyService:
+    _preview_cache: dict[tuple[str, str, str, str], tuple[datetime, BullPutSpreadScanResult]] = {}
+
     def __init__(
         self,
         *,
@@ -1105,6 +1108,14 @@ class BullPutStrategyService:
         mode: ExecutionMode,
         as_of: datetime | None = None,
     ) -> BullPutSpreadScanResult:
+        started_at = time.perf_counter()
+
+        def finish(result: BullPutSpreadScanResult) -> BullPutSpreadScanResult:
+            result.timing_ms["total"] = int((time.perf_counter() - started_at) * 1000)
+            if result.eligible:
+                self._store_preview_cache(result)
+            return result
+
         strategy = self.settings.bull_put_strategy
         if symbol not in strategy.symbols:
             raise ValueError(
@@ -1142,11 +1153,11 @@ class BullPutStrategyService:
 
         if not strategy.enabled:
             result.reasons.append("Bull put spread strategy is disabled by configuration.")
-            return result
+            return finish(result)
 
         if mode != ExecutionMode.PAPER:
             result.reasons.append("paper_bull_put_v1 currently supports paper mode only.")
-            return result
+            return finish(result)
 
         runtime_reason = self._runtime_entry_block_reason(
             state=runtime_state,
@@ -1154,7 +1165,7 @@ class BullPutStrategyService:
         )
         if runtime_reason is not None:
             result.reasons.append(runtime_reason)
-            return result
+            return finish(result)
 
         underlying_quote = self.longbridge_adapter.get_quote(symbol=symbol, mode=mode)
         result.underlying_quote = underlying_quote
@@ -1162,7 +1173,7 @@ class BullPutStrategyService:
         bars = self.longbridge_adapter.get_recent_daily_bars(symbol=symbol, count=60, mode=mode)
         if len(bars) < 50:
             result.reasons.append("At least 50 daily bars are required for trend filtering.")
-            return result
+            return finish(result)
 
         moving_average_20 = self._moving_average(bars[-20:])
         moving_average_50 = self._moving_average(bars[-50:])
@@ -1178,7 +1189,7 @@ class BullPutStrategyService:
             )
         )
         if result.reasons:
-            return result
+            return finish(result)
 
         expiry_dates = self.longbridge_adapter.list_option_expiry_dates(symbol=symbol, mode=mode)
         selected_expiration_date = self._select_expiration_date(expiry_dates, scanned_at)
@@ -1186,7 +1197,7 @@ class BullPutStrategyService:
             result.reasons.append(
                 "No listed option expiration date falls inside the configured 28-35 DTE window."
             )
-            return result
+            return finish(result)
 
         result.selected_expiration_date = selected_expiration_date
         result.days_to_expiration = self._days_to_expiration(selected_expiration_date, scanned_at)
@@ -1203,7 +1214,7 @@ class BullPutStrategyService:
         ]
         if not put_symbols:
             result.reasons.append("No standard put contracts were returned for the selected expiration date.")
-            return result
+            return finish(result)
 
         option_quotes = self.longbridge_adapter.get_option_market_snapshots(
             symbols=put_symbols,
@@ -1229,12 +1240,19 @@ class BullPutStrategyService:
         )
         if not ranked_short_puts:
             result.reasons.append("No short put met the configured delta and open-interest filters.")
-            return result
+            return finish(result)
 
         last_risk_reasons: list[str] = []
+        last_liquidity_reasons: list[str] = []
         for short_put in ranked_short_puts:
             enriched_short = self._with_top_of_book(short_put, mode=mode)
-            if not self._passes_top_of_book_filters(enriched_short):
+            liquidity_reasons = self._option_leg_liquidity_reasons(
+                short_leg=enriched_short,
+                long_leg=None,
+                scanned_at=scanned_at,
+            )
+            if liquidity_reasons:
+                last_liquidity_reasons = liquidity_reasons
                 continue
 
             long_put = option_quotes_by_strike.get(short_put.strike - width)
@@ -1243,6 +1261,14 @@ class BullPutStrategyService:
 
             enriched_long = self._with_top_of_book(long_put, mode=mode)
             if not self._has_tradeable_long_leg(enriched_long):
+                continue
+            liquidity_reasons = self._option_leg_liquidity_reasons(
+                short_leg=enriched_short,
+                long_leg=enriched_long,
+                scanned_at=scanned_at,
+            )
+            if liquidity_reasons:
+                last_liquidity_reasons = liquidity_reasons
                 continue
 
             short_mid = self._mid_price(enriched_short)
@@ -1284,24 +1310,182 @@ class BullPutStrategyService:
             result.risk = risk
             result.warnings.extend(risk.warnings)
             result.eligible = True
-            return result
+            result.candidate_token = self._build_candidate_token(result)
+            return finish(result)
 
         if last_risk_reasons:
             result.reasons.extend(last_risk_reasons)
+        elif last_liquidity_reasons:
+            result.reasons.extend(last_liquidity_reasons)
         else:
             result.reasons.append(
                 "No bull put spread candidate satisfied liquidity, width, credit, and risk filters."
             )
-        return result
+        return finish(result)
 
     def execute_spread(self, request: ExecuteBullPutSpreadRequest) -> BullPutSpread:
-        preview = self.preview_spread(
-            external_account_id=request.external_account_id,
-            symbol=request.symbol,
-            mode=request.mode,
-            as_of=request.as_of,
-        )
+        execution_time = request.as_of or datetime.now(timezone.utc)
+        if execution_time.tzinfo is None:
+            execution_time = execution_time.replace(tzinfo=timezone.utc)
+        session_reason = self._entry_session_gate_reason(execution_time)
+        if session_reason is not None:
+            raise ValueError(session_reason)
+
+        preview = self._get_cached_preview_for_request(request)
+        if preview is not None:
+            preview = self._refresh_locked_preview_candidate(preview, as_of=execution_time)
+        else:
+            preview = self.preview_spread(
+                external_account_id=request.external_account_id,
+                symbol=request.symbol,
+                mode=request.mode,
+                as_of=execution_time,
+            )
+        self._assert_candidate_lock(request=request, preview=preview)
         return self._execute_preview_candidate(request=request, preview=preview)
+
+    def _assert_candidate_lock(
+        self,
+        *,
+        request: ExecuteBullPutSpreadRequest,
+        preview: BullPutSpreadScanResult,
+    ) -> None:
+        if request.candidate_token is not None and preview.candidate_token != request.candidate_token:
+            raise ValueError(
+                "Bull put candidate changed since preview. Refresh the preview before executing."
+            )
+        if request.minimum_net_credit is None or preview.candidate is None:
+            return
+        if preview.candidate.conservative_credit < request.minimum_net_credit:
+            raise ValueError(
+                "Bull put candidate credit moved below the locked preview floor. Refresh the preview before executing."
+            )
+
+    def _get_cached_preview_for_request(
+        self,
+        request: ExecuteBullPutSpreadRequest,
+    ) -> BullPutSpreadScanResult | None:
+        if request.candidate_token is None:
+            return None
+        if self.settings.bull_put_strategy.preview_cache_ttl_seconds <= 0:
+            return None
+        key = (
+            request.external_account_id,
+            request.mode.value,
+            request.symbol,
+            request.candidate_token,
+        )
+        cached = self._preview_cache.get(key)
+        if cached is None:
+            return None
+        cached_at, preview = cached
+        now = datetime.now(timezone.utc)
+        if (now - cached_at).total_seconds() > self.settings.bull_put_strategy.preview_cache_ttl_seconds:
+            self._preview_cache.pop(key, None)
+            return None
+        return preview.model_copy(deep=True)
+
+    def _store_preview_cache(self, preview: BullPutSpreadScanResult) -> None:
+        if preview.candidate_token is None:
+            return
+        key = (
+            preview.external_account_id,
+            preview.mode.value,
+            preview.symbol,
+            preview.candidate_token,
+        )
+        self._preview_cache[key] = (datetime.now(timezone.utc), preview.model_copy(deep=True))
+
+    def _refresh_locked_preview_candidate(
+        self,
+        preview: BullPutSpreadScanResult,
+        *,
+        as_of: datetime | None,
+    ) -> BullPutSpreadScanResult:
+        if preview.candidate is None:
+            return preview
+        started_at = time.perf_counter()
+        refreshed_at = as_of or datetime.now(timezone.utc)
+        if refreshed_at.tzinfo is None:
+            refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
+
+        quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=[preview.candidate.short_put.symbol, preview.candidate.long_put.symbol],
+            mode=preview.mode,
+        )
+        quote_by_symbol = {quote.symbol: quote for quote in quotes}
+        short_leg = quote_by_symbol.get(preview.candidate.short_put.symbol)
+        long_leg = quote_by_symbol.get(preview.candidate.long_put.symbol)
+        if short_leg is None or long_leg is None:
+            raise ValueError("Locked bull put candidate legs could not be refreshed before execution.")
+
+        short_leg = self._with_top_of_book(short_leg, mode=preview.mode)
+        long_leg = self._with_top_of_book(long_leg, mode=preview.mode)
+        liquidity_reasons = self._option_leg_liquidity_reasons(
+            short_leg=short_leg,
+            long_leg=long_leg,
+            scanned_at=refreshed_at,
+        )
+        if liquidity_reasons:
+            return preview.model_copy(
+                update={
+                    "scanned_at": refreshed_at,
+                    "eligible": False,
+                    "reasons": liquidity_reasons,
+                    "timing_ms": {
+                        **preview.timing_ms,
+                        "cache_hit": 1,
+                        "locked_refresh": int((time.perf_counter() - started_at) * 1000),
+                    },
+                },
+                deep=True,
+            )
+
+        short_mid = self._mid_price(short_leg)
+        long_mid = self._mid_price(long_leg)
+        if short_mid is None or long_mid is None:
+            return preview.model_copy(
+                update={
+                    "scanned_at": refreshed_at,
+                    "eligible": False,
+                    "reasons": ["Locked bull put candidate no longer has a valid bid/ask midpoint."],
+                },
+                deep=True,
+            )
+
+        candidate = preview.candidate.model_copy(
+            update={
+                "short_put": short_leg,
+                "long_put": long_leg,
+                "short_mid": short_mid,
+                "long_mid": long_mid,
+                "mid_credit": short_mid - long_mid,
+                "conservative_credit": (short_leg.bid or Decimal("0")) - (long_leg.ask or Decimal("0")),
+            }
+        )
+        account_snapshot = self._get_latest_account_snapshot(preview.external_account_id)
+        risk = self.risk_service.evaluate_bull_put_candidate(
+            candidate=candidate,
+            account=account_snapshot,
+            strategy=self.settings.bull_put_strategy,
+        )
+        eligible = risk.status != RiskStatus.BLOCK
+        return preview.model_copy(
+            update={
+                "scanned_at": refreshed_at,
+                "eligible": eligible,
+                "candidate": candidate,
+                "risk": risk,
+                "reasons": risk.reasons if not eligible else [],
+                "warnings": risk.warnings,
+                "timing_ms": {
+                    **preview.timing_ms,
+                    "cache_hit": 1,
+                    "locked_refresh": int((time.perf_counter() - started_at) * 1000),
+                },
+            },
+            deep=True,
+        )
 
     def _execute_preview_candidate(
         self,
@@ -1428,12 +1612,17 @@ class BullPutStrategyService:
         if entry_long_price is not None and entry_short_price is not None:
             entry_net_credit = entry_short_price - entry_long_price
 
+        actual_risk_updates = self._actual_entry_risk_updates(
+            spread=spread,
+            entry_net_credit=entry_net_credit,
+        )
         opened = self._update_spread(
             spread,
             status=SpreadStatus.OPEN,
             entry_long_price=entry_long_price,
             entry_short_price=entry_short_price,
             entry_net_credit=entry_net_credit,
+            **actual_risk_updates,
             opened_at=datetime.now(timezone.utc),
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
@@ -1465,6 +1654,12 @@ class BullPutStrategyService:
             if updates.get("entry_long_price") is not None and updates.get("entry_short_price") is not None:
                 updates["entry_net_credit"] = (
                     updates["entry_short_price"] - updates["entry_long_price"]
+                )
+                updates.update(
+                    self._actual_entry_risk_updates(
+                        spread=spread,
+                        entry_net_credit=updates["entry_net_credit"],
+                    )
                 )
         elif spread.status == SpreadStatus.ENTRY_PENDING_LONG and long_entry_order is not None:
             if long_entry_order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
@@ -1566,10 +1761,20 @@ class BullPutStrategyService:
             spread=spread,
             estimated_exit_debit=estimated_exit_debit,
         )
+        monitor_updates = self._monitor_payload_updates(
+            spread=spread,
+            evaluated_at=evaluated_at,
+            underlying_price=underlying_quote.last_done,
+            estimated_exit_debit=estimated_exit_debit,
+            estimated_pnl=estimated_pnl,
+            days_to_expiration=days_to_expiration,
+            exit_reason=exit_reason,
+        )
 
         if exit_reason is None:
             spread = self._update_spread(
                 spread,
+                **monitor_updates,
                 last_synced_at=evaluated_at,
                 updated_at=evaluated_at,
             )
@@ -1583,6 +1788,12 @@ class BullPutStrategyService:
                 days_to_expiration=days_to_expiration,
             )
 
+        spread = self._update_spread(
+            spread,
+            **monitor_updates,
+            last_synced_at=evaluated_at,
+            updated_at=evaluated_at,
+        )
         spread = self._close_spread(
             spread=spread,
             reason=exit_reason,
@@ -1701,7 +1912,8 @@ class BullPutStrategyService:
                 mode=mode,
                 current_session_date=self._session_date(reference_time),
             )
-            return self.runtime_states.upsert_runtime_state(state)
+            state = self.runtime_states.upsert_runtime_state(state)
+            return self._with_runtime_computed_fields(state, as_of=reference_time)
 
         if state.current_session_date != self._session_date(reference_time):
             state = self._update_runtime_state(
@@ -1711,7 +1923,7 @@ class BullPutStrategyService:
                 daily_realized_pnl=Decimal("0"),
                 last_error=None,
             )
-        return state
+        return self._with_runtime_computed_fields(state, as_of=reference_time)
 
     def _update_runtime_state(
         self,
@@ -1720,7 +1932,82 @@ class BullPutStrategyService:
     ) -> BullPutStrategyRuntimeState:
         payload = {"updated_at": datetime.now(timezone.utc), **updates}
         next_state = state.model_copy(update=payload)
-        return self.runtime_states.upsert_runtime_state(next_state)
+        persisted = self.runtime_states.upsert_runtime_state(next_state)
+        return self._with_runtime_computed_fields(persisted, as_of=payload["updated_at"])
+
+    def _with_runtime_computed_fields(
+        self,
+        state: BullPutStrategyRuntimeState,
+        *,
+        as_of: datetime,
+    ) -> BullPutStrategyRuntimeState:
+        active_spreads = [
+            spread
+            for spread in self.spreads.list_spreads(external_account_id=state.external_account_id)
+            if spread.status in ACTIVE_SPREAD_STATUSES
+        ]
+        open_spreads = [spread for spread in active_spreads if spread.status == SpreadStatus.OPEN]
+        daily_cap_reached = (
+            state.daily_entry_count >= self.settings.bull_put_strategy.max_new_spreads_per_day
+        )
+        entry_block_reason = self._runtime_account_entry_block_reason(state=state)
+        next_action = self._runtime_next_action(
+            state=state,
+            active_spreads=active_spreads,
+            entry_block_reason=entry_block_reason,
+        )
+        return state.model_copy(
+            update={
+                "holding_open_position": bool(open_spreads),
+                "daily_entry_cap_reached": daily_cap_reached,
+                "entry_block_reason": entry_block_reason,
+                "next_action": next_action,
+                "active_spread_count": len(active_spreads),
+                "open_spread_count": len(open_spreads),
+                "next_monitor_after": self._next_monitor_after(active_spreads, as_of=as_of),
+            }
+        )
+
+    def _runtime_next_action(
+        self,
+        *,
+        state: BullPutStrategyRuntimeState,
+        active_spreads: list[BullPutSpread],
+        entry_block_reason: str | None,
+    ) -> str:
+        if state.kill_switch_active or state.manual_pause or not state.auto_entry_enabled:
+            return "resolve_runtime_controls"
+        if active_spreads:
+            return "monitor_open_spread"
+        if state.daily_entry_count >= self.settings.bull_put_strategy.max_new_spreads_per_day:
+            return "wait_next_session"
+        if entry_block_reason is not None:
+            return "entry_blocked"
+        return "scan_for_entry"
+
+    def _next_monitor_after(
+        self,
+        active_spreads: list[BullPutSpread],
+        *,
+        as_of: datetime,
+    ) -> datetime | None:
+        monitor_times: list[datetime] = []
+        for spread in active_spreads:
+            monitor_payload = (spread.raw_payload or {}).get("monitor") or {}
+            next_monitor_after = monitor_payload.get("next_monitor_after")
+            if isinstance(next_monitor_after, str):
+                try:
+                    monitor_times.append(datetime.fromisoformat(next_monitor_after.replace("Z", "+00:00")))
+                    continue
+                except ValueError:
+                    pass
+            if spread.last_synced_at is not None:
+                monitor_times.append(
+                    spread.last_synced_at + timedelta(seconds=self.settings.bull_put_strategy.monitor_interval_seconds)
+                )
+        if monitor_times:
+            return min(monitor_times).astimezone(timezone.utc)
+        return as_of + timedelta(seconds=self.settings.bull_put_strategy.monitor_interval_seconds) if active_spreads else None
 
     def _runtime_entry_block_reason(
         self,
@@ -2471,6 +2758,32 @@ class BullPutStrategyService:
         if value is None:
             return "--"
         return f"{value:.2f}"
+
+    @staticmethod
+    def _json_decimal(value: Decimal | None) -> str | None:
+        return str(value) if value is not None else None
+
+    @staticmethod
+    def _build_candidate_token(preview: BullPutSpreadScanResult) -> str | None:
+        candidate = preview.candidate
+        if candidate is None:
+            return None
+        parts = [
+            preview.strategy_id,
+            preview.external_account_id,
+            preview.mode.value,
+            candidate.underlying_symbol,
+            candidate.expiration_date.isoformat(),
+            candidate.short_put.symbol,
+            candidate.long_put.symbol,
+            BullPutStrategyService._decimal_token(candidate.width),
+        ]
+        raw = "|".join(parts)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _decimal_token(value: Decimal) -> str:
+        return format(value.normalize(), "f")
 
     def _mark_spread_journal_flag(self, spread: BullPutSpread, key: str) -> BullPutSpread:
         raw_payload = dict(spread.raw_payload or {})
@@ -3583,6 +3896,49 @@ class BullPutStrategyService:
             self._with_top_of_book(long_leg, mode=spread.mode),
         )
 
+    def _monitor_payload_updates(
+        self,
+        *,
+        spread: BullPutSpread,
+        evaluated_at: datetime,
+        underlying_price: Decimal,
+        estimated_exit_debit: Decimal | None,
+        estimated_pnl: Decimal | None,
+        days_to_expiration: int,
+        exit_reason: str | None,
+    ) -> dict:
+        raw_payload = dict(spread.raw_payload or {})
+        take_profit_debit = None
+        stop_loss_debit = None
+        distance_to_take_profit = None
+        distance_to_stop_loss = None
+        if spread.entry_net_credit is not None:
+            strategy = self.settings.bull_put_strategy
+            take_profit_debit = spread.entry_net_credit * strategy.take_profit_exit_ratio
+            stop_loss_debit = spread.entry_net_credit * strategy.stop_loss_exit_multiple
+            if estimated_exit_debit is not None:
+                distance_to_take_profit = estimated_exit_debit - take_profit_debit
+                distance_to_stop_loss = stop_loss_debit - estimated_exit_debit
+
+        raw_payload["monitor"] = {
+            "evaluated_at": evaluated_at.isoformat(),
+            "next_monitor_after": (
+                evaluated_at + timedelta(seconds=self.settings.bull_put_strategy.monitor_interval_seconds)
+            ).isoformat(),
+            "underlying_price": self._json_decimal(underlying_price),
+            "estimated_exit_debit": self._json_decimal(estimated_exit_debit),
+            "estimated_pnl": self._json_decimal(estimated_pnl),
+            "days_to_expiration": days_to_expiration,
+            "exit_reason": exit_reason,
+            "should_close": exit_reason is not None,
+            "take_profit_debit": self._json_decimal(take_profit_debit),
+            "stop_loss_debit": self._json_decimal(stop_loss_debit),
+            "distance_to_take_profit_debit": self._json_decimal(distance_to_take_profit),
+            "distance_to_stop_loss_debit": self._json_decimal(distance_to_stop_loss),
+            "short_strike_distance": self._json_decimal(underlying_price - spread.short_strike),
+        }
+        return {"raw_payload": raw_payload}
+
     def _determine_exit_reason(
         self,
         *,
@@ -3627,6 +3983,37 @@ class BullPutStrategyService:
             * Decimal(spread.contracts)
             * Decimal("100")
         )
+
+    def _actual_entry_risk_updates(
+        self,
+        *,
+        spread: BullPutSpread,
+        entry_net_credit: Decimal | None,
+    ) -> dict:
+        if entry_net_credit is None:
+            return {}
+
+        contract_multiplier = Decimal("100")
+        max_profit = entry_net_credit * Decimal(spread.contracts) * contract_multiplier
+        max_loss = (
+            max(Decimal("0"), spread.width - entry_net_credit)
+            * Decimal(spread.contracts)
+            * contract_multiplier
+        )
+        break_even = spread.short_strike - entry_net_credit
+        account_risk_pct = spread.account_risk_pct
+        try:
+            account = self._get_latest_account_snapshot(spread.external_account_id)
+        except LookupError:
+            account = None
+        if account is not None and account.net_liquidation > 0:
+            account_risk_pct = max_loss / account.net_liquidation
+        return {
+            "max_profit": max_profit,
+            "max_loss": max_loss,
+            "break_even": break_even,
+            "account_risk_pct": account_risk_pct,
+        }
 
     @staticmethod
     def _effective_fill_price(order: Order | None) -> Decimal | None:
@@ -3703,6 +4090,58 @@ class BullPutStrategyService:
         if mid <= Decimal("0"):
             return False
         return ((quote.ask - quote.bid) / mid) <= strategy.max_bid_ask_spread_pct
+
+    def _option_leg_liquidity_reasons(
+        self,
+        *,
+        short_leg: OptionMarketSnapshot,
+        long_leg: OptionMarketSnapshot | None,
+        scanned_at: datetime,
+    ) -> list[str]:
+        strategy = self.settings.bull_put_strategy
+        reasons: list[str] = []
+        if not self._passes_top_of_book_filters(short_leg):
+            reasons.append(
+                f"Short put {short_leg.symbol} does not have a tight, positive bid/ask."
+            )
+        if short_leg.volume < strategy.min_short_leg_volume:
+            reasons.append(
+                f"Short put {short_leg.symbol} volume {short_leg.volume} is below the configured minimum {strategy.min_short_leg_volume}."
+            )
+        if not self._is_option_quote_fresh(short_leg, scanned_at=scanned_at):
+            reasons.append(
+                f"Short put {short_leg.symbol} quote timestamp is older than {strategy.max_option_quote_age_seconds}s."
+            )
+        if long_leg is None:
+            return reasons
+        if not self._passes_top_of_book_filters(long_leg):
+            reasons.append(
+                f"Long put {long_leg.symbol} does not have a tight, positive bid/ask."
+            )
+        if long_leg.volume < strategy.min_long_leg_volume:
+            reasons.append(
+                f"Long put {long_leg.symbol} volume {long_leg.volume} is below the configured minimum {strategy.min_long_leg_volume}."
+            )
+        if not self._is_option_quote_fresh(long_leg, scanned_at=scanned_at):
+            reasons.append(
+                f"Long put {long_leg.symbol} quote timestamp is older than {strategy.max_option_quote_age_seconds}s."
+            )
+        return reasons
+
+    def _is_option_quote_fresh(
+        self,
+        quote: OptionMarketSnapshot,
+        *,
+        scanned_at: datetime,
+    ) -> bool:
+        quote_time = quote.timestamp
+        if quote_time.tzinfo is None:
+            quote_time = quote_time.replace(tzinfo=timezone.utc)
+        reference = scanned_at if scanned_at.tzinfo is not None else scanned_at.replace(tzinfo=timezone.utc)
+        age_seconds = (reference.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)).total_seconds()
+        if age_seconds < -300:
+            return False
+        return age_seconds <= self.settings.bull_put_strategy.max_option_quote_age_seconds
 
     @staticmethod
     def _has_tradeable_long_leg(quote: OptionMarketSnapshot) -> bool:

@@ -511,7 +511,24 @@ class MockDashboardState:
                 "break_even": "468.7000",
                 "account_risk_pct": "0.003400",
                 "exit_reason": None,
-                "raw_payload": {"source": "mock-seed"},
+                "raw_payload": {
+                    "source": "mock-seed",
+                    "monitor": {
+                        "evaluated_at": "2026-05-21T02:14:54Z",
+                        "next_monitor_after": "2026-05-21T02:19:54Z",
+                        "underlying_price": "501.2500",
+                        "estimated_exit_debit": "1.6000",
+                        "estimated_pnl": "-30.0000",
+                        "days_to_expiration": 29,
+                        "exit_reason": None,
+                        "should_close": False,
+                        "take_profit_debit": "0.6500",
+                        "stop_loss_debit": "2.6000",
+                        "distance_to_take_profit_debit": "0.9500",
+                        "distance_to_stop_loss_debit": "1.0000",
+                        "short_strike_distance": "31.2500",
+                    },
+                },
                 "entry_started_at": "2026-05-20T19:45:00Z",
                 "opened_at": "2026-05-20T19:46:00Z",
                 "closed_at": None,
@@ -542,6 +559,13 @@ class MockDashboardState:
             "last_review_status": None,
             "last_review_summary": None,
             "last_error": None,
+            "holding_open_position": True,
+            "daily_entry_cap_reached": False,
+            "entry_block_reason": None,
+            "next_action": "monitor_open_spread",
+            "active_spread_count": 1,
+            "open_spread_count": 1,
+            "next_monitor_after": "2026-05-21T02:19:54Z",
             "created_at": "2026-05-21T02:14:54Z",
             "updated_at": "2026-05-21T02:14:54Z",
         }
@@ -786,7 +810,39 @@ class MockDashboardState:
     def get_runtime_state(self, external_account_id: str) -> dict[str, Any]:
         if external_account_id != self.account_id:
             raise KeyError(external_account_id)
-        return deepcopy(self.runtime)
+        return self._runtime_with_computed_fields()
+
+    def _runtime_with_computed_fields(self) -> dict[str, Any]:
+        runtime = deepcopy(self.runtime)
+        active_spreads = [
+            spread
+            for spread in self.spreads
+            if spread["status"] in {"entry_pending_long", "entry_pending_short", "open", "exit_pending_short", "exit_pending_long"}
+        ]
+        open_spreads = [spread for spread in active_spreads if spread["status"] == "open"]
+        runtime["holding_open_position"] = bool(open_spreads)
+        runtime["daily_entry_cap_reached"] = int(runtime["daily_entry_count"]) >= 1
+        runtime["active_spread_count"] = len(active_spreads)
+        runtime["open_spread_count"] = len(open_spreads)
+        runtime["next_monitor_after"] = (
+            ((active_spreads[0].get("raw_payload") or {}).get("monitor") or {}).get("next_monitor_after")
+            if active_spreads
+            else None
+        )
+        if runtime["kill_switch_active"] or runtime["manual_pause"] or not runtime["auto_entry_enabled"]:
+            runtime["next_action"] = "resolve_runtime_controls"
+        elif active_spreads:
+            runtime["next_action"] = "monitor_open_spread"
+        elif runtime["daily_entry_cap_reached"]:
+            runtime["next_action"] = "wait_next_session"
+        else:
+            runtime["next_action"] = "scan_for_entry"
+        runtime["entry_block_reason"] = (
+            "Bull put daily entry cap has already been reached for this account."
+            if runtime["daily_entry_cap_reached"] and not active_spreads
+            else None
+        )
+        return runtime
 
     def update_runtime_state(self, external_account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if external_account_id != self.account_id:
@@ -807,7 +863,7 @@ class MockDashboardState:
         self.runtime["last_action"] = "Updated bull put runtime controls."
         self.runtime["last_action_at"] = now
         self.runtime["updated_at"] = now
-        return deepcopy(self.runtime)
+        return self._runtime_with_computed_fields()
 
     def run_entry_scan(self, external_account_id: str, *, force: bool) -> dict[str, Any]:
         if external_account_id != self.account_id:
@@ -820,7 +876,7 @@ class MockDashboardState:
             self.runtime["last_skip_reason"] = "Bull put kill switch is active for this account."
             self.runtime["updated_at"] = now
             return {
-                "strategy_state": deepcopy(self.runtime),
+                "strategy_state": self._runtime_with_computed_fields(),
                 "scanned_at": now,
                 "executed": False,
                 "executed_spread": None,
@@ -833,7 +889,7 @@ class MockDashboardState:
             self.runtime["last_skip_reason"] = "Bull put strategy is manually paused for this account."
             self.runtime["updated_at"] = now
             return {
-                "strategy_state": deepcopy(self.runtime),
+                "strategy_state": self._runtime_with_computed_fields(),
                 "scanned_at": now,
                 "executed": False,
                 "executed_spread": None,
@@ -847,7 +903,7 @@ class MockDashboardState:
             self.runtime["last_skip_reason"] = "Bull put daily entry cap has already been reached for this account."
             self.runtime["updated_at"] = now
             return {
-                "strategy_state": deepcopy(self.runtime),
+                "strategy_state": self._runtime_with_computed_fields(),
                 "scanned_at": now,
                 "executed": False,
                 "executed_spread": None,
@@ -884,7 +940,25 @@ class MockDashboardState:
             "break_even": "468.7000",
             "account_risk_pct": "0.003400",
             "exit_reason": None,
-            "raw_payload": {"source": "mock-auto-scan", "force": force},
+            "raw_payload": {
+                "source": "mock-auto-scan",
+                "force": force,
+                "monitor": {
+                    "evaluated_at": now,
+                    "next_monitor_after": now,
+                    "underlying_price": "501.2500",
+                    "estimated_exit_debit": "1.6000",
+                    "estimated_pnl": "-30.0000",
+                    "days_to_expiration": 27,
+                    "exit_reason": None,
+                    "should_close": False,
+                    "take_profit_debit": "0.6500",
+                    "stop_loss_debit": "2.6000",
+                    "distance_to_take_profit_debit": "0.9500",
+                    "distance_to_stop_loss_debit": "1.0000",
+                    "short_strike_distance": "31.2500",
+                },
+            },
             "entry_started_at": now,
             "opened_at": now,
             "closed_at": None,
@@ -911,7 +985,7 @@ class MockDashboardState:
             }
         )
         return {
-            "strategy_state": deepcopy(self.runtime),
+            "strategy_state": self._runtime_with_computed_fields(),
             "scanned_at": now,
             "executed": True,
             "executed_spread": deepcopy(spread),
@@ -941,7 +1015,7 @@ class MockDashboardState:
             }
         )
         return {
-            "strategy_state": deepcopy(self.runtime),
+            "strategy_state": self._runtime_with_computed_fields(),
             "evaluated_at": now,
             "review_status": "suggested",
             "closed_spreads_considered": 20,
@@ -976,6 +1050,23 @@ class MockDashboardState:
         spread = self.get_spread(spread_id)
         now = iso_now()
         should_close = spread["status"] in {"open", "exit_pending_short", "exit_pending_long"}
+        raw_payload = dict(spread.get("raw_payload") or {})
+        raw_payload["monitor"] = {
+            "evaluated_at": now,
+            "next_monitor_after": now,
+            "underlying_price": "501.2500",
+            "estimated_exit_debit": "0.5000",
+            "estimated_pnl": "80.0000",
+            "days_to_expiration": 27,
+            "exit_reason": "take_profit" if should_close else spread.get("exit_reason"),
+            "should_close": should_close,
+            "take_profit_debit": "0.6500",
+            "stop_loss_debit": "2.6000",
+            "distance_to_take_profit_debit": "-0.1500",
+            "distance_to_stop_loss_debit": "2.1000",
+            "short_strike_distance": "31.2500",
+        }
+        spread["raw_payload"] = raw_payload
         if should_close:
             self._spread_counter += 1
             spread["status"] = "closed"

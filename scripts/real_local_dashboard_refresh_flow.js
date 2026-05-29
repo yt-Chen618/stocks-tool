@@ -81,11 +81,13 @@ async function waitForDashboardReady(page, startedAt, timeoutMs) {
   await page.waitForFunction(
     () => {
       const banner = document.getElementById("status-banner")?.textContent ?? "";
+      const dashboardUpdated =
+        banner.includes("Dashboard updated") || banner.includes("工作台已更新");
       const positionsRows = document.querySelectorAll("#positions-body tr").length;
       const ordersRows = document.querySelectorAll("#orders-body tr").length;
       const spreadsRows = document.querySelectorAll("#spreads-body tr").length;
       return (
-        banner.includes("Dashboard updated") &&
+        dashboardUpdated &&
         positionsRows > 0 &&
         ordersRows > 0 &&
         spreadsRows > 0
@@ -102,14 +104,19 @@ async function waitForOverlaysSettled(page, startedAt, timeoutMs) {
     () => {
       const quoteStatus =
         document.querySelector("#quote-card .pill")?.textContent?.trim().toUpperCase() ?? "";
-      const quoteText = document.getElementById("quote-card")?.innerText ?? "";
+      const quoteCard = document.getElementById("quote-card");
+      const quoteText = quoteCard?.innerText ?? "";
       const boardStatusTile = Array.from(document.querySelectorAll("#preopen-summary-strip .mini-metric-tile")).find(
-        (tile) => (tile.textContent ?? "").includes("Board Status"),
+        (tile) => {
+          const text = tile.textContent ?? "";
+          return text.includes("Board Status") || text.includes("看板状态");
+        },
       );
       const preOpenStatus =
         boardStatusTile?.querySelector("strong")?.textContent?.trim().toUpperCase() ?? "";
       const preOpenText = document.getElementById("preopen-assessment-card")?.innerText ?? "";
       const quoteSettled =
+        !quoteCard ||
         (!!quoteStatus && quoteStatus !== "REFRESHING") ||
         (!!quoteText && !quoteText.toUpperCase().includes("REFRESHING"));
       const preOpenSettled =

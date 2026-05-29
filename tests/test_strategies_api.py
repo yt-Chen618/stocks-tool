@@ -385,6 +385,9 @@ def test_execute_bull_put_strategy_returns_spread() -> None:
                 "external_account_id": "LBPT10087357",
                 "symbol": "QQQ.US",
                 "mode": "paper",
+                "candidate_token": "locked-candidate",
+                "minimum_net_credit": "0.52",
+                "remark": "manual-check",
             },
         )
     finally:
@@ -396,6 +399,10 @@ def test_execute_bull_put_strategy_returns_spread() -> None:
     assert body["status"] == "open"
     request = service.execute_spread.call_args.args[0]
     assert request.external_account_id == "LBPT10087357"
+    assert request.symbol == "QQQ.US"
+    assert request.candidate_token == "locked-candidate"
+    assert request.minimum_net_credit == Decimal("0.52")
+    assert request.remark == "manual-check"
 
 
 def test_execute_bull_put_strategy_maps_value_error_to_400() -> None:
@@ -442,6 +449,11 @@ def test_get_bull_put_runtime_state_returns_runtime_state() -> None:
         last_scan_symbol="QQQ.US",
         last_action="Opened bull put spread for QQQ.US.",
         last_action_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+        holding_open_position=True,
+        daily_entry_cap_reached=True,
+        next_action="monitor_open_spread",
+        active_spread_count=1,
+        open_spread_count=1,
         created_at=datetime(2026, 5, 23, 14, 40, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
     )
@@ -459,6 +471,9 @@ def test_get_bull_put_runtime_state_returns_runtime_state() -> None:
     body = response.json()
     assert body["daily_entry_count"] == 1
     assert body["paused_symbols"] == ["SMH.US"]
+    assert body["holding_open_position"] is True
+    assert body["daily_entry_cap_reached"] is True
+    assert body["next_action"] == "monitor_open_spread"
 
 
 def test_run_bull_put_runtime_scan_returns_scan_result() -> None:

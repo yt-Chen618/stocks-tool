@@ -211,7 +211,11 @@ class FakeAdapter:
         ]
 
     def get_option_market_snapshots(self, *, symbols: list[str], mode: ExecutionMode) -> list[OptionMarketSnapshot]:
-        timestamp = datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc)
+        timestamp = (
+            datetime(2026, 5, 23, 15, 5, tzinfo=timezone.utc)
+            if self.exit_phase
+            else datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc)
+        )
         price_map = {
             "QQQ260619P470000.US": Decimal("2.50"),
             "QQQ260619P467000.US": Decimal("1.05"),

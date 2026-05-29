@@ -777,6 +777,7 @@ def test_preview_spread_selects_tradeable_candidate() -> None:
     assert result.candidate.short_put.strike == Decimal("470")
     assert result.candidate.long_put.strike == Decimal("467")
     assert result.candidate.mid_credit == Decimal("1.45")
+    assert result.candidate_token is not None
     assert result.risk is not None
     assert result.risk.max_profit == Decimal("145.00")
     assert result.risk.max_loss == Decimal("170.00")
@@ -833,6 +834,22 @@ def test_preview_spread_blocks_risk_above_per_trade_limit() -> None:
     )
 
 
+def test_preview_spread_blocks_low_leg_volume() -> None:
+    service, _, _, _ = build_service()
+    service.settings.bull_put_strategy.min_short_leg_volume = 10_000
+
+    result = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert result.eligible is False
+    assert any("volume" in reason for reason in result.reasons)
+    assert result.timing_ms["total"] >= 0
+
+
 def test_execute_spread_opens_position_when_both_legs_fill() -> None:
     service, _, _, order_service = build_service()
     order_service.submit_order.side_effect = [
@@ -867,6 +884,69 @@ def test_execute_spread_opens_position_when_both_legs_fill() -> None:
     assert spread.entry_long_price == Decimal("1.10")
     assert spread.entry_short_price == Decimal("2.40")
     assert spread.entry_net_credit == Decimal("1.30")
+    assert spread.max_profit == Decimal("130.00")
+    assert spread.max_loss == Decimal("170.00")
+    assert spread.break_even == Decimal("468.70")
+
+
+def test_execute_spread_rejects_changed_locked_candidate() -> None:
+    service, _, _, order_service = build_service()
+
+    with pytest.raises(ValueError, match="candidate changed"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+                candidate_token="stale-token",
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_execute_spread_reuses_locked_preview_and_refreshes_selected_legs() -> None:
+    service, adapter, _, order_service = build_service()
+    preview = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+    assert preview.candidate_token is not None
+    adapter.list_option_chain.side_effect = AssertionError("full option-chain rescan should not run")
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+        ),
+        build_option_order(
+            order_id="short-entry",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+        ),
+    ]
+
+    spread = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+            candidate_token=preview.candidate_token,
+            minimum_net_credit=preview.candidate.conservative_credit if preview.candidate else None,
+        )
+    )
+
+    assert spread.status == SpreadStatus.OPEN
+    assert spread.long_symbol == "QQQ260619P467000.US"
+    assert spread.short_symbol == "QQQ260619P470000.US"
 
 
 def test_execute_spread_uses_buffered_long_limit_and_waits_for_fill() -> None:
@@ -1195,6 +1275,22 @@ def test_update_runtime_state_normalizes_paused_symbols() -> None:
 
     assert runtime.auto_entry_enabled is False
     assert runtime.paused_symbols == ["QQQ.US", "SMH.US"]
+
+
+def test_runtime_state_reports_monitor_next_action_for_open_spread() -> None:
+    service, _, spreads, _ = build_service()
+    spreads.list_spreads.return_value = [build_open_spread()]
+
+    runtime = service.get_runtime_state(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert runtime.holding_open_position is True
+    assert runtime.active_spread_count == 1
+    assert runtime.open_spread_count == 1
+    assert runtime.next_action == "monitor_open_spread"
 
 
 def test_preview_spread_blocks_when_kill_switch_is_active() -> None:
@@ -1628,6 +1724,12 @@ def test_monitor_spread_keeps_open_position_without_exit_trigger() -> None:
     assert result.estimated_exit_debit == Decimal("1.60")
     assert result.estimated_pnl == Decimal("-30.00")
     assert result.days_to_expiration == 27
+    assert result.spread.raw_payload is not None
+    assert result.spread.raw_payload["monitor"]["estimated_exit_debit"] == "1.60"
+    assert result.spread.raw_payload["monitor"]["estimated_pnl"] == "-30.00"
+    assert result.spread.raw_payload["monitor"]["take_profit_debit"] == "0.6500"
+    assert result.spread.raw_payload["monitor"]["stop_loss_debit"] == "2.6000"
+    assert result.spread.raw_payload["monitor"]["should_close"] is False
 
 
 def test_monitor_spread_closes_position_on_take_profit() -> None:

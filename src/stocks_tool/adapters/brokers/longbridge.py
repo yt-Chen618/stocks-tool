@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import logging
 import threading
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -53,6 +54,7 @@ class LongbridgeConfigurationError(LongbridgeIntegrationError):
 
 class LongbridgeBrokerAdapter(BrokerAdapter):
     _QUOTE_CACHE_TTL_SECONDS = 60
+    _BROKER_WALL_CLOCK_TIMEZONE = ZoneInfo("Asia/Hong_Kong")
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -1154,9 +1156,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if isinstance(value, Decimal):
             return str(value)
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                value = value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc).isoformat()
+            return self._normalize_longbridge_datetime(value).isoformat()
         if isinstance(value, date):
             return value.isoformat()
         if isinstance(value, Enum):
@@ -1249,10 +1249,30 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
     @staticmethod
     def _to_datetime(value: Any) -> datetime:
         if isinstance(value, datetime):
-            if value.tzinfo is None:
-                return value.replace(tzinfo=timezone.utc)
-            return value.astimezone(timezone.utc)
+            return LongbridgeBrokerAdapter._normalize_longbridge_datetime(value)
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.endswith("Z"):
+                raw = f"{raw[:-1]}+00:00"
+            try:
+                return LongbridgeBrokerAdapter._normalize_longbridge_datetime(
+                    datetime.fromisoformat(raw)
+                )
+            except ValueError as exc:
+                raise LongbridgeIntegrationError("Longbridge returned an invalid timestamp payload.") from exc
         raise LongbridgeIntegrationError("Longbridge returned an invalid timestamp payload.")
+
+    @staticmethod
+    def _normalize_longbridge_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(
+                tzinfo=LongbridgeBrokerAdapter._BROKER_WALL_CLOCK_TIMEZONE
+            ).astimezone(timezone.utc)
+        if value.utcoffset() == timedelta(0):
+            return value.replace(
+                tzinfo=LongbridgeBrokerAdapter._BROKER_WALL_CLOCK_TIMEZONE
+            ).astimezone(timezone.utc)
+        return value.astimezone(timezone.utc)
 
     @staticmethod
     def _to_optional_datetime(value: Any) -> datetime | None:

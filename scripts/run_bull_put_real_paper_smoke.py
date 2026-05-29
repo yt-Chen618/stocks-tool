@@ -66,13 +66,16 @@ def preview_symbol(client: httpx.Client, account_id: str, symbol: str) -> dict[s
     return require_ok(response)
 
 
-def run_execute(client: httpx.Client, account_id: str, symbol: str) -> dict[str, Any]:
+def run_execute(client: httpx.Client, account_id: str, preview: dict[str, Any]) -> dict[str, Any]:
+    candidate = preview.get("candidate") or {}
     response = client.post(
         "/strategies/bull-put/execute",
         json={
             "external_account_id": account_id,
-            "symbol": symbol,
+            "symbol": preview["symbol"],
             "mode": "paper",
+            "candidate_token": preview.get("candidate_token"),
+            "minimum_net_credit": candidate.get("conservative_credit"),
             "remark": "bull-put-real-paper-smoke",
         },
     )
@@ -159,7 +162,7 @@ def main() -> None:
                 return
 
             selected = eligible[0]
-            spread = run_execute(client, args.account_id, selected["symbol"])
+            spread = run_execute(client, args.account_id, selected)
             emit_report(
                 build_report(
                     script="run_bull_put_real_paper_smoke.py",

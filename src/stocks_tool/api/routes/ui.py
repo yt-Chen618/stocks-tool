@@ -181,7 +181,7 @@ def render_dashboard() -> HTMLResponse:
                               <span class="mini-metric-detail">No spread closes recorded today.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Last Scan</span>
+                              <span class="metric-label">Next Action</span>
                               <strong class="mini-metric-value">--</strong>
                               <span class="mini-metric-detail">Waiting for first bull put scan.</span>
                             </article>
@@ -297,14 +297,14 @@ def render_dashboard() -> HTMLResponse:
                               <span class="mini-metric-detail">No spread data loaded.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Exit Pending</span>
+                              <span class="metric-label">Monitor Mark</span>
                               <strong class="mini-metric-value">--</strong>
                               <span class="mini-metric-detail">No spread data loaded.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Latest Exit Action</span>
+                              <span class="metric-label">P/L</span>
                               <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No spread exits recorded.</span>
+                              <span class="mini-metric-detail">No monitor snapshot.</span>
                             </article>
                             <article class="mini-metric-tile">
                               <span class="metric-label">Last Monitor</span>
@@ -318,11 +318,11 @@ def render_dashboard() -> HTMLResponse:
                                 <tr>
                                   <th>Underlying</th>
                                   <th>Expiry</th>
-                                  <th>Width</th>
                                   <th>Status</th>
-                                  <th>Entry Credit</th>
-                                  <th>Last Update</th>
-                                  <th>Latest Action</th>
+                                  <th>Entry / Risk</th>
+                                  <th>Monitor Mark</th>
+                                  <th>PnL / Exit Distance</th>
+                                  <th>Last Monitor</th>
                                   <th>Actions</th>
                                 </tr>
                               </thead>
