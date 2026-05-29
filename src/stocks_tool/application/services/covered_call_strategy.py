@@ -25,6 +25,7 @@ from stocks_tool.domain.enums import (
 from stocks_tool.domain.models import (
     AccountSnapshot,
     CloseCoveredCallProposalRequest,
+    ContinueCoveredCallRollRequest,
     CoveredCallCandidate,
     CoveredCallCloseResult,
     CoveredCallExecutionResult,
@@ -757,6 +758,123 @@ class CoveredCallStrategyService:
             reason=reason,
         )
 
+    def continue_roll_proposal(
+        self,
+        proposal_id: str,
+        request: ContinueCoveredCallRollRequest,
+    ) -> CoveredCallRollExecutionResult:
+        if self.order_service is None:
+            raise RuntimeError("Covered call roll continuation requires an order service.")
+        proposal = self.experiments.get_proposal(proposal_id)
+        if proposal is None:
+            raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
+        if proposal.strategy_id != self.strategy_id or proposal.proposed_action != "roll_covered_call":
+            raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call roll proposal.")
+        if proposal.status != StrategyProposalStatus.APPROVED:
+            raise ValueError(f"Strategy proposal '{proposal_id}' must stay approved while a roll buyback is pending.")
+        if proposal.candidate_payload is None:
+            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call roll payload.")
+
+        roll_from, roll_to = self._parse_roll_payload(proposal.candidate_payload, proposal_id=proposal_id)
+        buyback_order = self.order_service.refresh_order(request.buyback_order_id)
+        self._validate_roll_buyback_order(
+            buyback_order=buyback_order,
+            proposal=proposal,
+            roll_from=roll_from,
+        )
+        sell_order = None
+        sequence_status = "buyback_still_working"
+        reason = "Buyback order is not filled yet; sell-to-open remains held."
+        if self._order_filled(buyback_order):
+            self._ensure_latest_position_still_covers(
+                external_account_id=proposal.external_account_id,
+                candidate=roll_to,
+            )
+            sell_limit = request.sell_limit_price or roll_to.call_bid
+            if sell_limit <= Decimal("0"):
+                raise ValueError(f"Strategy proposal '{proposal_id}' has no positive roll sell limit price.")
+            sell_order = self.order_service.submit_order(
+                self._covered_call_order_request(
+                    external_account_id=proposal.external_account_id,
+                    mode=proposal.mode,
+                    candidate=roll_to,
+                    side=OrderSide.SELL,
+                    limit_price=sell_limit,
+                    remark=request.remark or "covered-call-roll-open",
+                )
+            )
+            sequence_status = "roll_submitted"
+            reason = None
+
+        now = datetime.now(timezone.utc)
+        run = self.experiments.create_run(
+            CreateStrategyRunRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                run_type="roll_continuation",
+                status=StrategyRunStatus.EXECUTED,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                order_id=sell_order.id if sell_order is not None else buyback_order.id,
+                started_at=now,
+                completed_at=now,
+                summary=(
+                    f"Continued covered call roll into {roll_to.call_symbol}."
+                    if sell_order is not None
+                    else f"Refreshed covered call roll buyback order {buyback_order.id}; still waiting."
+                ),
+                reason=reason,
+                metrics_payload={
+                    "proposal_id": proposal.id,
+                    "sequence_status": sequence_status,
+                    "buyback_order_id": buyback_order.id,
+                    "sell_order_id": sell_order.id if sell_order is not None else None,
+                    "buyback_status": buyback_order.status.value,
+                    "roll_from": roll_from.model_dump(mode="json"),
+                    "roll_to": roll_to.model_dump(mode="json"),
+                },
+            )
+        )
+        signal = self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.EXECUTION,
+                symbol=proposal.symbol,
+                run_id=run.id,
+                proposal_id=proposal.id,
+                summary=(
+                    f"Covered call roll continuation submitted {roll_to.call_symbol}."
+                    if sell_order is not None
+                    else f"Covered call roll buyback still pending for {roll_from.call_symbol}."
+                ),
+                detail=reason,
+                source="covered_call_v1",
+                signal_payload={
+                    "sequence_status": sequence_status,
+                    "buyback_order_id": buyback_order.id,
+                    "sell_order_id": sell_order.id if sell_order is not None else None,
+                },
+            )
+        )
+        result_proposal = proposal
+        if sell_order is not None:
+            result_proposal = self.experiments.update_proposal_status(
+                proposal.id,
+                status=StrategyProposalStatus.EXECUTED,
+            )
+        return CoveredCallRollExecutionResult(
+            proposal=result_proposal,
+            buyback_order=buyback_order,
+            sell_order=sell_order,
+            run=run,
+            signal=signal,
+            sequence_status=sequence_status,
+            reason=reason,
+        )
+
     def monitor_proposal(
         self,
         proposal_id: str,
@@ -1267,6 +1385,22 @@ class CoveredCallStrategyService:
             CoveredCallCandidate.model_validate(roll_from),
             CoveredCallCandidate.model_validate(roll_to),
         )
+
+    def _validate_roll_buyback_order(
+        self,
+        *,
+        buyback_order: Order,
+        proposal,
+        roll_from: CoveredCallCandidate,
+    ) -> None:
+        if buyback_order.external_account_id != proposal.external_account_id:
+            raise ValueError("Roll buyback order belongs to a different account.")
+        if buyback_order.mode != proposal.mode:
+            raise ValueError("Roll buyback order mode does not match the proposal.")
+        if buyback_order.symbol != roll_from.call_symbol:
+            raise ValueError("Roll buyback order does not match the current short call symbol.")
+        if buyback_order.side != OrderSide.BUY:
+            raise ValueError("Roll buyback order must be a buy-to-close order.")
 
     def _passes_liquidity_filter(self, quote: OptionMarketSnapshot) -> bool:
         strategy = self.settings.covered_call_strategy

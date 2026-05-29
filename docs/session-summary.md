@@ -81,6 +81,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
 - `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/roll-execute`
+- `POST /strategies/covered-call/proposals/{proposal_id}/roll-continue`
 - `POST /strategies/covered-call/proposals/{proposal_id}/close`
 - `GET /market-events`
 - `POST /market-events`
@@ -161,8 +162,9 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `monitor` reloads the underlying and short-call quote, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
   - `roll-propose` creates a manual-approval strategy proposal that combines the current buyback estimate with a later OTM covered-call candidate
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
+  - `roll-continue` refreshes a pending buyback order and submits the sell-to-open leg once that buyback is filled
   - `close` submits a paper buy-to-close limit order for an executed proposal
-  - no automatic covered-call scheduler or continuation worker exists yet for buyback orders that remain working after the first roll submission
+  - no automatic covered-call scheduler exists yet
 
 ### Market event calendar
 
@@ -401,6 +403,7 @@ Frontend files:
 - Added covered-call buy-to-close order submission for executed proposals.
 - Added covered-call roll proposal generation for executed proposals; the route records buyback estimate, next-call candidate, run, signal, and pending strategy proposal without submitting either roll leg.
 - Added approved covered-call roll execution; the route submits buy-to-close first and only submits sell-to-open when the buyback order is already filled.
+- Added covered-call roll continuation for buyback orders that remain working after the initial roll submission.
 - Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
@@ -523,6 +526,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add covered-call roll continuation handling for buyback orders that remain working after the first submission.
-2. Add automated market/news/event ingestion workers to populate the local event calendar.
+1. Add automated market/news/event ingestion workers to populate the local event calendar.
+2. Add dashboard controls for covered-call proposal approval, roll execution, and roll continuation.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
