@@ -1,22 +1,23 @@
 :root {
   color-scheme: light;
-  --bg: #f3efe8;
-  --surface: #fffdfa;
+  --bg: #eef2f3;
+  --surface: #f9fbfb;
   --surface-strong: #ffffff;
-  --surface-muted: #efe7db;
-  --text: #1f2622;
-  --text-soft: #5a655e;
-  --line: #d6d0c4;
-  --line-strong: #c5beaf;
-  --accent: #1a7b63;
-  --accent-strong: #11624f;
-  --success-bg: #d7efe5;
-  --success-text: #155743;
-  --warn-bg: #f5e7cc;
-  --warn-text: #875d18;
-  --danger-bg: #f5d9d5;
-  --danger-text: #8a322c;
-  --shadow: 0 18px 36px rgba(46, 38, 26, 0.08);
+  --surface-muted: #edf3f1;
+  --text: #17211f;
+  --text-soft: #5c6b68;
+  --line: #d6dfdd;
+  --line-strong: #b8c5c2;
+  --accent: #167761;
+  --accent-strong: #0d5e4c;
+  --focus: #2d68b8;
+  --success-bg: #dff3eb;
+  --success-text: #145a44;
+  --warn-bg: #fff1d6;
+  --warn-text: #8a5a12;
+  --danger-bg: #f9dedb;
+  --danger-text: #92342f;
+  --shadow: 0 16px 32px rgba(21, 33, 31, 0.08);
 }
 
 * {
@@ -27,7 +28,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: radial-gradient(circle at top right, #f9f5ee 0, #f3efe8 34%, #ebe4d7 100%);
+  background: var(--bg);
   color: var(--text);
   font-family: Inter, "Segoe UI", Arial, sans-serif;
 }
@@ -101,6 +102,32 @@ a {
   gap: 12px;
 }
 
+.language-switch {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-strong);
+}
+
+.lang-option {
+  min-width: 42px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.lang-option.is-active {
+  background: var(--accent);
+  color: #ffffff;
+}
+
 .mode-pill,
 .action-link {
   display: inline-flex;
@@ -129,11 +156,10 @@ a {
 }
 
 .band {
-  background: rgba(255, 253, 250, 0.72);
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 8px;
   box-shadow: var(--shadow);
-  backdrop-filter: blur(14px);
 }
 
 .controls-band,
@@ -141,7 +167,11 @@ a {
 .holdings-band,
 .insights-band,
 .trade-band,
-.data-band {
+.data-band,
+.account-band,
+.strategy-band,
+.portfolio-band,
+.execution-band {
   padding: 20px;
 }
 
@@ -159,6 +189,10 @@ a {
   grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(160px, 1fr));
   gap: 12px;
   align-items: end;
+}
+
+.account-metrics {
+  margin-top: 14px;
 }
 
 .field {
@@ -293,7 +327,7 @@ a {
 .reconciliation-card {
   min-height: 132px;
   padding: 16px;
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-strong);
   display: grid;
@@ -329,7 +363,7 @@ a {
 .metric-tile {
   min-height: 112px;
   padding: 16px;
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-strong);
   display: grid;
@@ -356,9 +390,9 @@ a {
 .mini-metric-tile {
   min-height: 126px;
   padding: 16px;
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.62);
+  background: var(--surface-muted);
   display: grid;
   align-content: space-between;
   gap: 8px;
@@ -398,6 +432,12 @@ a {
   gap: 18px;
 }
 
+.strategy-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
 .holdings-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(340px, 1fr);
@@ -413,9 +453,13 @@ a {
 .panel,
 .quote-card {
   padding: 18px;
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-strong);
+}
+
+.orders-panel {
+  margin-top: 18px;
 }
 
 .ticket-form {
@@ -463,9 +507,9 @@ a {
 
 .strategy-note-card {
   padding: 16px;
-  border: 1px solid rgba(197, 190, 175, 0.72);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.62);
+  background: var(--surface-muted);
   display: grid;
   gap: 14px;
 }
@@ -473,7 +517,7 @@ a {
 .strategy-note-body {
   display: grid;
   gap: 12px;
-  color: var(--text-main);
+  color: var(--text);
   font-size: 14px;
   line-height: 1.6;
 }
@@ -517,9 +561,35 @@ a {
 
 .strategy-journal-entry {
   padding-top: 12px;
-  border-top: 1px solid rgba(197, 190, 175, 0.72);
+  border-top: 1px solid var(--line);
   display: grid;
   gap: 8px;
+}
+
+.compact-header {
+  margin-bottom: 12px;
+}
+
+.compact-header h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 640;
+}
+
+.preopen-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.preopen-grid.secondary {
+  align-items: start;
+}
+
+.preopen-stack {
+  display: grid;
+  gap: 18px;
 }
 
 .strategy-journal-entry:first-child {
@@ -550,7 +620,7 @@ a {
   padding: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.62);
+  background: var(--surface-muted);
 }
 
 .selected-order.empty {
@@ -580,7 +650,7 @@ a {
 .selected-order-meta div {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .selected-order-meta span {
@@ -616,7 +686,7 @@ a {
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.62);
+  background: var(--surface-muted);
 }
 
 .selected-order-execution.empty {
@@ -633,7 +703,7 @@ a {
 .execution-grid div {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .execution-grid span {
@@ -677,7 +747,7 @@ a {
   padding: 14px 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--surface-strong);
 }
 
 .journal-entry-head,
@@ -732,7 +802,7 @@ a {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.62);
+  background: var(--surface-muted);
 }
 
 .holding-head {
@@ -751,7 +821,7 @@ a {
 .holding-stats div {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.65);
+  background: rgba(255, 255, 255, 0.78);
 }
 
 .holding-stats span {
@@ -775,7 +845,7 @@ a {
   color: var(--text-soft);
   border: 1px dashed var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.4);
+  background: var(--surface-muted);
 }
 
 .status-list {
@@ -789,7 +859,7 @@ a {
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.7);
+  background: var(--surface-muted);
 }
 
 .status-list dt {
@@ -861,7 +931,7 @@ a {
 .quote-meta div {
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.75);
+  background: var(--surface-muted);
 }
 
 .quote-meta span {
@@ -1017,7 +1087,7 @@ a {
 .watchlist-block {
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(243, 239, 232, 0.58);
+  background: var(--surface-muted);
   overflow: hidden;
 }
 
@@ -1111,7 +1181,8 @@ a {
   .panel-grid,
   .holdings-grid,
   .trade-grid,
-  .data-grid {
+  .data-grid,
+  .preopen-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1140,6 +1211,10 @@ a {
     padding: 22px 18px 16px;
   }
 
+  .topbar-actions {
+    flex-wrap: wrap;
+  }
+
   .workspace {
     padding: 0 12px 16px;
   }
@@ -1149,7 +1224,11 @@ a {
   .holdings-band,
   .insights-band,
   .trade-band,
-  .data-band {
+  .data-band,
+  .account-band,
+  .strategy-band,
+  .portfolio-band,
+  .execution-band {
     padding: 14px;
   }
 

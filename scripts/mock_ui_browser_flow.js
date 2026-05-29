@@ -22,19 +22,27 @@ async function main() {
     await page.waitForSelector("#account-select");
     await page.waitForSelector("#spreads-body tr");
     await page.waitForFunction(
-      () => document.getElementById("status-banner")?.textContent?.includes("Dashboard updated"),
+      () => {
+        const text = document.getElementById("status-banner")?.textContent || "";
+        return text.includes("Dashboard updated") || text.includes("工作台已更新");
+      },
       { timeout: 10000 },
     );
+    await expectText(page.locator("body"), "策略中心");
+    await expectText(page.locator("body"), "执行工作台");
+    await expectText(page.locator("body"), "盘前风险板");
+    await page.locator("[data-lang-option='en']").click();
+    await expectText(page.locator("body"), "Strategy Center");
     await expectText(page.locator("body"), "Pre-open Risk Board");
     await expectText(page.locator("body"), "Risk Proxies");
     await expectText(page.locator("body"), "QQQ / SPY Put Check");
     await expectText(page.locator("body"), "Opening Follow-through");
     await expectText(page.locator("body"), "Bull Put Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
-    await expectText(page.locator("body"), "Bull Put Spreads");
+    await expectText(page.locator("body"), "Execution Desk");
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
-    await expectText(page.locator("#quote-card"), "LIVE");
+    await page.getByRole("button", { name: "Load Macro Board" }).click();
     await expectText(page.locator("#preopen-summary-strip"), "Board Status");
     await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
     await expectText(page.locator("#preopen-signals"), "Nasdaq 100 ETF");

@@ -732,6 +732,10 @@ class PreOpenDownsideAssessment(BaseModel):
     signals: list[PreOpenProxySignal] = Field(default_factory=list)
     put_snapshots: list[DirectionalPutSnapshot] = Field(default_factory=list)
     chain_analyses: list[OptionChainAnalysis] = Field(default_factory=list)
+    freshness_status: str = "live"
+    freshness_detail: str | None = None
+    stale_reason: str | None = None
+    source_run_id: str | None = None
 
 
 class PreOpenReviewCheckpoint(BaseModel):

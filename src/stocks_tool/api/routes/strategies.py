@@ -30,6 +30,10 @@ router = APIRouter(prefix="/strategies", tags=["strategies"])
 
 @router.get("/pre-open-risk", response_model=PreOpenDownsideAssessment)
 def get_pre_open_risk_assessment(
+    external_account_id: str | None = Query(
+        default=None,
+        description="Optional broker account id so the route can fall back to the latest stored run for that account.",
+    ),
     as_of: datetime | None = Query(
         default=None,
         description="Optional UTC timestamp for deterministic pre-open checks, e.g. 2026-05-26T12:35:00Z",
@@ -37,7 +41,10 @@ def get_pre_open_risk_assessment(
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
 ) -> PreOpenDownsideAssessment:
     try:
-        return service.get_pre_open_downside_assessment(as_of=as_of)
+        return service.get_pre_open_downside_assessment(
+            as_of=as_of,
+            external_account_id=external_account_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

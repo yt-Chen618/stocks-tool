@@ -113,6 +113,16 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - The same background loop now also captures one pre-open downside assessment during the ET pre-open window and reviews opening follow-through after the regular session opens.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
+- Automatic Longbridge scheduler tasks now apply an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not retry every `15s` while the broker is unstable.
+- The scheduler now prioritizes bull put monitor / scan / review before pre-open capture / review so option-strategy tasks get first access to Longbridge when quote connectivity is unstable.
+- `GET /strategies/pre-open-risk` now degrades in three steps instead of failing the board outright:
+  - return the latest stored pre-open run as `stale` on transient Longbridge failures when a persisted run exists
+  - return a `partial` board when only some proxy symbols are unavailable
+  - return a structured `unavailable` board when live proxy data fails and no stored run exists yet
+- The dashboard no longer auto-loads `Quick Quote` on first paint; quote refresh is now explicit button-click or trusted Enter only.
+- The dashboard no longer auto-loads or auto-seeds the live pre-open board on first paint; stored pre-open runs still render immediately, while live macro refresh is manual through `Load Macro Board`.
+- The homepage gives `pre-open-risk` a small timeout margin above the broker fail-fast window so the first degraded response lands as structured `unavailable` instead of a client-side `timed_out`.
+- The HTML dashboard now serves versioned `app.css` and `app.js` URLs so browser tabs pick up fresh frontend assets after reload instead of reusing stale cached scripts.
 - Default intervals:
   - scheduler poll loop: `15s`
   - account snapshot sync: `300s`
@@ -325,7 +335,7 @@ Frontend files:
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `55 passed`
+- Result: `64 passed`
 - Latest browser-regression run:
 
 ```powershell
@@ -347,13 +357,40 @@ Frontend files:
 ```
 
 - Result from the live local API session: `passed` in dry-run mode after `OPRA US Options Quotes (OpenAPI)` was enabled
+- Latest real local dashboard refresh regression:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh
+```
+
+- Result from the long-running local `127.0.0.1:8000` instance: `passed`
+- Warm-instance timing from repeated default-threshold runs:
+  - dashboard-ready: `115-246 ms`
+  - overlay-settled: `121-262 ms`
+- After letting the `30s` Longbridge circuit-breaker window expire and rerunning on the same local instance, the regression still passed:
+  - dashboard-ready: `121-231 ms`
+  - overlay-settled: `129-248 ms`
+- The current real local dashboard now settles with explicit degraded overlay states instead of hanging:
+  - `Quick Quote`: `Idle` until the user explicitly loads a symbol
+  - `Pre-open Risk Board`: `Unavailable` when broker proxy data is down and there is no stored seed run yet
+- One earlier first-pass regression run saw a single `13.7s` outlier that was not reproduced by the later default-threshold reruns or the post-idle rerun.
+- Verified current pre-open fallback behavior on a fresh temporary local server process:
+  - `GET /strategies/pre-open-risk?external_account_id=LBPT10087357` now returns `200` with `freshness_status="error"` and a structured unavailable board when Longbridge connectivity fails before any first successful stored run exists
+- Verified current browser-facing dashboard behavior on the long-running local `127.0.0.1:8000` instance after versioned static assets landed:
+  - `#quote-card` stays on `Load a quote manually to keep the dashboard fast.`
+  - `#preopen-assessment-card` renders the structured unavailable board instead of a client-side timed-out shell
+- Verified the new strategy-first dashboard behavior:
+  - mock browser regression now clicks `Load Macro Board` explicitly instead of assuming a live pre-open auto-refresh
+  - full test suite passes with the new manual-macro flow and scheduler priority ordering
+- Verified opening follow-through checkpoint degradation:
+  - `review_pre_open_run()` no longer leaves `09:30 / 09:45 / 10:00 ET` checkpoints stuck in `pending` when one or two Longbridge proxy quotes time out
+  - transient `SPY / SOXX / QQQ` quote failures now produce a captured partial checkpoint with missing fields noted in `detail`, so the run can keep progressing instead of surfacing a blanket `502`
+- Note for local manual verification:
+  - the user-facing `127.0.0.1:8000` process may still need a restart if it was not launched with `uvicorn --reload`; static `app.js` changes can appear immediately while the Python route/service changes stay on the older process
 - Latest real execute attempts:
   - selected candidate remained `QQQ.US` bull put
   - no naked short was left behind
   - latest spread execute ended `entry_failed` with `long_entry_unfilled`
-- Latest dashboard usability timing on a fresh local instance after the async overlay change:
-  - first open reached `Dashboard updated. Market overlays are refreshing in the background.` in about `1199 ms`
-  - manual refresh returned to the same usable state in about `3371 ms`
 
 ## Known cleanup items
 

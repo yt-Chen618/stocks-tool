@@ -1,3 +1,343 @@
+const LANGUAGE_STORAGE_KEY = "stocks-tool-language";
+const DEFAULT_LANGUAGE = "zh";
+const TEXT_NODE_ORIGINALS = new WeakMap();
+const ATTRIBUTE_ORIGINALS = new WeakMap();
+const TRANSLATIONS = {
+  zh: {
+    "Paper Trading Desk": "纸账户交易台",
+    "Stocks Tool Workbench": "Stocks Tool 工作台",
+    "Paper": "纸交易",
+    "API Docs": "API 文档",
+    "Account": "账户",
+    "Account Control": "账户控制",
+    "Refresh": "刷新",
+    "Broker Account": "券商账户",
+    "Sync Account": "同步账户",
+    "Sync Orders": "同步订单",
+    "Cash Balance": "现金余额",
+    "Net Liquidation": "净清算值",
+    "Buying Power": "购买力",
+    "Latest Snapshot": "最新快照",
+    "Auto Reconciliation": "自动对账",
+    "Account Sync": "账户同步",
+    "Orders Sync": "订单同步",
+    "Select a broker account to view scheduler state.": "选择券商账户后查看调度状态。",
+    "No account selected.": "未选择账户。",
+    "Ready": "就绪",
+    "Strategy": "策略",
+    "Strategy Center": "策略中心",
+    "Bull Put": "牛市看跌价差",
+    "Bull Put Strategy": "牛市看跌策略",
+    "Entry Status": "入场状态",
+    "No runtime state loaded.": "尚未加载运行状态。",
+    "Daily Entries": "今日入场",
+    "Waiting for first scan.": "等待首次扫描。",
+    "Daily Realized PnL": "今日已实现盈亏",
+    "No spread closes recorded today.": "今日暂无价差平仓记录。",
+    "Last Scan": "最近扫描",
+    "Waiting for first bull put scan.": "等待首次牛市看跌扫描。",
+    "Auto Entry": "自动入场",
+    "Enabled": "启用",
+    "Disabled": "停用",
+    "Manual Pause": "手动暂停",
+    "Running": "运行中",
+    "Paused": "已暂停",
+    "Kill Switch": "熔断开关",
+    "Off": "关闭",
+    "On": "开启",
+    "Paused Symbols": "暂停标的",
+    "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.": "策略控制只影响新的牛市看跌入场，已有价差仍会被监控。",
+    "Save Controls": "保存控制",
+    "Run Scan": "运行扫描",
+    "Run Review": "运行复盘",
+    "Last Skip": "最近跳过",
+    "Latest Skip Reason": "最近跳过原因",
+    "No bull put scan has been skipped yet.": "尚无牛市看跌扫描被跳过。",
+    "Review": "复盘",
+    "Latest Review": "最新复盘",
+    "No bull put strategy review has been generated yet.": "尚未生成牛市看跌策略复盘。",
+    "Journal": "日志",
+    "Recent Strategy Notes": "近期策略笔记",
+    "No bull put strategy notes for this account yet.": "此账户暂无牛市看跌策略笔记。",
+    "Spreads": "价差",
+    "Bull Put Monitor": "牛市看跌监控",
+    "Active Spreads": "活跃价差",
+    "No spread data loaded.": "尚未加载价差数据。",
+    "Exit Pending": "平仓待处理",
+    "Latest Exit Action": "最近平仓动作",
+    "No spread exits recorded.": "暂无价差平仓记录。",
+    "Last Monitor": "最近监控",
+    "Waiting for first spread check.": "等待首次价差检查。",
+    "Underlying": "标的",
+    "Expiry": "到期日",
+    "Width": "宽度",
+    "Status": "状态",
+    "Entry Credit": "入场权利金",
+    "Latest Action": "最近动作",
+    "Actions": "操作",
+    "No bull put spreads loaded.": "尚未加载牛市看跌价差。",
+    "Macro": "宏观",
+    "Pre-open Risk Board": "盘前风险板",
+    "Load Macro Board": "加载宏观板",
+    "Downside Score": "下行分数",
+    "Loading pre-open assessment...": "正在加载盘前评估...",
+    "Signals": "信号",
+    "Risk Proxies": "风险代理",
+    "Waiting for market proxy signals.": "等待市场代理信号。",
+    "Options": "期权",
+    "QQQ / SPY Put Check": "QQQ / SPY 看跌检查",
+    "Waiting for directional put snapshots.": "等待方向性看跌期权快照。",
+    "Surface": "波动率面",
+    "Option Chain Analysis": "期权链分析",
+    "Waiting for front and next-expiry option chain analysis.": "等待近月和次近月期权链分析。",
+    "Opening Follow-through": "开盘延续复盘",
+    "Select a broker account to load the latest pre-open capture and opening review.": "选择券商账户后加载最新盘前记录和开盘复盘。",
+    "Portfolio": "持仓",
+    "Holdings Overview": "持仓总览",
+    "Open Positions": "持仓数量",
+    "Gross Market Value": "总市值",
+    "Unrealized PnL": "未实现盈亏",
+    "Largest Holding": "最大持仓",
+    "Symbol": "标的",
+    "Type": "类型",
+    "Qty": "数量",
+    "Avg Cost": "平均成本",
+    "Market Value": "市值",
+    "Weight": "权重",
+    "No positions in latest snapshot.": "最新快照中没有持仓。",
+    "Execution": "执行",
+    "Execution Desk": "执行工作台",
+    "Ticket": "订单",
+    "Order Ticket": "订单票据",
+    "Side": "方向",
+    "Buy": "买入",
+    "Sell": "卖出",
+    "Quantity": "数量",
+    "Order Type": "订单类型",
+    "Market": "市价",
+    "Limit": "限价",
+    "Stop": "止损",
+    "Time In Force": "订单时效",
+    "Limit Price": "限价",
+    "Stop Price": "止损价",
+    "Remark": "备注",
+    "Submit Order": "提交订单",
+    "Workflow": "流程",
+    "Selected Order": "选中订单",
+    "Select an order from the table to manage it.": "从表格中选择订单进行管理。",
+    "Execution Summary": "成交摘要",
+    "Latest Fill Snapshot": "最新成交快照",
+    "No fills recorded for this order yet.": "此订单尚无成交记录。",
+    "Review Workflow": "复盘流程",
+    "Entry Type": "记录类型",
+    "Plan": "计划",
+    "Note": "备注",
+    "Title": "标题",
+    "Tags": "标签",
+    "Notes": "笔记",
+    "Select an order to save a plan note or post-trade review.": "选择订单后保存计划笔记或交易复盘。",
+    "Save Entry": "保存记录",
+    "Select an order to load journal entries.": "选择订单后加载日志记录。",
+    "Replace": "改单",
+    "Update Working Order": "更新工作订单",
+    "Replace Order": "修改订单",
+    "Orders": "订单",
+    "Updated": "更新时间",
+    "No orders loaded.": "尚未加载订单。",
+    "No orders for this account.": "此账户暂无订单。",
+    "Manage": "管理",
+    "Monitor": "监控",
+    "Cancel": "取消",
+    "Board Status": "看板状态",
+    "Regime": "市场状态",
+    "Plain Put View": "裸买看跌视图",
+    "Preferred Vehicle": "偏好工具",
+    "Action": "动作",
+    "Gap Chase Risk": "追跳空风险",
+    "Session": "交易时段",
+    "Target Session": "目标交易日",
+    "Review Status": "复盘状态",
+    "Checkpoints": "检查点",
+    "Next Open": "下次开盘",
+    "Action Bias": "动作偏向",
+    "Session Px": "时段价",
+    "Prev Close": "前收盘",
+    "Change": "变动",
+    "Strike": "行权价",
+    "DTE": "到期天数",
+    "Bid / Ask": "买一/卖一",
+    "Mid / Spread": "中间价/价差",
+    "Delta / IV": "Delta / 隐波",
+    "Spot Distance": "距现货",
+    "Spot": "现货",
+    "Front ATM IV": "近月 ATM 隐波",
+    "Next ATM IV": "次近月 ATM 隐波",
+    "Term Slope": "期限斜率",
+    "Front Put Skew": "近月看跌偏斜",
+    "Front Median Spread": "近月中位价差",
+    "Front Expiry": "近月到期",
+    "Next Expiry": "次近月到期",
+    "OI / Vol": "持仓/成交",
+    "Spread / Delta": "价差/Delta",
+    "ATM Put": "ATM 看跌",
+    "ATM Delta / IV": "ATM Delta/隐波",
+    "Put Skew Leg": "看跌偏斜腿",
+    "Skew IV Lift": "偏斜隐波抬升",
+    "Spread Buckets": "价差分组",
+    "Median Spread": "中位价差",
+    "External ID": "外部 ID",
+    "Order Type": "订单类型",
+    "Price Logic": "价格逻辑",
+    "Filled Qty": "成交数量",
+    "Avg Fill": "平均成交价",
+    "Last Fill": "最近成交",
+    "Derived from the latest broker order detail snapshot for this order.": "由此订单最新券商详情快照生成。",
+    "Plan linked": "已关联计划",
+    "Execution linked": "已关联成交",
+    "Order linked": "已关联订单",
+    "No journal entries linked to this order yet.": "此订单暂无关联日志。",
+    "Optional for stop": "止损单可选",
+    "Required for stop": "止损单必填",
+    "Optional broker note": "可选券商备注",
+    "Optional replace note": "可选改单备注",
+    "Post-trade review headline": "交易后复盘标题",
+    "discipline, entry, risk": "纪律, 入场, 风险",
+    "What happened, what was learned, and what changes next time.": "记录发生了什么、学到了什么、下次如何调整。",
+    "Idle": "空闲",
+    "Live": "实时",
+    "Refreshing": "刷新中",
+    "Timed Out": "超时",
+    "Circuit Open": "熔断中",
+    "Stale": "旧数据",
+    "Partial": "部分数据",
+    "Unavailable": "不可用",
+    "Success": "成功",
+    "Syncing": "同步中",
+    "Error": "错误",
+    "Kill Switch": "熔断",
+    "Selective Pause": "选择性暂停",
+    "Broad Downside Risk": "广泛下行风险",
+    "Selective Downside Risk": "选择性下行风险",
+    "Balanced": "均衡",
+    "Reasonable": "可考虑",
+    "Selective": "选择性",
+    "Avoid": "回避",
+    "Wait For Open Confirmation": "等待开盘确认",
+    "Wait For Failed Bounce": "等待反弹失败",
+    "Use Intraday Confirmation": "使用盘中确认",
+    "Selective Probe Only": "仅小仓试探",
+    "Low": "低",
+    "Medium": "中",
+    "High": "高",
+    "Premarket": "盘前",
+    "Regular": "常规交易",
+    "Postmarket": "盘后",
+    "Weekend": "周末",
+    "Holiday": "假日",
+    "Complete": "完成",
+    "Active": "进行中",
+    "Pending": "等待",
+    "Captured": "已捕获",
+    "Confirmed": "确认",
+    "Mixed": "混合",
+    "Failed": "失败",
+    "In Progress": "进行中",
+    "Awaiting Open": "等待开盘",
+    "Bearish": "偏空",
+    "Supportive": "支撑",
+    "Neutral": "中性",
+    "Preferred": "偏好",
+    "Reference": "参考",
+    "Tight": "紧",
+    "Workable": "可用",
+    "Wide": "宽",
+    "Front Loaded": "近月偏贵",
+    "Next Richer": "次近月偏贵",
+    "Flat": "平坦",
+    "Unclear": "不清晰",
+    "Open": "打开",
+    "Closed": "已关闭",
+    "Take Profit": "止盈",
+    "Stop Loss": "止损",
+    "Short Strike Breach": "短腿行权价被突破",
+    "Expiration Guard": "到期保护",
+    "Submitted": "已提交",
+    "Filled": "已成交",
+    "Partially Filled": "部分成交",
+    "Canceled": "已取消",
+    "Rejected": "已拒绝",
+    "created": "已创建",
+    "submitted": "已提交",
+    "partially_filled": "部分成交",
+    "filled": "已成交",
+    "canceled": "已取消",
+    "rejected": "已拒绝",
+    "open": "打开",
+    "closed": "已关闭",
+    "entry_pending_long": "等待买入保护腿",
+    "entry_pending_short": "等待卖出短腿",
+    "exit_pending_short": "等待买回短腿",
+    "exit_pending_long": "等待卖出长腿",
+    "entry_failed": "入场失败",
+    "rolled_back": "已回滚",
+    "rollback_failed": "回滚失败",
+    "Configured": "已配置",
+    "Missing": "缺失",
+    "No active holdings": "暂无持仓",
+    "No open positions": "暂无持仓",
+    "No ranked holdings": "暂无持仓排序",
+    "No active spreads": "暂无活跃价差",
+    "No pending spread exits": "暂无待处理平仓",
+    "No exit actions recorded yet": "暂无平仓动作",
+    "Waiting for first monitor run": "等待首次监控运行",
+    "Select a broker account to load bull put controls.": "选择券商账户后加载牛市看跌控制项。",
+    "No bull put skip reason recorded.": "暂无牛市看跌跳过原因。",
+    "No bull put spreads for this account.": "此账户暂无牛市看跌价差。",
+    "Load the pre-open board to classify market tone.": "加载盘前风险板以判断市场状态。",
+    "QQQ / SPY directional put bias will render here.": "QQQ / SPY 方向性看跌偏向将在此显示。",
+    "Waiting for proxy dispersion.": "等待代理分化信号。",
+    "No major bearish trigger is active": "暂无主要看跌触发器",
+    "No bearish trigger is strong enough to favor plain index puts right now.": "当前没有足够强的看跌触发器支持裸买指数看跌。",
+    "No market proxy signals are available.": "暂无市场代理信号。",
+    "No short-dated reference puts were found.": "未找到短期期权参考。",
+    "No option chain analysis is available.": "暂无期权链分析。",
+    "No opening checkpoints were stored for this run.": "此次运行未存储开盘检查点。",
+    "Stored pre-open assessment.": "已存储的盘前评估。",
+    "Opening follow-through review is still waiting for the first checkpoint.": "开盘延续复盘仍在等待第一个检查点。",
+    "Opening review is still waiting for this checkpoint.": "开盘复盘仍在等待此检查点。",
+    "No liquid strikes were sampled for this expiry.": "此到期日没有采样到流动行权价。",
+    "Filled, canceled, and rejected orders can be refreshed but not replaced.": "已成交、已取消和已拒绝订单只能刷新，不能改单。",
+    "Select a broker account first.": "请先选择券商账户。",
+    "Account sync already in progress.": "账户同步正在进行。",
+    "Order sync already in progress.": "订单同步正在进行。",
+    "Market orders use the selected paper account and do not require a price.": "市价单使用当前纸账户，不需要填写价格。",
+    "Limit orders require a limit price.": "限价单必须填写限价。",
+    "Stop orders require a stop price. Add an optional limit price to send a stop-limit style order.": "止损单必须填写止损价。可选填限价以提交类似止损限价单。",
+    "Market order replacements update quantity only.": "市价改单只更新数量。",
+    "Limit order replacements require a limit price.": "限价改单必须填写限价。",
+    "Stop order replacements require a stop price. Limit price remains optional.": "止损改单必须填写止损价，限价仍为可选。",
+    "Loading dashboard...": "正在加载工作台...",
+    "Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.": "工作台已更新。期权策略面板优先加载，宏观覆盖层可按需加载。",
+    "No broker account selected.": "未选择券商账户。",
+    "Enter a symbol.": "请输入标的。",
+    "Refreshing pre-open board...": "正在刷新盘前风险板...",
+    "Account sync failed.": "账户同步失败。",
+    "Order sync failed.": "订单同步失败。",
+    "Bull put controls update failed.": "牛市看跌控制项更新失败。",
+    "Bull put scan failed.": "牛市看跌扫描失败。",
+    "Bull put review failed.": "牛市看跌复盘失败。",
+    "Order submit failed.": "订单提交失败。",
+    "Order refresh failed.": "订单刷新失败。",
+    "Spread refresh failed.": "价差刷新失败。",
+    "Spread monitor failed.": "价差监控失败。",
+    "Order cancel failed.": "订单取消失败。",
+    "Order replace failed.": "改单失败。",
+    "Journal entry save failed.": "日志保存失败。",
+    "Bull put review completed.": "牛市看跌复盘完成。",
+    "Bull put scan completed without a new spread.": "牛市看跌扫描完成，未开新价差。"
+  },
+};
+
 const state = {
   accounts: [],
   selectedAccountId: "",
@@ -11,23 +351,32 @@ const state = {
   latestSnapshot: null,
   selectedOrderId: "",
   quote: null,
-  quoteStatus: { kind: "idle", detail: "No quote loaded.", reason: "" },
+  quoteStatus: { kind: "idle", detail: "Load a quote manually to keep the dashboard fast.", reason: "" },
   preOpenAssessment: null,
-  preOpenStatus: { kind: "loading", detail: "Loading pre-open assessment...", reason: "" },
+  preOpenStatus: { kind: "idle", detail: "Macro board is available on demand so option strategy requests stay first.", reason: "" },
   preOpenRuns: [],
+  preOpenSeedAttempts: {},
+  language: readStoredLanguage(),
 };
 
 const els = {};
+let isApplyingLanguage = false;
+let languageObserver = null;
+let languageFrame = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
   wireEvents();
+  startLanguageObserver();
+  updateLanguageControls();
+  applyLanguage();
   syncTicketOrderFields();
   renderSelectedOrder();
   await loadDashboard();
 });
 
 function bindElements() {
+  els.languageOptions = Array.from(document.querySelectorAll("[data-lang-option]"));
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
   els.reconciliationStrip = document.getElementById("reconciliation-strip");
@@ -55,7 +404,9 @@ function bindElements() {
   els.brokerStatus = document.getElementById("broker-status");
   els.quoteForm = document.getElementById("quote-form");
   els.quoteSymbol = document.getElementById("quote-symbol");
+  els.loadQuote = document.getElementById("load-quote");
   els.quoteCard = document.getElementById("quote-card");
+  els.loadPreOpenBoard = document.getElementById("load-preopen-board");
   els.preOpenSummaryStrip = document.getElementById("preopen-summary-strip");
   els.preOpenAssessmentCard = document.getElementById("preopen-assessment-card");
   els.preOpenSignals = document.getElementById("preopen-signals");
@@ -99,6 +450,12 @@ function bindElements() {
 }
 
 function wireEvents() {
+  for (const button of els.languageOptions) {
+    button.addEventListener("click", () => {
+      setLanguage(button.dataset.langOption || DEFAULT_LANGUAGE);
+    });
+  }
+
   els.accountSelect.addEventListener("change", async (event) => {
     state.selectedAccountId = event.target.value;
     await loadAccountData();
@@ -124,9 +481,32 @@ function wireEvents() {
     await syncOrders();
   });
 
-  els.quoteForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await loadQuote();
+  if (els.quoteForm && els.loadQuote && els.quoteSymbol) {
+    els.quoteForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+    });
+
+    els.loadQuote.addEventListener("click", async (event) => {
+      if (!event.isTrusted) {
+        return;
+      }
+      await loadQuote();
+    });
+
+    els.quoteSymbol.addEventListener("keydown", async (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      if (!event.isTrusted) {
+        return;
+      }
+      event.preventDefault();
+      await loadQuote();
+    });
+  }
+
+  els.loadPreOpenBoard.addEventListener("click", async () => {
+    await loadPreOpenAssessment({ timeoutMs: 8500 });
   });
 
   els.strategyControlsForm.addEventListener("submit", async (event) => {
@@ -231,22 +611,248 @@ function wireEvents() {
   });
 }
 
+function readStoredLanguage() {
+  try {
+    const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+    return stored === "en" || stored === "zh" ? stored : DEFAULT_LANGUAGE;
+  } catch {
+    return DEFAULT_LANGUAGE;
+  }
+}
+
+function setLanguage(language) {
+  if (language !== "en" && language !== "zh") {
+    return;
+  }
+  if (state.language === language) {
+    return;
+  }
+  state.language = language;
+  try {
+    window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+  } catch {
+    // Ignore storage failures; the active page can still switch language.
+  }
+  renderAllForLanguage();
+  applyLanguage();
+}
+
+function renderAllForLanguage() {
+  renderAccountOptions();
+  renderReconciliationStatus();
+  renderMetrics();
+  renderHoldings();
+  renderPreOpenAssessment();
+  renderLatestPreOpenRun();
+  renderStrategyRuntime();
+  renderSpreads();
+  renderOrders();
+  renderPositions();
+  renderSelectedOrder();
+  renderQuote();
+  syncTicketOrderFields();
+  const selectedOrder = getSelectedOrder();
+  if (selectedOrder && !els.replaceOrderForm.classList.contains("hidden")) {
+    syncReplaceOrderFields(selectedOrder.order_type);
+  }
+}
+
+function startLanguageObserver() {
+  if (languageObserver || !document.body) {
+    return;
+  }
+  languageObserver = new MutationObserver(() => {
+    scheduleLanguageRefresh();
+  });
+  languageObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ["placeholder", "title"],
+  });
+}
+
+function scheduleLanguageRefresh() {
+  if (isApplyingLanguage || languageFrame !== null) {
+    return;
+  }
+  languageFrame = window.requestAnimationFrame(() => {
+    languageFrame = null;
+    applyLanguage();
+  });
+}
+
+function applyLanguage() {
+  if (!document.body || isApplyingLanguage) {
+    return;
+  }
+  isApplyingLanguage = true;
+  try {
+    document.documentElement.lang = state.language === "zh" ? "zh-CN" : "en";
+    updateLanguageControls();
+    translateTextNodes(document.body);
+    translateElementAttributes(document.body);
+  } finally {
+    isApplyingLanguage = false;
+  }
+}
+
+function updateLanguageControls() {
+  if (!els.languageOptions) {
+    return;
+  }
+  for (const button of els.languageOptions) {
+    const active = button.dataset.langOption === state.language;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+}
+
+function translateTextNodes(root) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const dictionary = TRANSLATIONS[state.language] || {};
+  let node = walker.nextNode();
+  while (node) {
+    let original = TEXT_NODE_ORIGINALS.get(node);
+    const current = node.nodeValue || "";
+    if (original === undefined) {
+      original = current;
+      TEXT_NODE_ORIGINALS.set(node, original);
+    } else if (state.language !== "en" && current !== original && current !== translatedTextForOriginal(original, dictionary)) {
+      original = current;
+      TEXT_NODE_ORIGINALS.set(node, original);
+    }
+
+    const trimmed = original.trim();
+    if (trimmed) {
+      if (state.language === "en") {
+        node.nodeValue = original;
+      } else {
+        const translated = translatedTextForOriginal(original, dictionary);
+        if (translated !== original) {
+          node.nodeValue = translated;
+        }
+      }
+    }
+    node = walker.nextNode();
+  }
+}
+
+function translatedTextForOriginal(original, dictionary) {
+  const trimmed = String(original || "").trim();
+  const translated = translateText(trimmed, dictionary);
+  if (!trimmed || !translated) {
+    return original;
+  }
+  return original.replace(trimmed, translated);
+}
+
+function translateText(text, dictionary) {
+  if (!text) {
+    return "";
+  }
+  if (dictionary[text]) {
+    return dictionary[text];
+  }
+  if (state.language !== "zh") {
+    return "";
+  }
+
+  const dynamicRules = [
+    [/^Refreshing ([A-Z0-9.]+) quote\.\.\.$/, "正在刷新 $1 行情..."],
+    [/^Quote refreshed successfully\.$/, "行情刷新成功。"],
+    [/^Quote refreshed (.+)\.$/, "行情已于 $1 刷新。"],
+    [/^Pre-open board refreshed (.+)\.$/, "盘前风险板已于 $1 刷新。"],
+    [/^Showing the latest stored pre-open board captured (.+)\.$/, "正在显示 $1 捕获的最新盘前风险板。"],
+    [/^Latest stored run for (.+)\.$/, "最新存储运行对应 $1。"],
+    [/^Select a broker account before loading the macro board\.$/, "加载宏观板前请先选择券商账户。"],
+    [/^No stored macro board is available yet\. Load it on demand when strategy work is done\.$/, "暂无存储的宏观板。策略工作完成后可按需加载。"],
+    [/^Syncing account (.+)\.\.\.$/, "正在同步账户 $1..."],
+    [/^Account (.+) synced\.$/, "账户 $1 已同步。"],
+    [/^Syncing orders for (.+)\.\.\.$/, "正在同步 $1 的订单..."],
+    [/^Orders for (.+) synced\.$/, "$1 的订单已同步。"],
+    [/^Saving bull put controls for (.+)\.\.\.$/, "正在保存 $1 的牛市看跌控制项..."],
+    [/^Bull put controls updated for (.+)\.$/, "$1 的牛市看跌控制项已更新。"],
+    [/^Running bull put scan for (.+)\.\.\.$/, "正在为 $1 运行牛市看跌扫描..."],
+    [/^Bull put scan opened (.+)\.$/, "牛市看跌扫描已开仓 $1。"],
+    [/^Running bull put review for (.+)\.\.\.$/, "正在为 $1 运行牛市看跌复盘..."],
+    [/^Submitting (.+) order for (.+)\.\.\.$/, "正在提交 $2 的 $1 订单..."],
+    [/^Order submitted for (.+)\.$/, "$1 订单已提交。"],
+    [/^Refreshing order (.+)\.\.\.$/, "正在刷新 $1 订单..."],
+    [/^Order (.+) refreshed\.$/, "$1 订单已刷新。"],
+    [/^Refreshing spread (.+)\.\.\.$/, "正在刷新 $1 价差..."],
+    [/^Spread (.+) refreshed\.$/, "$1 价差已刷新。"],
+    [/^Monitoring spread (.+)\.\.\.$/, "正在监控 $1 价差..."],
+    [/^Canceling order (.+)\.\.\.$/, "正在取消 $1 订单..."],
+    [/^Order (.+) canceled\.$/, "$1 订单已取消。"],
+    [/^Replacing order (.+)\.\.\.$/, "正在修改 $1 订单..."],
+    [/^Order (.+) updated\.$/, "$1 订单已更新。"],
+    [/^Saving (.+) entry for (.+)\.\.\.$/, "正在保存 $2 的 $1 记录..."],
+    [/^Journal entry saved for (.+)\.$/, "$1 的日志记录已保存。"],
+    [/^New entries will attach to (.+) on (.+)\.$/, "新记录将关联到 $2 上的 $1。"],
+    [/^New entries will attach (.+) for (.+)\.$/, "新记录将为 $2 关联 $1。"],
+    [/^Last success (.+)$/, "最近成功 $1"],
+    [/^Last attempt (.+)$/, "最近尝试 $1"],
+    [/^Updated (.+)$/, "更新于 $1"],
+    [/^Attempted (.+)$/, "尝试于 $1"],
+    [/^Started (.+)$/, "开始于 $1"],
+    [/^Session (.+)$/, "交易日 $1"],
+    [/^Latest snapshot (.+)$/, "最新快照 $1"],
+    [/^(.+) profitable \/ (.+) losing$/, "$1 个盈利 / $2 个亏损"],
+    [/^(.+) open \/ (.+) exit pending$/, "$1 个打开 / $2 个平仓待处理"],
+    [/^(.+) min to 09:30 ET regular open\.$/, "距离美东 09:30 正常开盘 $1 分钟。"],
+  ];
+
+  for (const [pattern, replacement] of dynamicRules) {
+    if (pattern.test(text)) {
+      return text.replace(pattern, replacement);
+    }
+  }
+
+  return "";
+}
+
+function translateElementAttributes(root) {
+  const dictionary = TRANSLATIONS[state.language] || {};
+  const elements = root.querySelectorAll("[placeholder], [title]");
+  for (const element of elements) {
+    let originals = ATTRIBUTE_ORIGINALS.get(element);
+    if (!originals) {
+      originals = {};
+      ATTRIBUTE_ORIGINALS.set(element, originals);
+    }
+
+    for (const attribute of ["placeholder", "title"]) {
+      if (!element.hasAttribute(attribute)) {
+        continue;
+      }
+      if (!Object.prototype.hasOwnProperty.call(originals, attribute)) {
+        originals[attribute] = element.getAttribute(attribute) || "";
+      }
+      let original = originals[attribute];
+      const current = element.getAttribute(attribute) || "";
+      const translated = dictionary[original] || original;
+      if (state.language !== "en" && current !== original && current !== translated) {
+        original = current;
+        originals[attribute] = original;
+      }
+      if (state.language === "en") {
+        element.setAttribute(attribute, original);
+      } else {
+        element.setAttribute(attribute, dictionary[original] || original);
+      }
+    }
+  }
+}
+
 async function loadDashboard() {
   setStatus("Loading dashboard...", "warning");
   try {
-    const [watchlists, brokerStatus] = await Promise.all([
-      fetchJson("/watchlists"),
-      fetchJson("/brokers/longbridge/configuration"),
-    ]);
-
-    state.watchlists = watchlists;
-    state.brokerStatus = brokerStatus;
     await refreshAccounts();
-    renderWatchlists();
-    renderBrokerStatus();
     await loadAccountData();
-    loadMarketOverlayPanels();
-    setStatus("Dashboard updated. Market overlays are refreshing in the background.", "success");
+    prepareMarketOverlayPanels();
+    setStatus("Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.", "success");
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load dashboard.", "error");
@@ -263,9 +869,12 @@ async function loadAccountData() {
     state.preOpenRuns = [];
     state.latestSnapshot = null;
     state.selectedOrderId = "";
+    state.preOpenAssessment = null;
+    state.preOpenStatus = buildOverlayStatus("idle", "Select a broker account to load the macro board on demand.");
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderSpreads();
@@ -294,6 +903,7 @@ async function loadAccountData() {
     state.journals = journals;
     state.preOpenRuns = preOpenRuns;
     state.latestSnapshot = latestSnapshot;
+    seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
 
     if (!orders.some((order) => order.id === state.selectedOrderId)) {
       state.selectedOrderId = orders[0]?.id || "";
@@ -302,6 +912,7 @@ async function loadAccountData() {
     renderReconciliationStatus();
     renderMetrics();
     renderHoldings();
+    renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
     renderSpreads();
@@ -316,12 +927,24 @@ async function loadAccountData() {
   }
 }
 
-function loadMarketOverlayPanels() {
-  void loadQuote({ timeoutMs: 5000 });
-  void loadPreOpenAssessment({ timeoutMs: 6000 });
+function prepareMarketOverlayPanels() {
+  if (els.quoteCard && !state.quote) {
+    state.quoteStatus = buildOverlayStatus("idle", "Load a quote manually to keep the dashboard fast.");
+    renderQuote();
+  }
+  if (!state.preOpenAssessment) {
+    state.preOpenStatus = buildOverlayStatus(
+      "idle",
+      "Macro board is available on demand so option strategy requests stay first."
+    );
+    renderPreOpenAssessment();
+  }
 }
 
 async function loadQuote(options = {}) {
+  if (!els.quoteSymbol || !els.quoteCard) {
+    return;
+  }
   const { timeoutMs = 8000 } = options;
   const symbol = els.quoteSymbol.value.trim().toUpperCase();
   if (!symbol) {
@@ -362,16 +985,22 @@ async function loadQuote(options = {}) {
 
 async function loadPreOpenAssessment(options = {}) {
   const { timeoutMs = 10000 } = options;
+  if (!state.selectedAccountId) {
+    state.preOpenStatus = buildOverlayStatus("idle", "Select a broker account before loading the macro board.");
+    renderPreOpenAssessment();
+    return;
+  }
   state.preOpenStatus = buildOverlayStatus("loading", "Refreshing pre-open board...");
   renderPreOpenAssessment();
 
   try {
-    state.preOpenAssessment = await fetchJson("/strategies/pre-open-risk", { timeoutMs });
-    state.preOpenStatus = buildOverlayStatus(
-      "live",
-      overlayLiveDetail("Pre-open board", state.preOpenAssessment.analyzed_at)
+    const params = new URLSearchParams();
+    params.set("external_account_id", state.selectedAccountId);
+    const assessment = await fetchJson(
+      `/strategies/pre-open-risk?${params.toString()}`,
+      { timeoutMs }
     );
-    renderPreOpenAssessment();
+    applyPreOpenAssessmentResponse(assessment);
   } catch (error) {
     console.error(error);
     state.preOpenStatus = classifyOverlayFailure(error, {
@@ -381,6 +1010,61 @@ async function loadPreOpenAssessment(options = {}) {
     });
     renderPreOpenAssessment();
   }
+}
+
+function seedPreOpenAssessmentFromLatestRun({ clearWhenMissing = false } = {}) {
+  const run = Array.isArray(state.preOpenRuns) && state.preOpenRuns.length ? state.preOpenRuns[0] : null;
+  if (!run?.assessment) {
+    if (clearWhenMissing) {
+      state.preOpenAssessment = null;
+      if (state.preOpenStatus.kind !== "loading") {
+        state.preOpenStatus = buildOverlayStatus(
+          "idle",
+          "No stored macro board is available yet. Load it on demand when strategy work is done."
+        );
+      }
+    }
+    return false;
+  }
+
+  state.preOpenAssessment = run.assessment;
+  if (state.preOpenStatus.kind !== "loading") {
+    state.preOpenStatus = buildOverlayStatus(
+      "stale",
+      run.assessment.freshness_detail || `Showing the latest stored pre-open board captured ${formatDateTime(run.assessment.analyzed_at)}.`,
+      run.assessment.stale_reason || `Latest stored run for ${formatSessionDate(run.target_session_date)}.`
+    );
+  }
+  return true;
+}
+
+function applyPreOpenAssessmentResponse(assessment) {
+  state.preOpenAssessment = assessment;
+  if (assessment?.freshness_status === "stale") {
+    state.preOpenStatus = buildOverlayStatus(
+      "stale",
+      assessment.freshness_detail || buildStaleOverlayDetail("pre-open board", "circuit_open", assessment.analyzed_at),
+      assessment.stale_reason || ""
+    );
+  } else if (assessment?.freshness_status === "partial") {
+    state.preOpenStatus = buildOverlayStatus(
+      "partial",
+      assessment.freshness_detail || "Live board loaded with partial proxy coverage.",
+      assessment.stale_reason || ""
+    );
+  } else if (assessment?.freshness_status === "error") {
+    state.preOpenStatus = buildOverlayStatus(
+      "error",
+      assessment.freshness_detail || "Live broker data is unavailable for the pre-open board.",
+      assessment.stale_reason || ""
+    );
+  } else {
+    state.preOpenStatus = buildOverlayStatus(
+      "live",
+      assessment?.freshness_detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at)
+    );
+  }
+  renderPreOpenAssessment();
 }
 
 async function syncAccount() {
@@ -862,6 +1546,10 @@ function renderHoldings() {
     )
     .join("");
 
+  if (!els.holdingsFocus) {
+    return;
+  }
+
   if (positions.length === 0) {
     els.holdingsFocus.innerHTML = '<div class="holding-empty">No positions in latest snapshot.</div>';
     return;
@@ -902,6 +1590,9 @@ function renderHoldings() {
 }
 
 function renderBrokerStatus() {
+  if (!els.brokerStatus) {
+    return;
+  }
   const config = state.brokerStatus;
   if (!config) {
     els.brokerStatus.innerHTML = "";
@@ -928,6 +1619,9 @@ function renderBrokerStatus() {
 }
 
 function renderWatchlists() {
+  if (!els.watchlistsBody) {
+    return;
+  }
   if (state.watchlists.length === 0) {
     els.watchlistsBody.innerHTML = '<div class="watchlist-block"><div class="watchlist-item">No watchlists found.</div></div>';
     return;
@@ -1254,6 +1948,9 @@ function renderPositions() {
 }
 
 function renderQuote() {
+  if (!els.quoteCard || !els.quoteSymbol) {
+    return;
+  }
   const quote = state.quote;
   const overlay = state.quoteStatus;
   const symbol = quote?.symbol || els.quoteSymbol.value.trim().toUpperCase();
@@ -2739,7 +3436,7 @@ function overlayStatusTone(kind) {
   if (kind === "live") {
     return "success";
   }
-  if (kind === "loading" || kind === "timed_out" || kind === "stale") {
+  if (kind === "loading" || kind === "timed_out" || kind === "stale" || kind === "partial") {
     return "warning";
   }
   if (kind === "circuit_open" || kind === "error") {
@@ -2763,6 +3460,9 @@ function overlayStatusLabel(kind) {
   }
   if (kind === "stale") {
     return "Stale";
+  }
+  if (kind === "partial") {
+    return "Partial";
   }
   if (kind === "error") {
     return "Unavailable";

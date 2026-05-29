@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+from decimal import Decimal
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -7,6 +10,8 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeIntegrationError,
 )
 from stocks_tool.core.config import Settings
+from stocks_tool.domain.enums import ExecutionMode
+from stocks_tool.domain.models import SecurityQuoteSnapshot
 
 
 def build_adapter(**overrides) -> LongbridgeBrokerAdapter:
@@ -56,4 +61,33 @@ def test_run_sdk_action_allows_non_network_errors_without_circuit() -> None:
         )
 
     assert adapter._run_sdk_action("load quote for 'EWY.US'", lambda: "ok") == "ok"
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_get_quote_uses_recent_cache_after_transient_failure() -> None:
+    adapter = build_adapter()
+    cached_quote = SecurityQuoteSnapshot(
+        symbol="SPY.US",
+        last_done=Decimal("600"),
+        prev_close=Decimal("598"),
+        open=Decimal("599"),
+        high=Decimal("601"),
+        low=Decimal("597"),
+        timestamp=datetime(2026, 5, 26, 14, 0, tzinfo=timezone.utc),
+        volume=1_000_000,
+        turnover=Decimal("600000000"),
+        trade_status="Normal",
+    )
+    adapter._run_sdk_action = Mock(
+        side_effect=[
+            cached_quote,
+            LongbridgeIntegrationError("Longbridge timed out while trying to load quote for 'SPY.US' after 6s."),
+        ]
+    )
+
+    first = adapter.get_quote("SPY.US", ExecutionMode.PAPER)
+    second = adapter.get_quote("SPY.US", ExecutionMode.PAPER)
+
+    assert first == cached_quote
+    assert second == cached_quote
     adapter._executor.shutdown(wait=False, cancel_futures=True)

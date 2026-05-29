@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from sqlalchemy.orm import sessionmaker
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.adapters.brokers.longbridge import (
+    LongbridgeBrokerAdapter,
+    LongbridgeIntegrationError,
+)
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
@@ -57,6 +62,12 @@ MONITORABLE_SPREAD_STATUSES = (
 )
 
 
+@dataclass
+class AutomaticTaskBackoffState:
+    consecutive_failures: int = 0
+    next_attempt_at: datetime | None = None
+
+
 class ReconciliationCoordinator:
     def __init__(
         self,
@@ -68,6 +79,7 @@ class ReconciliationCoordinator:
         self.settings = settings
         self.session_factory = session_factory
         self.longbridge_adapter = longbridge_adapter
+        self._automatic_task_backoffs: dict[tuple[str, str], AutomaticTaskBackoffState] = {}
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -124,16 +136,16 @@ class ReconciliationCoordinator:
                     now,
                 )
                 if account_due:
-                    try:
-                        account_service.sync_account(
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="account-sync",
+                        task_label="account reconciliation",
+                        now=now,
+                        callback=lambda: account_service.sync_account(
                             external_account_id=broker_account.external_account_id,
                             mode=ExecutionMode.PAPER,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Automatic account reconciliation failed for %s",
-                            broker_account.external_account_id,
-                        )
+                        ),
+                    )
 
                 account_orders = orders.list_orders(external_account_id=broker_account.external_account_id)
                 has_working_orders = any(order.status in WORKING_ORDER_STATUSES for order in account_orders)
@@ -148,86 +160,249 @@ class ReconciliationCoordinator:
                     now,
                 )
                 if orders_due:
-                    try:
-                        order_service.sync_today_orders(
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="orders-sync",
+                        task_label="order reconciliation",
+                        now=now,
+                        callback=lambda: order_service.sync_today_orders(
                             external_account_id=broker_account.external_account_id,
                             mode=ExecutionMode.PAPER,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Automatic order reconciliation failed for %s",
-                            broker_account.external_account_id,
-                        )
+                        ),
+                    )
 
                 if not self.settings.bull_put_strategy.enabled:
                     continue
-                try:
-                    strategy_service.capture_pre_open_run(
+                if self.settings.bull_put_strategy.auto_monitor_enabled:
+                    self._monitor_due_spreads(
+                        external_account_id=broker_account.external_account_id,
+                        spreads=spreads,
+                        strategy_service=strategy_service,
+                        now=now,
+                    )
+                if self.settings.bull_put_strategy.auto_scan_enabled:
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="bull-put-scan",
+                        task_label="bull put entry scan",
+                        now=now,
+                        callback=lambda: strategy_service.run_entry_scan(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                            as_of=now,
+                        ),
+                    )
+                if self.settings.bull_put_strategy.auto_review_enabled:
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="bull-put-review",
+                        task_label="bull put review",
+                        now=now,
+                        callback=lambda: strategy_service.run_review(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                            as_of=now,
+                        ),
+                    )
+                self._run_account_task(
+                    external_account_id=broker_account.external_account_id,
+                    task_key="pre-open-capture",
+                    task_label="pre-open assessment capture",
+                    now=now,
+                    callback=lambda: strategy_service.capture_pre_open_run(
                         external_account_id=broker_account.external_account_id,
                         as_of=now,
                         automatic=True,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Automatic pre-open assessment capture failed for %s",
-                        broker_account.external_account_id,
-                    )
-                try:
-                    strategy_service.review_pre_open_run(
+                    ),
+                )
+                self._run_account_task(
+                    external_account_id=broker_account.external_account_id,
+                    task_key="pre-open-review",
+                    task_label="pre-open review",
+                    now=now,
+                    callback=lambda: strategy_service.review_pre_open_run(
                         external_account_id=broker_account.external_account_id,
                         as_of=now,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Automatic pre-open review failed for %s",
-                        broker_account.external_account_id,
-                    )
-                if self.settings.bull_put_strategy.auto_scan_enabled:
-                    try:
-                        strategy_service.run_entry_scan(
-                            external_account_id=broker_account.external_account_id,
-                            mode=ExecutionMode.PAPER,
-                            as_of=now,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Automatic bull put entry scan failed for %s",
-                            broker_account.external_account_id,
-                        )
-                if self.settings.bull_put_strategy.auto_review_enabled:
-                    try:
-                        strategy_service.run_review(
-                            external_account_id=broker_account.external_account_id,
-                            mode=ExecutionMode.PAPER,
-                            as_of=now,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Automatic bull put review failed for %s",
-                            broker_account.external_account_id,
-                        )
-                if not self.settings.bull_put_strategy.auto_monitor_enabled:
-                    continue
+                    ),
+                )
 
-                for status in MONITORABLE_SPREAD_STATUSES:
-                    account_spreads = spreads.list_spreads(
-                        external_account_id=broker_account.external_account_id,
-                        status=status,
+    def _run_account_task(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+        task_label: str,
+        now: datetime,
+        callback: Callable[[], object],
+    ) -> None:
+        if self._is_task_backoff_active(
+            external_account_id=external_account_id,
+            task_key=task_key,
+            now=now,
+        ):
+            return
+        try:
+            callback()
+        except Exception as exc:
+            if self._should_backoff_for_failure(exc):
+                delay_seconds = self._record_task_backoff(
+                    external_account_id=external_account_id,
+                    task_key=task_key,
+                    now=now,
+                )
+                logger.warning(
+                    "Automatic %s failed for %s; backing off for %ss. %s",
+                    task_label,
+                    external_account_id,
+                    delay_seconds,
+                    exc,
+                )
+                return
+            self._clear_task_backoff(
+                external_account_id=external_account_id,
+                task_key=task_key,
+            )
+            logger.exception(
+                "Automatic %s failed for %s",
+                task_label,
+                external_account_id,
+            )
+            return
+        self._clear_task_backoff(
+            external_account_id=external_account_id,
+            task_key=task_key,
+        )
+
+    def _monitor_due_spreads(
+        self,
+        *,
+        external_account_id: str,
+        spreads: SQLAlchemyBullPutSpreadRepository,
+        strategy_service: BullPutStrategyService,
+        now: datetime,
+    ) -> None:
+        task_key = "bull-put-monitor"
+        if self._is_task_backoff_active(
+            external_account_id=external_account_id,
+            task_key=task_key,
+            now=now,
+        ):
+            return
+
+        executed_monitor = False
+        for status in MONITORABLE_SPREAD_STATUSES:
+            account_spreads = spreads.list_spreads(
+                external_account_id=external_account_id,
+                status=status,
+            )
+            for spread in account_spreads:
+                if not self._is_due(
+                    spread.last_synced_at,
+                    self.settings.bull_put_strategy.monitor_interval_seconds,
+                    now,
+                ):
+                    continue
+                try:
+                    strategy_service.monitor_spread(spread.id, as_of=now)
+                except Exception as exc:
+                    if self._should_backoff_for_failure(exc):
+                        delay_seconds = self._record_task_backoff(
+                            external_account_id=external_account_id,
+                            task_key=task_key,
+                            now=now,
+                        )
+                        logger.warning(
+                            "Automatic bull put monitoring failed for %s on spread %s; backing off for %ss. %s",
+                            external_account_id,
+                            spread.id,
+                            delay_seconds,
+                            exc,
+                        )
+                        return
+                    self._clear_task_backoff(
+                        external_account_id=external_account_id,
+                        task_key=task_key,
                     )
-                    for spread in account_spreads:
-                        if not self._is_due(
-                            spread.last_synced_at,
-                            self.settings.bull_put_strategy.monitor_interval_seconds,
-                            now,
-                        ):
-                            continue
-                        try:
-                            strategy_service.monitor_spread(spread.id, as_of=now)
-                        except Exception:
-                            logger.exception(
-                                "Automatic bull put monitoring failed for spread %s",
-                                spread.id,
-                            )
+                    logger.exception(
+                        "Automatic bull put monitoring failed for spread %s",
+                        spread.id,
+                    )
+                    continue
+                executed_monitor = True
+        if executed_monitor:
+            self._clear_task_backoff(
+                external_account_id=external_account_id,
+                task_key=task_key,
+            )
+
+    def _is_task_backoff_active(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+        now: datetime,
+    ) -> bool:
+        state = self._automatic_task_backoffs.get((external_account_id, task_key))
+        if state is None or state.next_attempt_at is None:
+            return False
+        return now < state.next_attempt_at
+
+    def _record_task_backoff(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+        now: datetime,
+    ) -> int:
+        key = (external_account_id, task_key)
+        state = self._automatic_task_backoffs.get(key, AutomaticTaskBackoffState())
+        state.consecutive_failures += 1
+        delay_seconds = self._task_backoff_delay_seconds(state.consecutive_failures)
+        state.next_attempt_at = now + timedelta(seconds=delay_seconds)
+        self._automatic_task_backoffs[key] = state
+        return delay_seconds
+
+    def _clear_task_backoff(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+    ) -> None:
+        self._automatic_task_backoffs.pop((external_account_id, task_key), None)
+
+    def _task_backoff_delay_seconds(self, consecutive_failures: int) -> int:
+        base_seconds = max(
+            self.settings.reconciliation_poll_interval_seconds,
+            self.settings.longbridge_circuit_breaker_seconds,
+        )
+        max_seconds = max(
+            base_seconds,
+            self.settings.reconciliation_account_interval_seconds,
+            self.settings.reconciliation_orders_interval_seconds,
+            self.settings.reconciliation_working_orders_interval_seconds,
+            self.settings.bull_put_strategy.monitor_interval_seconds,
+        )
+        return min(max_seconds, base_seconds * (2 ** max(0, consecutive_failures - 1)))
+
+    @staticmethod
+    def _should_backoff_for_failure(exc: Exception) -> bool:
+        if not isinstance(exc, LongbridgeIntegrationError):
+            return False
+        message = str(exc).lower()
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "skipping attempt",
+            "connectivity failed",
+            "client error (connect)",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "dns",
+            "socket/token",
+            "network",
+        )
+        return any(marker in message for marker in transient_markers)
 
     @staticmethod
     def _is_due(

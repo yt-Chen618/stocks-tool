@@ -8,18 +8,20 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
+    assert 'data-lang-option="zh"' in response.text
+    assert 'data-lang-option="en"' in response.text
     assert "Auto Reconciliation" in response.text
     assert "Account Sync" in response.text
     assert "Orders Sync" in response.text
+    assert "Strategy Center" in response.text
     assert "Holdings Overview" in response.text
-    assert "Current Holdings" in response.text
     assert "Pre-open Risk Board" in response.text
+    assert "Load Macro Board" in response.text
     assert "Risk Proxies" in response.text
     assert "QQQ / SPY Put Check" in response.text
     assert "Option Chain Analysis" in response.text
     assert "Opening Follow-through" in response.text
-    assert "Longbridge Status" in response.text
-    assert "Quick Quote" in response.text
+    assert "Execution Desk" in response.text
     assert "Order Ticket" in response.text
     assert "Selected Order" in response.text
     assert "Execution Summary" in response.text
@@ -33,7 +35,12 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Run Review" in response.text
     assert "Latest Review" in response.text
     assert "Bull Put Monitor" in response.text
-    assert "Bull Put Spreads" in response.text
     assert "Latest Exit Action" in response.text
     assert "Orders" in response.text
     assert "Positions" in response.text
+    assert response.text.index("Bull Put Strategy") < response.text.index("Pre-open Risk Board")
+    assert "Watchlists" not in response.text
+    assert "Longbridge Status" not in response.text
+    assert "Quick Quote" not in response.text
+    assert '/static/app.css?v=' in response.text
+    assert '/static/app.js?v=' in response.text

@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, call
 
 import stocks_tool.application.services.reconciliation as reconciliation_module
+from stocks_tool.adapters.brokers.longbridge import LongbridgeIntegrationError
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
@@ -340,9 +341,31 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     strategy_service.run_entry_scan.assert_called_once()
     strategy_service.run_review.assert_called_once()
     scan_call = strategy_service.run_entry_scan.call_args
-    assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
     strategy_service.monitor_spread.assert_called_once()
     monitor_call = strategy_service.monitor_spread.call_args
+    assert strategy_service.method_calls[:5] == [
+        call.monitor_spread("spread-1", as_of=monitor_call.kwargs["as_of"]),
+        call.run_entry_scan(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            as_of=scan_call.kwargs["as_of"],
+        ),
+        call.run_review(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            as_of=scan_call.kwargs["as_of"],
+        ),
+        call.capture_pre_open_run(
+            external_account_id="LBPT10087357",
+            as_of=scan_call.kwargs["as_of"],
+            automatic=True,
+        ),
+        call.review_pre_open_run(
+            external_account_id="LBPT10087357",
+            as_of=scan_call.kwargs["as_of"],
+        ),
+    ]
+    assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
     assert monitor_call.args[0] == "spread-1"
     assert monitor_call.kwargs["as_of"] is not None
 
@@ -431,3 +454,172 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
     strategy_service.run_entry_scan.assert_called_once()
     strategy_service.run_review.assert_called_once()
     strategy_service.monitor_spread.assert_not_called()
+
+
+def test_reconciliation_coordinator_backs_off_transient_longbridge_strategy_failures(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    account_snapshots = Mock()
+    orders = Mock()
+    executions = Mock()
+    trade_plans = Mock()
+    spreads = Mock()
+    pre_open_runs = Mock()
+    strategy_service = Mock()
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders.list_orders.return_value = []
+    spreads.list_spreads.return_value = []
+    strategy_service.capture_pre_open_run.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quote for 'SPY.US' after 6s."
+    )
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: account_snapshots,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: executions,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: trade_plans,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: spreads,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: pre_open_runs,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BullPutStrategyService",
+        lambda **kwargs: strategy_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    assert strategy_service.capture_pre_open_run.call_count == 1
+    strategy_service.review_pre_open_run.assert_called()
+    assert strategy_service.review_pre_open_run.call_count == 2
+
+
+def test_reconciliation_coordinator_backs_off_remaining_spread_monitors_after_transient_failure(
+    monkeypatch,
+) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    account_snapshots = Mock()
+    orders = Mock()
+    executions = Mock()
+    trade_plans = Mock()
+    spreads = Mock()
+    pre_open_runs = Mock()
+    strategy_service = Mock()
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders.list_orders.return_value = []
+    spreads.list_spreads.return_value = [
+        build_open_spread(last_synced_at=None),
+        build_open_spread(last_synced_at=None).model_copy(update={"id": "spread-2"}),
+    ]
+    strategy_service.monitor_spread.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    )
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: account_snapshots,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: executions,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: trade_plans,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: spreads,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: pre_open_runs,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BullPutStrategyService",
+        lambda **kwargs: strategy_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    assert strategy_service.monitor_spread.call_count == 1

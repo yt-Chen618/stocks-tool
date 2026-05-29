@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
+import logging
 import threading
 import time
 from typing import Any
@@ -35,6 +36,8 @@ from stocks_tool.domain.models import (
 )
 from stocks_tool.ports.broker import BrokerAdapter
 
+logger = logging.getLogger(__name__)
+
 
 class LongbridgeIntegrationError(RuntimeError):
     pass
@@ -49,6 +52,8 @@ class LongbridgeConfigurationError(LongbridgeIntegrationError):
 
 
 class LongbridgeBrokerAdapter(BrokerAdapter):
+    _QUOTE_CACHE_TTL_SECONDS = 60
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._executor = ThreadPoolExecutor(
@@ -58,6 +63,8 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         self._circuit_lock = threading.Lock()
         self._circuit_open_until = 0.0
         self._circuit_reason = ""
+        self._quote_cache_lock = threading.Lock()
+        self._quote_cache: dict[tuple[str, str], tuple[float, SecurityQuoteSnapshot]] = {}
 
     @property
     def name(self) -> BrokerName:
@@ -119,7 +126,56 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 raise LongbridgeIntegrationError(f"No quote returned for symbol '{symbol}'.")
             return self._map_security_quote(quotes[0])
 
-        return self._run_sdk_action(f"load quote for '{symbol}'", _load_quote)
+        try:
+            quote = self._run_sdk_action(f"load quote for '{symbol}'", _load_quote)
+        except LongbridgeIntegrationError as exc:
+            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode)
+            if cached_quote is not None:
+                logger.warning(
+                    "Using cached Longbridge quote for %s after transient failure. %s",
+                    symbol,
+                    exc,
+                )
+                return cached_quote
+            raise
+        self._store_cached_quote(symbol=symbol, mode=mode, quote=quote)
+        return quote
+
+    def get_quotes(
+        self,
+        symbols: list[str],
+        mode: ExecutionMode,
+    ) -> dict[str, SecurityQuoteSnapshot]:
+        normalized_symbols = [symbol for symbol in symbols if symbol]
+        if not normalized_symbols:
+            return {}
+
+        def _load_quotes() -> dict[str, SecurityQuoteSnapshot]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            quote_context = sdk["QuoteContext"](config)
+            quotes = quote_context.quote(normalized_symbols)
+            return {
+                mapped.symbol: mapped
+                for mapped in (self._map_security_quote(quote) for quote in quotes)
+            }
+
+        joined_symbols = ", ".join(normalized_symbols)
+        try:
+            quotes = self._run_sdk_action(f"load quotes for {joined_symbols}", _load_quotes)
+        except LongbridgeIntegrationError as exc:
+            cached_quotes = self._get_cached_quotes(symbols=normalized_symbols, mode=mode)
+            if cached_quotes:
+                logger.warning(
+                    "Using %s cached Longbridge quotes after transient batch failure for %s. %s",
+                    len(cached_quotes),
+                    joined_symbols,
+                    exc,
+                )
+                return cached_quotes
+            raise
+        self._store_cached_quotes(mode=mode, quotes=quotes)
+        return quotes
 
     def list_option_expiry_dates(
         self,
@@ -556,6 +612,58 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             "network",
         )
         return any(marker in message for marker in network_markers)
+
+    def _get_cached_quote(
+        self,
+        *,
+        symbol: str,
+        mode: ExecutionMode,
+    ) -> SecurityQuoteSnapshot | None:
+        with self._quote_cache_lock:
+            cached = self._quote_cache.get((mode.value, symbol))
+            if cached is None:
+                return None
+            cached_at, quote = cached
+            if time.monotonic() - cached_at > self._QUOTE_CACHE_TTL_SECONDS:
+                self._quote_cache.pop((mode.value, symbol), None)
+                return None
+            return quote
+
+    def _get_cached_quotes(
+        self,
+        *,
+        symbols: list[str],
+        mode: ExecutionMode,
+    ) -> dict[str, SecurityQuoteSnapshot]:
+        cached_quotes: dict[str, SecurityQuoteSnapshot] = {}
+        for symbol in symbols:
+            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode)
+            if cached_quote is not None:
+                cached_quotes[symbol] = cached_quote
+        return cached_quotes
+
+    def _store_cached_quote(
+        self,
+        *,
+        symbol: str,
+        mode: ExecutionMode,
+        quote: SecurityQuoteSnapshot,
+    ) -> None:
+        with self._quote_cache_lock:
+            self._quote_cache[(mode.value, symbol)] = (time.monotonic(), quote)
+
+    def _store_cached_quotes(
+        self,
+        *,
+        mode: ExecutionMode,
+        quotes: dict[str, SecurityQuoteSnapshot],
+    ) -> None:
+        if not quotes:
+            return
+        with self._quote_cache_lock:
+            cached_at = time.monotonic()
+            for symbol, quote in quotes.items():
+                self._quote_cache[(mode.value, symbol)] = (cached_at, quote)
 
     def _pick_account_balance(
         self,

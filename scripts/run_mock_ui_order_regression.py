@@ -161,8 +161,8 @@ def main() -> None:
         try:
             dashboard = client.get("/")
             dashboard.raise_for_status()
+            assert "Strategy Center" in dashboard.text
             assert "Holdings Overview" in dashboard.text
-            assert "Current Holdings" in dashboard.text
             assert "Pre-open Risk Board" in dashboard.text
             assert "Risk Proxies" in dashboard.text
             assert "QQQ / SPY Put Check" in dashboard.text
@@ -171,12 +171,15 @@ def main() -> None:
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
             assert "Bull Put Monitor" in dashboard.text
-            assert "Bull Put Spreads" in dashboard.text
+            assert "Execution Desk" in dashboard.text
             assert "Order Ticket" in dashboard.text
             assert "Selected Order" in dashboard.text
             assert "Execution Summary" in dashboard.text
             assert "Review Workflow" in dashboard.text
             assert "Orders" in dashboard.text
+            assert "Watchlists" not in dashboard.text
+            assert "Longbridge Status" not in dashboard.text
+            assert "Quick Quote" not in dashboard.text
 
             app_js = client.get("/static/app.js")
             app_js.raise_for_status()
@@ -191,7 +194,8 @@ def main() -> None:
                 "preopen-summary-strip",
                 "preopen-assessment-card",
                 "preopen-run-review",
-                "loadMarketOverlayPanels()",
+                "LANGUAGE_STORAGE_KEY",
+                "prepareMarketOverlayPanels()",
                 "renderPreOpenAssessment(",
                 "renderLatestPreOpenRun()",
                 "strategy-controls-form",

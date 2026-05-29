@@ -168,7 +168,10 @@ def test_pre_open_risk_route_returns_assessment() -> None:
 
     client = with_strategy_service(service)
     try:
-        response = client.get("/strategies/pre-open-risk")
+        response = client.get(
+            "/strategies/pre-open-risk",
+            params={"external_account_id": "LBPT10087357"},
+        )
     finally:
         clear_overrides()
 
@@ -179,6 +182,8 @@ def test_pre_open_risk_route_returns_assessment() -> None:
     assert body["trade_action"] == "wait_for_open_confirmation"
     assert body["signals"][0]["symbol"] == "QQQ.US"
     assert body["chain_analyses"][0]["front_expiration"]["atm_put_symbol"] == "QQQ260529P710000.US"
+    request = service.get_pre_open_downside_assessment.call_args.kwargs
+    assert request["external_account_id"] == "LBPT10087357"
 
 
 def test_capture_pre_open_run_route_returns_run_result() -> None:

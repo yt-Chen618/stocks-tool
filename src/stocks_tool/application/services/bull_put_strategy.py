@@ -7,7 +7,12 @@ from decimal import Decimal
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.adapters.brokers.longbridge import (
+    LongbridgeBrokerAdapter,
+    LongbridgeConfigurationError,
+    LongbridgeDependencyError,
+    LongbridgeIntegrationError,
+)
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
@@ -468,8 +473,35 @@ class BullPutStrategyService:
         self,
         *,
         as_of: datetime | None = None,
+        external_account_id: str | None = None,
+        allow_fallback: bool = True,
     ) -> PreOpenDownsideAssessment:
         evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        try:
+            return self._build_live_pre_open_downside_assessment(evaluated_at)
+        except LongbridgeIntegrationError as exc:
+            if isinstance(exc, (LongbridgeDependencyError, LongbridgeConfigurationError)):
+                raise
+            if not allow_fallback or not self._is_transient_longbridge_failure(exc):
+                raise
+            fallback_run = self._latest_pre_open_run(external_account_id=external_account_id)
+            if fallback_run is None:
+                return self._build_unavailable_pre_open_assessment(
+                    evaluated_at=evaluated_at,
+                    error=exc,
+                )
+            return self._build_stale_pre_open_assessment(
+                run=fallback_run,
+                error=exc,
+            )
+
+    def _build_live_pre_open_downside_assessment(
+        self,
+        evaluated_at: datetime,
+    ) -> PreOpenDownsideAssessment:
         if evaluated_at.tzinfo is None:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
 
@@ -488,43 +520,40 @@ class BullPutStrategyService:
             ("rates", "Rates Proxy", self.settings.bull_put_strategy.pre_open_proxy_rates_symbol),
         ]
 
-        signals: list[PreOpenProxySignal] = []
-        signal_by_key: dict[str, PreOpenProxySignal] = {}
-        for key, label, symbol in signal_specs:
-            quote = self.longbridge_adapter.get_quote(symbol=symbol, mode=ExecutionMode.PAPER)
-            signal = self._build_pre_open_signal(
-                key=key,
-                label=label,
-                quote=quote,
-                session=session,
-            )
-            signals.append(signal)
-            signal_by_key[key] = signal
+        signals, signal_by_key, missing_signals, proxy_errors = self._load_pre_open_proxy_signals(
+            signal_specs=signal_specs,
+            session=session,
+        )
+
+        if not signal_by_key:
+            if proxy_errors:
+                raise LongbridgeIntegrationError(proxy_errors[0])
+            raise LongbridgeIntegrationError("No pre-open proxy data could be loaded from Longbridge.")
 
         score = 0
         reasons: list[str] = []
-        spy_change = signal_by_key["spy"].change_pct
-        qqq_change = signal_by_key["qqq"].change_pct
-        semis_change = signal_by_key["semis"].change_pct
-        oil_change = signal_by_key["oil"].change_pct
-        rates_change = signal_by_key["rates"].change_pct
+        spy_change = signal_by_key.get("spy").change_pct if signal_by_key.get("spy") is not None else None
+        qqq_change = signal_by_key.get("qqq").change_pct if signal_by_key.get("qqq") is not None else None
+        semis_change = signal_by_key.get("semis").change_pct if signal_by_key.get("semis") is not None else None
+        oil_change = signal_by_key.get("oil").change_pct if signal_by_key.get("oil") is not None else None
+        rates_change = signal_by_key.get("rates").change_pct if signal_by_key.get("rates") is not None else None
 
-        if qqq_change <= Decimal("-0.60"):
+        if qqq_change is not None and qqq_change <= Decimal("-0.60"):
             score += 2
             reasons.append("QQQ is trading meaningfully below its reference level.")
-        if spy_change <= Decimal("-0.45"):
+        if spy_change is not None and spy_change <= Decimal("-0.45"):
             score += 1
             reasons.append("SPY is leaning lower before the regular session.")
-        if semis_change <= Decimal("-0.90"):
+        if semis_change is not None and semis_change <= Decimal("-0.90"):
             score += 2
             reasons.append("Semiconductor leadership is weakening faster than the broad market.")
-        if oil_change >= Decimal("1.25"):
+        if oil_change is not None and oil_change >= Decimal("1.25"):
             score += 1
             reasons.append("Oil proxy strength points to fresh inflation and geopolitical pressure.")
-        if rates_change <= Decimal("-0.60"):
+        if rates_change is not None and rates_change <= Decimal("-0.60"):
             score += 1
             reasons.append("Long-duration Treasuries are slipping, which implies higher yield pressure.")
-        if (qqq_change - spy_change) <= Decimal("-0.30"):
+        if qqq_change is not None and spy_change is not None and (qqq_change - spy_change) <= Decimal("-0.30"):
             score += 1
             reasons.append("QQQ is underperforming SPY, which tilts downside risk toward tech.")
 
@@ -543,9 +572,22 @@ class BullPutStrategyService:
 
         preferred_vehicle = None
         if score >= 3:
-            preferred_vehicle = "QQQ" if semis_change <= spy_change or qqq_change < spy_change else "SPY"
+            semis_underperforming = (
+                semis_change is not None
+                and spy_change is not None
+                and semis_change <= spy_change
+            )
+            if qqq_change is not None and (spy_change is None or semis_underperforming or qqq_change < spy_change):
+                preferred_vehicle = "QQQ"
+            elif spy_change is not None:
+                preferred_vehicle = "SPY"
         if not reasons:
             reasons.append("No broad bearish proxy cluster is present right now.")
+        if missing_signals:
+            reasons.append(
+                "Proxy data was unavailable for "
+                f"{', '.join(missing_signals)}, so cross-market confirmation is incomplete."
+            )
 
         trade_action, trade_action_detail = self._pre_open_trade_action(
             session=session,
@@ -561,16 +603,33 @@ class BullPutStrategyService:
             spy_change=spy_change,
             semis_change=semis_change,
         )
-        put_snapshots = self._build_directional_put_snapshots(
+        put_snapshots, missing_put_snapshots = self._build_directional_put_snapshots(
             evaluated_at=evaluated_at,
-            spy_signal=signal_by_key["spy"],
-            qqq_signal=signal_by_key["qqq"],
+            signals=[signal_by_key[key] for key in ("spy", "qqq") if key in signal_by_key],
         )
-        chain_analyses = self._build_option_chain_analyses(
+        chain_analyses, missing_chain_analyses = self._build_option_chain_analyses(
             evaluated_at=evaluated_at,
-            spy_signal=signal_by_key["spy"],
-            qqq_signal=signal_by_key["qqq"],
+            signals=[signal_by_key[key] for key in ("spy", "qqq") if key in signal_by_key],
         )
+        missing_overlay_layers: list[str] = []
+        if missing_put_snapshots:
+            missing_overlay_layers.append(
+                "Directional put snapshots unavailable for "
+                f"{', '.join(missing_put_snapshots)}."
+            )
+            reasons.append(
+                "Directional put snapshots were unavailable for "
+                f"{', '.join(missing_put_snapshots)}, so put-specific overlays are incomplete."
+            )
+        if missing_chain_analyses:
+            missing_overlay_layers.append(
+                "Option-chain analysis unavailable for "
+                f"{', '.join(missing_chain_analyses)}."
+            )
+            reasons.append(
+                "Option-chain analysis was unavailable for "
+                f"{', '.join(missing_chain_analyses)}, so volatility and liquidity overlays are incomplete."
+            )
         checkpoints = self._build_pre_open_checkpoints(
             evaluated_at=evaluated_at,
             session=session,
@@ -599,7 +658,72 @@ class BullPutStrategyService:
             signals=signals,
             put_snapshots=put_snapshots,
             chain_analyses=chain_analyses,
+            freshness_status="partial" if missing_signals or missing_overlay_layers else "live",
+            freshness_detail=(
+                "Live Longbridge proxy data loaded successfully."
+                if not missing_signals and not missing_overlay_layers
+                else (
+                    "Live board loaded with partial coverage. "
+                    + " ".join(
+                        part
+                        for part in [
+                            (
+                                "Missing signals: "
+                                f"{', '.join(missing_signals)}."
+                                if missing_signals
+                                else ""
+                            ),
+                            *missing_overlay_layers,
+                        ]
+                        if part
+                    )
+                )
+            ),
         )
+
+    def _load_pre_open_proxy_signals(
+        self,
+        *,
+        signal_specs: list[tuple[str, str, str]],
+        session: str,
+    ) -> tuple[
+        list[PreOpenProxySignal],
+        dict[str, PreOpenProxySignal],
+        list[str],
+        list[str],
+    ]:
+        signals: list[PreOpenProxySignal] = []
+        signal_by_key: dict[str, PreOpenProxySignal] = {}
+        missing_signals: list[str] = []
+        proxy_errors: list[str] = []
+        for key, label, symbol in signal_specs:
+            try:
+                quote = self.longbridge_adapter.get_quote(symbol, mode=ExecutionMode.PAPER)
+            except LongbridgeIntegrationError as exc:
+                missing_signals.append(label)
+                proxy_errors.append(str(exc))
+                logger.warning(
+                    "Pre-open proxy %s (%s) was unavailable; continuing with partial board when possible. %s",
+                    label,
+                    symbol,
+                    exc,
+                )
+                continue
+            signal = self._build_pre_open_signal(
+                key=key,
+                label=label,
+                quote=quote,
+                session=session,
+            )
+            signals.append(signal)
+            signal_by_key[key] = signal
+        return signals, signal_by_key, missing_signals, proxy_errors
+
+    def _default_strategy_symbol(self) -> str:
+        configured_symbols = self.settings.bull_put_strategy.symbols
+        if configured_symbols:
+            return configured_symbols[0]
+        return self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol
 
     def list_pre_open_runs(
         self,
@@ -635,7 +759,11 @@ class BullPutStrategyService:
                 fallback_run = existing[0] if existing else PreOpenAssessmentRun(
                     external_account_id=external_account_id,
                     target_session_date=self._target_session_date(evaluated_at),
-                    assessment=self.get_pre_open_downside_assessment(as_of=evaluated_at),
+                    assessment=self.get_pre_open_downside_assessment(
+                        as_of=evaluated_at,
+                        external_account_id=external_account_id,
+                        allow_fallback=False,
+                    ),
                 )
                 return PreOpenAssessmentCaptureResult(
                     run=fallback_run,
@@ -656,7 +784,11 @@ class BullPutStrategyService:
                 reason="Pre-open assessment already captured for the target session date.",
             )
 
-        assessment = self.get_pre_open_downside_assessment(as_of=evaluated_at)
+        assessment = self.get_pre_open_downside_assessment(
+            as_of=evaluated_at,
+            external_account_id=external_account_id,
+            allow_fallback=False,
+        )
         run = existing or PreOpenAssessmentRun(
             external_account_id=external_account_id,
             target_session_date=assessment.target_session_date,
@@ -679,7 +811,7 @@ class BullPutStrategyService:
             self._safe_create_journal_entry(
                 CreateJournalEntryRequest(
                     external_account_id=external_account_id,
-                    symbol=assessment.preferred_vehicle or self._first_strategy_symbol(),
+                    symbol=assessment.preferred_vehicle or self._default_strategy_symbol(),
                     entry_type=JournalEntryType.NOTE,
                     title=f"Pre-open downside assessment for {assessment.target_session_date.isoformat()}",
                     notes=self._pre_open_assessment_journal_notes(assessment),
@@ -756,7 +888,7 @@ class BullPutStrategyService:
             self._safe_create_journal_entry(
                 CreateJournalEntryRequest(
                     external_account_id=external_account_id,
-                    symbol=stored.assessment.preferred_vehicle or self._first_strategy_symbol(),
+                    symbol=stored.assessment.preferred_vehicle or self._default_strategy_symbol(),
                     entry_type=JournalEntryType.REVIEW,
                     title=f"Opening follow-through review for {stored.target_session_date.isoformat()}",
                     notes=stored.review_summary or "Opening follow-through review completed.",
@@ -1498,43 +1630,144 @@ class BullPutStrategyService:
                 return run
         return None
 
+    def _latest_pre_open_run(
+        self,
+        *,
+        external_account_id: str | None = None,
+    ) -> PreOpenAssessmentRun | None:
+        runs = self.pre_open_runs.list_runs(external_account_id=external_account_id, limit=1)
+        return runs[0] if runs else None
+
+    def _build_stale_pre_open_assessment(
+        self,
+        *,
+        run: PreOpenAssessmentRun,
+        error: LongbridgeIntegrationError,
+    ) -> PreOpenDownsideAssessment:
+        target_session = run.target_session_date.isoformat()
+        analyzed_at = run.assessment.analyzed_at.astimezone(self.new_york).strftime("%Y-%m-%d %H:%M ET")
+        return run.assessment.model_copy(
+            update={
+                "freshness_status": "stale",
+                "freshness_detail": (
+                    f"Showing the latest stored pre-open board for {target_session}. "
+                    f"Last successful board {analyzed_at}."
+                ),
+                "stale_reason": str(error),
+                "source_run_id": run.id,
+            }
+        )
+
+    def _build_unavailable_pre_open_assessment(
+        self,
+        *,
+        evaluated_at: datetime,
+        error: LongbridgeIntegrationError,
+    ) -> PreOpenDownsideAssessment:
+        session = self._market_session_label(evaluated_at)
+        target_session_date = self._target_session_date(evaluated_at, session=session)
+        next_regular_open_at = self._next_regular_open_at(
+            evaluated_at=evaluated_at,
+            session=session,
+            target_session_date=target_session_date,
+        )
+        return PreOpenDownsideAssessment(
+            analyzed_at=evaluated_at,
+            session=session,
+            market_open=session == "regular",
+            target_session_date=target_session_date,
+            minutes_to_regular_open=self._minutes_to_regular_open(evaluated_at, session),
+            next_regular_open_at=next_regular_open_at,
+            downside_score=0,
+            regime="unavailable",
+            plain_put_view="unavailable",
+            preferred_vehicle=None,
+            trade_action="await_live_snapshot",
+            trade_action_detail="Wait for the first successful broker snapshot before acting on the pre-open board.",
+            gap_chase_risk="unknown",
+            gap_chase_detail="Gap-chase risk cannot be evaluated until live proxy data becomes available.",
+            summary="Live pre-open proxy data is unavailable right now.",
+            reasons=[
+                "No stored pre-open board is available yet, so the first successful Longbridge snapshot is still pending.",
+            ],
+            checkpoints=[],
+            signals=[],
+            put_snapshots=[],
+            chain_analyses=[],
+            freshness_status="error",
+            freshness_detail="Live broker data is unavailable and no stored pre-open board is available yet.",
+            stale_reason=str(error),
+        )
+
+    @staticmethod
+    def _is_transient_longbridge_failure(error: Exception) -> bool:
+        message = str(error).lower()
+        transient_markers = (
+            "timed out",
+            "timeout",
+            "skipping attempt",
+            "connectivity failed",
+            "client error (connect)",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "dns",
+            "socket/token",
+            "network",
+        )
+        return any(marker in message for marker in transient_markers)
+
     def _capture_pre_open_review_checkpoint(
         self,
         *,
         checkpoint: PreOpenReviewCheckpoint,
         evaluated_at: datetime,
     ) -> PreOpenReviewCheckpoint:
-        qqq_signal = self._regular_session_signal(
-            key="qqq",
-            label="Nasdaq 100 ETF",
-            symbol=self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol,
-        )
-        spy_signal = self._regular_session_signal(
-            key="spy",
-            label="S&P 500 ETF",
-            symbol=self.settings.bull_put_strategy.pre_open_proxy_spy_symbol,
-        )
-        semis_signal = self._regular_session_signal(
-            key="semis",
-            label="Semiconductor Proxy",
-            symbol=self.settings.bull_put_strategy.pre_open_proxy_semis_symbol,
-        )
-        qqq_vs_spy = (qqq_signal.change_pct - spy_signal.change_pct).quantize(Decimal("0.01"))
-        semis_vs_qqq = (semis_signal.change_pct - qqq_signal.change_pct).quantize(Decimal("0.01"))
+        signal_specs = [
+            ("qqq", "Nasdaq 100 ETF", self.settings.bull_put_strategy.pre_open_proxy_qqq_symbol),
+            ("spy", "S&P 500 ETF", self.settings.bull_put_strategy.pre_open_proxy_spy_symbol),
+            ("semis", "Semiconductor Proxy", self.settings.bull_put_strategy.pre_open_proxy_semis_symbol),
+        ]
+        signal_by_key: dict[str, PreOpenProxySignal] = {}
+        missing_signals: list[str] = []
+        for key, label, symbol in signal_specs:
+            try:
+                signal_by_key[key] = self._regular_session_signal(
+                    key=key,
+                    label=label,
+                    symbol=symbol,
+                )
+            except LongbridgeIntegrationError as exc:
+                if not self._is_transient_longbridge_failure(exc):
+                    raise
+                missing_signals.append(label)
+                logger.warning(
+                    "Opening review proxy %s (%s) was unavailable; capturing a partial checkpoint when possible. %s",
+                    label,
+                    symbol,
+                    exc,
+                )
+
+        qqq_signal = signal_by_key.get("qqq")
+        spy_signal = signal_by_key.get("spy")
+        semis_signal = signal_by_key.get("semis")
+        qqq_vs_spy = self._quantize_optional_pct_difference(qqq_signal, spy_signal)
+        semis_vs_qqq = self._quantize_optional_pct_difference(semis_signal, qqq_signal)
         confirmation, detail = self._review_checkpoint_confirmation(
-            qqq_change=qqq_signal.change_pct,
-            spy_change=spy_signal.change_pct,
-            semis_change=semis_signal.change_pct,
+            qqq_change=qqq_signal.change_pct if qqq_signal is not None else None,
+            spy_change=spy_signal.change_pct if spy_signal is not None else None,
+            semis_change=semis_signal.change_pct if semis_signal is not None else None,
             qqq_vs_spy=qqq_vs_spy,
             semis_vs_qqq=semis_vs_qqq,
+            missing_signals=missing_signals,
         )
         return checkpoint.model_copy(
             update={
                 "captured_at": evaluated_at,
                 "status": "captured",
-                "qqq_change_pct": qqq_signal.change_pct,
-                "spy_change_pct": spy_signal.change_pct,
-                "semis_change_pct": semis_signal.change_pct,
+                "qqq_change_pct": qqq_signal.change_pct if qqq_signal is not None else None,
+                "spy_change_pct": spy_signal.change_pct if spy_signal is not None else None,
+                "semis_change_pct": semis_signal.change_pct if semis_signal is not None else None,
                 "qqq_vs_spy_diff": qqq_vs_spy,
                 "semis_vs_qqq_diff": semis_vs_qqq,
                 "confirmation": confirmation,
@@ -1560,26 +1793,84 @@ class BullPutStrategyService:
     @staticmethod
     def _review_checkpoint_confirmation(
         *,
-        qqq_change: Decimal,
-        spy_change: Decimal,
-        semis_change: Decimal,
-        qqq_vs_spy: Decimal,
-        semis_vs_qqq: Decimal,
+        qqq_change: Decimal | None,
+        spy_change: Decimal | None,
+        semis_change: Decimal | None,
+        qqq_vs_spy: Decimal | None,
+        semis_vs_qqq: Decimal | None,
+        missing_signals: list[str] | None = None,
     ) -> tuple[str, str]:
-        if qqq_change <= Decimal("-0.60") and semis_change <= Decimal("-0.90") and qqq_vs_spy <= Decimal("-0.25"):
+        missing_signals = missing_signals or []
+        missing_detail = ""
+        if missing_signals:
+            missing_detail = (
+                " Live quotes were unavailable for "
+                f"{', '.join(missing_signals)}, so this checkpoint is only partially confirmed."
+            )
+
+        if (
+            qqq_change is not None
+            and semis_change is not None
+            and qqq_vs_spy is not None
+            and qqq_change <= Decimal("-0.60")
+            and semis_change <= Decimal("-0.90")
+            and qqq_vs_spy <= Decimal("-0.25")
+        ):
             return (
                 "confirmed",
-                "QQQ and semis are still underperforming the broad tape, so the original downside read remains intact.",
+                (
+                    "QQQ and semis are still underperforming the broad tape, "
+                    "so the original downside read remains intact."
+                ),
             )
-        if qqq_change < Decimal("0") and spy_change < Decimal("0"):
+        if qqq_change is not None and spy_change is not None and qqq_change < Decimal("0") and spy_change < Decimal("0"):
             return (
                 "mixed",
-                "Broad tape is still softer, but tech-specific downside confirmation is incomplete.",
+                "Broad tape is still softer, but tech-specific downside confirmation is incomplete." + missing_detail,
+            )
+        if qqq_change is not None and qqq_change >= Decimal("0"):
+            return (
+                "failed",
+                "QQQ did not stay under downside pressure after the open." + missing_detail,
+            )
+        if qqq_change is not None and semis_change is not None and qqq_change < Decimal("0") and semis_change >= Decimal("0"):
+            return (
+                "failed",
+                "QQQ stayed softer, but semis did not confirm tech-specific downside pressure." + missing_detail,
+            )
+        if missing_signals:
+            available_labels: list[str] = []
+            if qqq_change is not None:
+                available_labels.append("QQQ")
+            if spy_change is not None:
+                available_labels.append("SPY")
+            if semis_change is not None:
+                available_labels.append("semis")
+            if available_labels:
+                return (
+                    "mixed",
+                    (
+                        "Opening follow-through is only partially available from "
+                        f"{', '.join(available_labels)}." + missing_detail
+                    ),
+                )
+            return (
+                "mixed",
+                "Opening follow-through could not be evaluated from live proxy quotes." + missing_detail,
             )
         return (
             "failed",
             "The opening tape did not keep enough downside pressure in QQQ and semis to validate the pre-open put bias.",
         )
+
+    @staticmethod
+    def _quantize_optional_pct_difference(
+        left_signal: PreOpenProxySignal | None,
+        right_signal: PreOpenProxySignal | None,
+    ) -> Decimal | None:
+        if left_signal is None or right_signal is None:
+            return None
+        return (left_signal.change_pct - right_signal.change_pct).quantize(Decimal("0.01"))
 
     def _summarize_pre_open_review(
         self,
@@ -2085,20 +2376,28 @@ class BullPutStrategyService:
         session: str,
         downside_score: int,
         preferred_vehicle: str | None,
-        qqq_change: Decimal,
-        spy_change: Decimal,
-        semis_change: Decimal,
+        qqq_change: Decimal | None,
+        spy_change: Decimal | None,
+        semis_change: Decimal | None,
     ) -> tuple[str, str]:
+        available_values = [value for value in (qqq_change, spy_change, semis_change) if value is not None]
+        proxy_phrase = "the available market proxies"
+        if qqq_change is not None and semis_change is not None:
+            proxy_phrase = "QQQ and semis"
+        elif qqq_change is not None:
+            proxy_phrase = "QQQ and the broad tape"
+        elif spy_change is not None:
+            proxy_phrase = "the broad tape"
         if downside_score >= 5:
             if session == "premarket":
-                if min(qqq_change, spy_change, semis_change) <= Decimal("-1.25"):
+                if available_values and min(available_values) <= Decimal("-1.25"):
                     return (
                         "wait_for_failed_bounce",
                         "Bearish bias is real, but the gap is already stretched. Wait for the first bounce to fail instead of paying up for plain puts into the open.",
                     )
                 return (
                     "wait_for_open_confirmation",
-                    f"Bias is bearish. Only press {preferred_vehicle or 'index'} puts if QQQ and semis stay weak through the open.",
+                    f"Bias is bearish. Only press {preferred_vehicle or 'index'} puts if {proxy_phrase} stay weak through the open.",
                 )
             if session == "regular":
                 return (
@@ -2123,12 +2422,15 @@ class BullPutStrategyService:
         self,
         *,
         downside_score: int,
-        qqq_change: Decimal,
-        spy_change: Decimal,
-        semis_change: Decimal,
+        qqq_change: Decimal | None,
+        spy_change: Decimal | None,
+        semis_change: Decimal | None,
     ) -> tuple[str, str]:
-        gap_extension = min(qqq_change, spy_change, semis_change)
-        if gap_extension <= Decimal("-1.25") or (downside_score >= 5 and semis_change <= Decimal("-1.50")):
+        gap_values = [value for value in (qqq_change, spy_change, semis_change) if value is not None]
+        gap_extension = min(gap_values) if gap_values else Decimal("0")
+        if gap_extension <= Decimal("-1.25") or (
+            downside_score >= 5 and semis_change is not None and semis_change <= Decimal("-1.50")
+        ):
             return (
                 "high",
                 "The tape is weak enough that a gap-down open could make plain puts expensive immediately. Favor patience over chasing the first downtick.",
@@ -2264,37 +2566,55 @@ class BullPutStrategyService:
         self,
         *,
         evaluated_at: datetime,
-        spy_signal: PreOpenProxySignal,
-        qqq_signal: PreOpenProxySignal,
-    ) -> list[DirectionalPutSnapshot]:
+        signals: list[PreOpenProxySignal],
+    ) -> tuple[list[DirectionalPutSnapshot], list[str]]:
         snapshots: list[DirectionalPutSnapshot] = []
-        for signal in (spy_signal, qqq_signal):
-            snapshot = self._nearest_directional_put_snapshot(
-                symbol=signal.symbol,
-                underlying_price=signal.session_price,
-                evaluated_at=evaluated_at,
-            )
+        missing_snapshots: list[str] = []
+        for signal in signals:
+            try:
+                snapshot = self._nearest_directional_put_snapshot(
+                    symbol=signal.symbol,
+                    underlying_price=signal.session_price,
+                    evaluated_at=evaluated_at,
+                )
+            except LongbridgeIntegrationError as exc:
+                missing_snapshots.append(signal.symbol)
+                logger.warning(
+                    "Directional put snapshot for %s was unavailable; continuing without it. %s",
+                    signal.symbol,
+                    exc,
+                )
+                continue
             if snapshot is not None:
                 snapshots.append(snapshot)
-        return snapshots
+        return snapshots, missing_snapshots
 
     def _build_option_chain_analyses(
         self,
         *,
         evaluated_at: datetime,
-        spy_signal: PreOpenProxySignal,
-        qqq_signal: PreOpenProxySignal,
-    ) -> list[OptionChainAnalysis]:
+        signals: list[PreOpenProxySignal],
+    ) -> tuple[list[OptionChainAnalysis], list[str]]:
         analyses: list[OptionChainAnalysis] = []
-        for signal in (spy_signal, qqq_signal):
-            analysis = self._option_chain_analysis(
-                symbol=signal.symbol,
-                underlying_price=signal.session_price,
-                evaluated_at=evaluated_at,
-            )
+        missing_analyses: list[str] = []
+        for signal in signals:
+            try:
+                analysis = self._option_chain_analysis(
+                    symbol=signal.symbol,
+                    underlying_price=signal.session_price,
+                    evaluated_at=evaluated_at,
+                )
+            except LongbridgeIntegrationError as exc:
+                missing_analyses.append(signal.symbol)
+                logger.warning(
+                    "Option-chain analysis for %s was unavailable; continuing without it. %s",
+                    signal.symbol,
+                    exc,
+                )
+                continue
             if analysis is not None:
                 analyses.append(analysis)
-        return analyses
+        return analyses, missing_analyses
 
     def _option_chain_analysis(
         self,

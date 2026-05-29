@@ -2,6 +2,9 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock, patch
 
+import pytest
+
+from stocks_tool.adapters.brokers.longbridge import LongbridgeIntegrationError
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
@@ -577,8 +580,7 @@ def build_service(
     order_service = Mock()
     broker_accounts.get_by_external_account_id.return_value = build_broker_account()
     account_snapshots.list_account_snapshots.return_value = [account_snapshot or build_account_snapshot()]
-    adapter.get_quote.return_value = underlying_quote or build_underlying_quote()
-    adapter.get_quote.side_effect = lambda symbol, mode: {
+    quote_map = {
         "QQQ.US": underlying_quote or build_underlying_quote(),
         "SMH.US": build_market_quote(
             symbol="SMH.US",
@@ -619,7 +621,14 @@ def build_service(
             prev_close=Decimal("92.8"),
             pre_market_last_done=Decimal("91.9"),
         ),
-    }[symbol]
+    }
+    adapter.get_quote.return_value = underlying_quote or build_underlying_quote()
+    adapter.get_quote.side_effect = lambda symbol, mode: quote_map[symbol]
+    adapter.get_quotes.side_effect = lambda symbols, mode: {
+        symbol: quote_map[symbol]
+        for symbol in symbols
+        if symbol in quote_map
+    }
     adapter.get_recent_daily_bars.return_value = build_bars()
     adapter.list_option_expiry_dates.side_effect = lambda symbol, mode: (
         [date(2026, 5, 29), date(2026, 6, 5), date(2026, 6, 12)]
@@ -1262,6 +1271,156 @@ def test_capture_pre_open_run_persists_assessment_for_next_session() -> None:
     assert service.journal_service.create_entry.call_count >= 1
 
 
+def test_capture_pre_open_run_persists_partial_assessment_when_only_spy_proxy_is_available() -> None:
+    service, adapter, _, _ = build_service()
+    original_get_quote = adapter.get_quote.side_effect
+
+    def flaky_get_quote(symbol, mode):
+        if symbol != "SPY.US":
+            raise LongbridgeIntegrationError(
+                f"Longbridge timed out while trying to load quote for '{symbol}' after 6s."
+            )
+        return original_get_quote(symbol, mode)
+
+    adapter.get_quote.side_effect = flaky_get_quote
+
+    result = service.capture_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+        force=True,
+    )
+
+    assert result.captured is True
+    assert result.run.assessment.freshness_status == "partial"
+    assert [signal.symbol for signal in result.run.assessment.signals] == ["SPY.US"]
+    assert "Missing signals" in (result.run.assessment.freshness_detail or "")
+
+
+def test_get_pre_open_assessment_falls_back_to_latest_persisted_run_on_transient_failure() -> None:
+    service, adapter, _, _ = build_service()
+    captured = service.capture_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
+    )
+    adapter.get_quote.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    )
+
+    result = service.get_pre_open_downside_assessment(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.freshness_status == "stale"
+    assert result.source_run_id == captured.run.id
+    assert "timed out" in (result.stale_reason or "").lower()
+    assert "latest stored pre-open board" in (result.freshness_detail or "").lower()
+    assert result.summary == captured.run.assessment.summary
+
+
+def test_get_pre_open_assessment_returns_unavailable_board_without_persisted_fallback() -> None:
+    service, adapter, _, _ = build_service()
+    adapter.get_quote.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    )
+
+    result = service.get_pre_open_downside_assessment(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.freshness_status == "error"
+    assert result.regime == "unavailable"
+    assert "no stored pre-open board" in (result.freshness_detail or "").lower()
+    assert "timed out" in (result.stale_reason or "").lower()
+
+
+def test_get_pre_open_assessment_raises_without_fallback_when_disabled() -> None:
+    service, adapter, _, _ = build_service()
+    adapter.get_quote.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    )
+
+    with pytest.raises(LongbridgeIntegrationError, match="timed out"):
+        service.get_pre_open_downside_assessment(
+            external_account_id="LBPT10087357",
+            as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+            allow_fallback=False,
+        )
+
+
+def test_get_pre_open_assessment_keeps_partial_board_when_optional_proxy_times_out() -> None:
+    service, adapter, _, _ = build_service()
+    original_get_quote = adapter.get_quote.side_effect
+
+    def flaky_get_quote(symbol, mode):
+        if symbol == "SOXX.US":
+            raise LongbridgeIntegrationError(
+                "Longbridge timed out while trying to load quote for 'SOXX.US' after 6s."
+            )
+        return original_get_quote(symbol, mode)
+
+    adapter.get_quote.side_effect = flaky_get_quote
+
+    result = service.get_pre_open_downside_assessment(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.freshness_status == "partial"
+    assert "Semiconductor Proxy" in (result.freshness_detail or "")
+    assert all(signal.key != "semis" for signal in result.signals)
+    assert result.preferred_vehicle in {"SPY", "QQQ", None}
+
+
+def test_get_pre_open_assessment_keeps_partial_board_when_spy_proxy_times_out() -> None:
+    service, adapter, _, _ = build_service()
+    original_get_quote = adapter.get_quote.side_effect
+
+    def flaky_get_quote(symbol, mode):
+        if symbol == "SPY.US":
+            raise LongbridgeIntegrationError(
+                "Longbridge timed out while trying to load quote for 'SPY.US' after 6s."
+            )
+        return original_get_quote(symbol, mode)
+
+    adapter.get_quote.side_effect = flaky_get_quote
+
+    result = service.get_pre_open_downside_assessment(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.freshness_status == "partial"
+    assert "S&P 500 ETF" in (result.freshness_detail or "")
+    assert all(signal.key != "spy" for signal in result.signals)
+    assert all(analysis.underlying_symbol != "SPY.US" for analysis in result.chain_analyses)
+
+
+def test_get_pre_open_assessment_keeps_partial_board_when_option_chain_overlay_times_out() -> None:
+    service, adapter, _, _ = build_service()
+    original_list_option_expiry_dates = adapter.list_option_expiry_dates.side_effect
+
+    def flaky_list_option_expiry_dates(symbol, mode):
+        if symbol == "QQQ.US":
+            raise LongbridgeIntegrationError(
+                "Longbridge timed out while trying to load option expiry dates for 'QQQ.US' after 6s."
+            )
+        return original_list_option_expiry_dates(symbol, mode)
+
+    adapter.list_option_expiry_dates.side_effect = flaky_list_option_expiry_dates
+
+    result = service.get_pre_open_downside_assessment(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.freshness_status == "partial"
+    assert "Option-chain analysis unavailable for QQQ.US." in (result.freshness_detail or "")
+    assert any(signal.symbol == "QQQ.US" for signal in result.signals)
+    assert all(analysis.underlying_symbol != "QQQ.US" for analysis in result.chain_analyses)
+
+
 def test_review_pre_open_run_updates_opening_checkpoints_and_final_status() -> None:
     service, _, _, _ = build_service()
     capture = service.capture_pre_open_run(
@@ -1291,6 +1450,47 @@ def test_review_pre_open_run_updates_opening_checkpoints_and_final_status() -> N
     assert final.run.review_completed_at is not None
     assert set(final.updated_checkpoint_keys) == {"first_15", "first_30"}
     assert service.journal_service.create_entry.call_count >= 2
+
+
+def test_review_pre_open_run_captures_partial_checkpoint_when_some_quotes_timeout() -> None:
+    service, adapter, _, _ = build_service()
+    capture = service.capture_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+    )
+    original_get_quote = adapter.get_quote.side_effect
+
+    def flaky_get_quote(symbol, mode):
+        if symbol in {"SPY.US", "SOXX.US"}:
+            raise LongbridgeIntegrationError(
+                f"Longbridge timed out while trying to load quote for '{symbol}' after 6s."
+            )
+        return original_get_quote(symbol, mode)
+
+    adapter.get_quote.side_effect = flaky_get_quote
+
+    first = service.review_pre_open_run(
+        external_account_id="LBPT10087357",
+        as_of=datetime(2026, 5, 26, 13, 30, tzinfo=timezone.utc),
+    )
+
+    assert first.reviewed is True
+    assert first.updated_checkpoint_keys == ["open"]
+    assert first.run is not None
+    assert first.run.review_status == "in_progress"
+    assert first.run.checkpoints[0].status == "captured"
+    assert first.run.checkpoints[0].confirmation == "failed"
+    assert first.run.checkpoints[0].captured_at is not None
+    assert first.run.checkpoints[0].qqq_change_pct == Decimal("0.40")
+    assert first.run.checkpoints[0].spy_change_pct is None
+    assert first.run.checkpoints[0].semis_change_pct is None
+    assert "S&P 500 ETF" in (first.run.checkpoints[0].detail or "")
+    assert "Semiconductor Proxy" in (first.run.checkpoints[0].detail or "")
+
+    stored = service.list_pre_open_runs(external_account_id="LBPT10087357", limit=1)[0]
+    assert stored.checkpoints[0].captured_at is not None
+    assert stored.checkpoints[0].confirmation == "failed"
+    assert capture.run.id == stored.id
 
 
 def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:

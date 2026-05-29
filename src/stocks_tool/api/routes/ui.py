@@ -1,24 +1,34 @@
+from pathlib import Path
 from textwrap import dedent
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 router = APIRouter(include_in_schema=False)
+STATIC_DIR = Path(__file__).resolve().parents[2] / "ui" / "static"
+
+
+def _asset_url(filename: str) -> str:
+    asset_path = STATIC_DIR / filename
+    version = asset_path.stat().st_mtime_ns
+    return f"/static/{filename}?v={version}"
 
 
 @router.get("/", response_class=HTMLResponse)
 @router.get("/app", response_class=HTMLResponse)
 def render_dashboard() -> HTMLResponse:
+    app_css_url = _asset_url("app.css")
+    app_js_url = _asset_url("app.js")
     return HTMLResponse(
         dedent(
-            """\
+            f"""\
             <!doctype html>
             <html lang="zh-CN">
               <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>Stocks Tool Workbench</title>
-                <link rel="stylesheet" href="/static/app.css" />
+                <link rel="stylesheet" href="{app_css_url}" />
               </head>
               <body>
                 <div class="shell">
@@ -31,16 +41,20 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </div>
                     <div class="topbar-actions">
+                      <div class="language-switch" aria-label="Language">
+                        <button class="lang-option" type="button" data-lang-option="zh">中文</button>
+                        <button class="lang-option" type="button" data-lang-option="en">EN</button>
+                      </div>
                       <span class="mode-pill">Paper</span>
                       <a class="action-link" href="/docs">API Docs</a>
                     </div>
                   </header>
 
                   <main class="workspace">
-                    <section class="band controls-band">
+                    <section class="band account-band">
                       <div class="band-header">
                         <div>
-                          <span class="section-kicker">Session</span>
+                          <span class="section-kicker">Account</span>
                           <h2>Account Control</h2>
                         </div>
                         <button id="refresh-dashboard" class="icon-button" type="button">
@@ -85,6 +99,25 @@ def render_dashboard() -> HTMLResponse:
                         </button>
                       </div>
 
+                      <div id="metrics-strip" class="metric-strip account-metrics">
+                        <article class="metric-tile">
+                          <span class="metric-label">Cash Balance</span>
+                          <strong class="metric-value">--</strong>
+                        </article>
+                        <article class="metric-tile">
+                          <span class="metric-label">Net Liquidation</span>
+                          <strong class="metric-value">--</strong>
+                        </article>
+                        <article class="metric-tile">
+                          <span class="metric-label">Buying Power</span>
+                          <strong class="metric-value">--</strong>
+                        </article>
+                        <article class="metric-tile">
+                          <span class="metric-label">Latest Snapshot</span>
+                          <strong class="metric-value">--</strong>
+                        </article>
+                      </div>
+
                       <div id="reconciliation-strip" class="reconciliation-strip">
                         <article class="reconciliation-card">
                           <div class="reconciliation-head">
@@ -115,185 +148,319 @@ def render_dashboard() -> HTMLResponse:
                       <div id="status-banner" class="status-banner">Ready</div>
                     </section>
 
-                    <section class="band metrics-band">
-                      <div class="metric-strip" id="metrics-strip">
-                        <article class="metric-tile">
-                          <span class="metric-label">Cash Balance</span>
-                          <strong class="metric-value">--</strong>
-                        </article>
-                        <article class="metric-tile">
-                          <span class="metric-label">Net Liquidation</span>
-                          <strong class="metric-value">--</strong>
-                        </article>
-                        <article class="metric-tile">
-                          <span class="metric-label">Buying Power</span>
-                          <strong class="metric-value">--</strong>
-                        </article>
-                        <article class="metric-tile">
-                          <span class="metric-label">Latest Snapshot</span>
-                          <strong class="metric-value">--</strong>
-                        </article>
+                    <section class="band strategy-band">
+                      <div class="band-header">
+                        <div>
+                          <span class="section-kicker">Strategy</span>
+                          <h2>Strategy Center</h2>
+                        </div>
                       </div>
-                    </section>
 
-                    <section class="band holdings-band">
-                      <div class="holdings-grid">
-                        <section class="panel">
+                      <div class="strategy-layout">
+                        <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
-                              <span class="section-kicker">Portfolio</span>
-                              <h2>Holdings Overview</h2>
+                              <span class="section-kicker">Bull Put</span>
+                              <h2>Bull Put Strategy</h2>
                             </div>
                           </div>
-                          <div id="positions-summary-strip" class="mini-metric-strip">
+                          <div id="strategy-runtime-strip" class="mini-metric-strip strategy-summary-strip">
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Open Positions</span>
+                              <span class="metric-label">Entry Status</span>
                               <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No runtime state loaded.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Gross Market Value</span>
+                              <span class="metric-label">Daily Entries</span>
                               <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first scan.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Unrealized PnL</span>
+                              <span class="metric-label">Daily Realized PnL</span>
                               <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread closes recorded today.</span>
                             </article>
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Largest Holding</span>
+                              <span class="metric-label">Last Scan</span>
                               <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first bull put scan.</span>
                             </article>
                           </div>
-                        </section>
 
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Exposure</span>
-                              <h2>Current Holdings</h2>
+                          <form id="strategy-controls-form" class="ticket-form">
+                            <div class="ticket-grid">
+                              <label class="field">
+                                <span>Auto Entry</span>
+                                <select id="strategy-auto-entry">
+                                  <option value="true">Enabled</option>
+                                  <option value="false">Disabled</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Manual Pause</span>
+                                <select id="strategy-manual-pause">
+                                  <option value="false">Running</option>
+                                  <option value="true">Paused</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Kill Switch</span>
+                                <select id="strategy-kill-switch">
+                                  <option value="false">Off</option>
+                                  <option value="true">On</option>
+                                </select>
+                              </label>
+                              <label class="field field-span-2">
+                                <span>Paused Symbols</span>
+                                <input id="strategy-paused-symbols" type="text" maxlength="160" placeholder="QQQ.US, SMH.US" />
+                              </label>
                             </div>
-                          </div>
-                          <div id="holdings-focus" class="holdings-focus">
-                            <div class="holding-empty">No positions in latest snapshot.</div>
-                          </div>
-                        </section>
-                      </div>
-                    </section>
-
-                    <section class="band preopen-band">
-                      <div class="panel-stack">
-                        <div class="panel-grid preopen-grid">
-                          <section class="panel">
-                            <div class="panel-header">
-                              <div>
-                                <span class="section-kicker">Macro</span>
-                                <h2>Pre-open Risk Board</h2>
+                            <div class="form-foot">
+                              <p id="strategy-controls-hint" class="form-hint">Strategy controls apply to new bull put entries only. Existing spreads remain monitored.</p>
+                              <div class="inline-actions">
+                                <button id="save-strategy-controls" class="icon-button" type="submit">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M5 5h11l3 3v11H5z"/>
+                                      <path d="M8 5v6h8"/>
+                                      <path d="M8 19v-6h8v6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Save Controls</span>
+                                </button>
+                                <button id="run-strategy-scan" class="icon-button accent" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M3 12h18"/>
+                                      <path d="m13 6 6 6-6 6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Run Scan</span>
+                                </button>
+                                <button id="run-strategy-review" class="icon-button" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M4 5h16v14H4z"/>
+                                      <path d="M8 9h8"/>
+                                      <path d="M8 13h6"/>
+                                      <path d="M8 17h5"/>
+                                    </svg>
+                                  </span>
+                                  <span>Run Review</span>
+                                </button>
                               </div>
                             </div>
-                            <div id="preopen-summary-strip" class="mini-metric-strip">
-                              <article class="mini-metric-tile">
-                                <span class="metric-label">Downside Score</span>
-                                <strong class="mini-metric-value">--</strong>
-                              </article>
+                          </form>
+
+                          <div class="strategy-notes-grid">
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Last Skip</span>
+                                <h3>Latest Skip Reason</h3>
+                              </div>
+                              <div id="strategy-skip-card" class="strategy-note-body empty">
+                                No bull put scan has been skipped yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Review</span>
+                                <h3>Latest Review</h3>
+                              </div>
+                              <div id="strategy-review-card" class="strategy-note-body empty">
+                                No bull put strategy review has been generated yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Journal</span>
+                                <h3>Recent Strategy Notes</h3>
+                              </div>
+                              <div id="strategy-journal-feed" class="strategy-note-body empty">
+                                No bull put strategy notes for this account yet.
+                              </div>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Spreads</span>
+                              <h2>Bull Put Monitor</h2>
                             </div>
+                          </div>
+                          <div id="spread-summary-strip" class="mini-metric-strip strategy-summary-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Active Spreads</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread data loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Exit Pending</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread data loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Latest Exit Action</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No spread exits recorded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Last Monitor</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Waiting for first spread check.</span>
+                            </article>
+                          </div>
+                          <div class="table-shell">
+                            <table class="data-table">
+                              <thead>
+                                <tr>
+                                  <th>Underlying</th>
+                                  <th>Expiry</th>
+                                  <th>Width</th>
+                                  <th>Status</th>
+                                  <th>Entry Credit</th>
+                                  <th>Last Monitor</th>
+                                  <th>Latest Action</th>
+                                  <th>Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody id="spreads-body">
+                                <tr><td colspan="8" class="empty-row">No bull put spreads loaded.</td></tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
+                              <span class="section-kicker">Macro</span>
+                              <h2>Pre-open Risk Board</h2>
+                            </div>
+                            <button id="load-preopen-board" class="icon-button" type="button">
+                              <span class="icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" focusable="false">
+                                  <path d="M12 5v14"/>
+                                  <path d="M5 12h14"/>
+                                </svg>
+                              </span>
+                              <span>Load Macro Board</span>
+                            </button>
+                          </div>
+                          <div id="preopen-summary-strip" class="mini-metric-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Downside Score</span>
+                              <strong class="mini-metric-value">--</strong>
+                            </article>
+                          </div>
+                          <div class="preopen-grid">
                             <div id="preopen-assessment-card" class="strategy-note-body empty">
                               Loading pre-open assessment...
                             </div>
-                          </section>
-
-                          <section class="panel">
-                            <div class="panel-header">
-                              <div>
-                                <span class="section-kicker">Signals</span>
-                                <h2>Risk Proxies</h2>
+                            <div class="preopen-stack">
+                              <section>
+                                <div class="compact-header">
+                                  <span class="section-kicker">Signals</span>
+                                  <h3>Risk Proxies</h3>
+                                </div>
+                                <div id="preopen-signals" class="holdings-focus">
+                                  <div class="holding-empty">Waiting for market proxy signals.</div>
+                                </div>
+                              </section>
+                              <section>
+                                <div class="compact-header">
+                                  <span class="section-kicker">Options</span>
+                                  <h3>QQQ / SPY Put Check</h3>
+                                </div>
+                                <div id="preopen-puts" class="holdings-focus">
+                                  <div class="holding-empty">Waiting for directional put snapshots.</div>
+                                </div>
+                              </section>
+                            </div>
+                          </div>
+                          <div class="preopen-grid secondary">
+                            <section>
+                              <div class="compact-header">
+                                <span class="section-kicker">Surface</span>
+                                <h3>Option Chain Analysis</h3>
                               </div>
-                            </div>
-                            <div id="preopen-signals" class="holdings-focus">
-                              <div class="holding-empty">Waiting for market proxy signals.</div>
-                            </div>
-                          </section>
-
-                          <section class="panel">
-                            <div class="panel-header">
-                              <div>
-                                <span class="section-kicker">Options</span>
-                                <h2>QQQ / SPY Put Check</h2>
+                              <div id="preopen-chain-analysis" class="holdings-focus">
+                                <div class="holding-empty">Waiting for front and next-expiry option chain analysis.</div>
                               </div>
-                            </div>
-                            <div id="preopen-puts" class="holdings-focus">
-                              <div class="holding-empty">Waiting for directional put snapshots.</div>
-                            </div>
-                          </section>
-                        </div>
-
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Surface</span>
-                              <h2>Option Chain Analysis</h2>
-                            </div>
-                          </div>
-                          <div id="preopen-chain-analysis" class="holdings-focus">
-                            <div class="holding-empty">Waiting for front and next-expiry option chain analysis.</div>
-                          </div>
-                        </section>
-
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Review</span>
-                              <h2>Opening Follow-through</h2>
-                            </div>
-                          </div>
-                          <div id="preopen-run-review" class="strategy-note-body empty">
-                            Select a broker account to load the latest pre-open capture and opening review.
+                            </section>
+                            <section>
+                              <div class="compact-header">
+                                <span class="section-kicker">Review</span>
+                                <h3>Opening Follow-through</h3>
+                              </div>
+                              <div id="preopen-run-review" class="strategy-note-body empty">
+                                Select a broker account to load the latest pre-open capture and opening review.
+                              </div>
+                            </section>
                           </div>
                         </section>
-
-                        <div class="panel-grid">
-                          <section class="panel">
-                            <div class="panel-header">
-                              <div>
-                                <span class="section-kicker">Broker</span>
-                                <h2>Longbridge Status</h2>
-                              </div>
-                            </div>
-                            <dl id="broker-status" class="status-list"></dl>
-                          </section>
-
-                          <section class="panel">
-                            <div class="panel-header">
-                              <div>
-                                <span class="section-kicker">Quote</span>
-                                <h2>Quick Quote</h2>
-                              </div>
-                            </div>
-                            <form id="quote-form" class="quote-form">
-                              <label class="field">
-                                <span>Symbol</span>
-                                <input id="quote-symbol" type="text" value="UNH.US" autocomplete="off" />
-                              </label>
-                              <button class="icon-button accent" type="submit">
-                                <span class="icon" aria-hidden="true">
-                                  <svg viewBox="0 0 24 24" focusable="false">
-                                    <circle cx="11" cy="11" r="7"/>
-                                    <path d="m21 21-4.3-4.3"/>
-                                  </svg>
-                                </span>
-                                <span>Load Quote</span>
-                              </button>
-                            </form>
-                            <div id="quote-card" class="quote-card empty">No quote loaded.</div>
-                          </section>
-                        </div>
                       </div>
                     </section>
 
-                    <section class="band trade-band">
+                    <section class="band portfolio-band">
+                      <div class="band-header">
+                        <div>
+                          <span class="section-kicker">Portfolio</span>
+                          <h2>Holdings Overview</h2>
+                        </div>
+                      </div>
+                      <div id="positions-summary-strip" class="mini-metric-strip">
+                        <article class="mini-metric-tile">
+                          <span class="metric-label">Open Positions</span>
+                          <strong class="mini-metric-value">--</strong>
+                        </article>
+                        <article class="mini-metric-tile">
+                          <span class="metric-label">Gross Market Value</span>
+                          <strong class="mini-metric-value">--</strong>
+                        </article>
+                        <article class="mini-metric-tile">
+                          <span class="metric-label">Unrealized PnL</span>
+                          <strong class="mini-metric-value">--</strong>
+                        </article>
+                        <article class="mini-metric-tile">
+                          <span class="metric-label">Largest Holding</span>
+                          <strong class="mini-metric-value">--</strong>
+                        </article>
+                      </div>
+                      <div class="table-shell">
+                        <table class="data-table">
+                          <thead>
+                            <tr>
+                              <th>Symbol</th>
+                              <th>Type</th>
+                              <th>Qty</th>
+                              <th>Avg Cost</th>
+                              <th>Market Value</th>
+                              <th>Unrealized PnL</th>
+                              <th>Weight</th>
+                            </tr>
+                          </thead>
+                          <tbody id="positions-body">
+                            <tr><td colspan="7" class="empty-row">No positions in latest snapshot.</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </section>
+
+                    <section class="band execution-band">
+                      <div class="band-header">
+                        <div>
+                          <span class="section-kicker">Execution</span>
+                          <h2>Execution Desk</h2>
+                        </div>
+                      </div>
                       <div class="trade-grid">
                         <section class="panel">
                           <div class="panel-header">
                             <div>
-                              <span class="section-kicker">Execution</span>
+                              <span class="section-kicker">Ticket</span>
                               <h2>Order Ticket</h2>
                             </div>
                           </div>
@@ -462,262 +629,38 @@ def render_dashboard() -> HTMLResponse:
                           </form>
                         </section>
                       </div>
-                    </section>
 
-                    <section class="band data-band">
-                      <div class="data-grid">
-                        <section class="panel panel-span-2">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Strategy</span>
-                              <h2>Bull Put Strategy</h2>
-                            </div>
+                      <section class="panel orders-panel">
+                        <div class="panel-header">
+                          <div>
+                            <span class="section-kicker">Orders</span>
+                            <h2>Orders</h2>
                           </div>
-                          <div id="strategy-runtime-strip" class="mini-metric-strip strategy-summary-strip">
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Entry Status</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No runtime state loaded.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Daily Entries</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">Waiting for first scan.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Daily Realized PnL</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No spread closes recorded today.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Last Scan</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">Waiting for first bull put scan.</span>
-                            </article>
-                          </div>
-                          <form id="strategy-controls-form" class="ticket-form">
-                            <div class="ticket-grid">
-                              <label class="field">
-                                <span>Auto Entry</span>
-                                <select id="strategy-auto-entry">
-                                  <option value="true">Enabled</option>
-                                  <option value="false">Disabled</option>
-                                </select>
-                              </label>
-                              <label class="field">
-                                <span>Manual Pause</span>
-                                <select id="strategy-manual-pause">
-                                  <option value="false">Running</option>
-                                  <option value="true">Paused</option>
-                                </select>
-                              </label>
-                              <label class="field">
-                                <span>Kill Switch</span>
-                                <select id="strategy-kill-switch">
-                                  <option value="false">Off</option>
-                                  <option value="true">On</option>
-                                </select>
-                              </label>
-                              <label class="field field-span-2">
-                                <span>Paused Symbols</span>
-                                <input id="strategy-paused-symbols" type="text" maxlength="160" placeholder="QQQ.US, SMH.US" />
-                              </label>
-                            </div>
-                            <div class="form-foot">
-                              <p id="strategy-controls-hint" class="form-hint">Strategy controls apply to new bull put entries only. Existing spreads remain monitored.</p>
-                              <div class="inline-actions">
-                                <button id="save-strategy-controls" class="icon-button" type="submit">
-                                  <span class="icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" focusable="false">
-                                      <path d="M5 5h11l3 3v11H5z"/>
-                                      <path d="M8 5v6h8"/>
-                                      <path d="M8 19v-6h8v6"/>
-                                    </svg>
-                                  </span>
-                                  <span>Save Controls</span>
-                                </button>
-                                <button id="run-strategy-scan" class="icon-button accent" type="button">
-                                  <span class="icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" focusable="false">
-                                      <path d="M3 12h18"/>
-                                      <path d="m13 6 6 6-6 6"/>
-                                    </svg>
-                                  </span>
-                                  <span>Run Scan</span>
-                                </button>
-                                <button id="run-strategy-review" class="icon-button" type="button">
-                                  <span class="icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" focusable="false">
-                                      <path d="M4 5h16v14H4z"/>
-                                      <path d="M8 9h8"/>
-                                      <path d="M8 13h6"/>
-                                      <path d="M8 17h5"/>
-                                    </svg>
-                                  </span>
-                                  <span>Run Review</span>
-                                </button>
-                              </div>
-                            </div>
-                          </form>
-                          <div class="strategy-notes-grid">
-                            <article class="strategy-note-card">
-                              <div class="form-header">
-                                <span class="section-kicker">Last Skip</span>
-                                <h3>Latest Skip Reason</h3>
-                              </div>
-                              <div id="strategy-skip-card" class="strategy-note-body empty">
-                                No bull put scan has been skipped yet.
-                              </div>
-                            </article>
-                            <article class="strategy-note-card">
-                              <div class="form-header">
-                                <span class="section-kicker">Journal</span>
-                                <h3>Recent Strategy Notes</h3>
-                              </div>
-                              <div id="strategy-journal-feed" class="strategy-note-body empty">
-                                No bull put strategy notes for this account yet.
-                              </div>
-                            </article>
-                            <article class="strategy-note-card">
-                              <div class="form-header">
-                                <span class="section-kicker">Review</span>
-                                <h3>Latest Review</h3>
-                              </div>
-                              <div id="strategy-review-card" class="strategy-note-body empty">
-                                No bull put strategy review has been generated yet.
-                              </div>
-                            </article>
-                          </div>
-                        </section>
-
-                        <section class="panel panel-span-2">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Strategy</span>
-                              <h2>Bull Put Monitor</h2>
-                            </div>
-                          </div>
-                          <div id="spread-summary-strip" class="mini-metric-strip strategy-summary-strip">
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Active Spreads</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No spread data loaded.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Exit Pending</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No spread data loaded.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Latest Exit Action</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No spread exits recorded.</span>
-                            </article>
-                            <article class="mini-metric-tile">
-                              <span class="metric-label">Last Monitor</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">Waiting for first spread check.</span>
-                            </article>
-                          </div>
-                        </section>
-
-                        <section class="panel panel-span-2">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Strategy</span>
-                              <h2>Bull Put Spreads</h2>
-                            </div>
-                          </div>
-                          <div class="table-shell">
-                            <table class="data-table">
-                              <thead>
-                                <tr>
-                                  <th>Underlying</th>
-                                  <th>Expiry</th>
-                                  <th>Width</th>
-                                  <th>Status</th>
-                                  <th>Entry Credit</th>
-                                  <th>Last Monitor</th>
-                                  <th>Latest Action</th>
-                                  <th>Actions</th>
-                                </tr>
-                              </thead>
-                              <tbody id="spreads-body">
-                                <tr><td colspan="8" class="empty-row">No bull put spreads loaded.</td></tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        </section>
-
-                        <section class="panel panel-span-2">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Execution</span>
-                              <h2>Orders</h2>
-                            </div>
-                          </div>
-                          <div class="table-shell">
-                            <table class="data-table">
-                              <thead>
-                                <tr>
-                                  <th>Symbol</th>
-                                  <th>Side</th>
-                                  <th>Qty</th>
-                                  <th>Status</th>
-                                  <th>Limit</th>
-                                  <th>Updated</th>
-                                  <th>Actions</th>
-                                </tr>
-                              </thead>
-                              <tbody id="orders-body">
-                                <tr><td colspan="7" class="empty-row">No orders loaded.</td></tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        </section>
-
-                        <section class="panel">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Research</span>
-                              <h2>Watchlists</h2>
-                            </div>
-                          </div>
-                          <div id="watchlists-body" class="stack-list"></div>
-                        </section>
-
-                        <section class="panel panel-span-2">
-                          <div class="panel-header">
-                            <div>
-                              <span class="section-kicker">Exposure</span>
-                              <h2>Positions</h2>
-                            </div>
-                          </div>
-                          <div class="table-shell">
-                            <table class="data-table">
-                              <thead>
-                                <tr>
-                                  <th>Symbol</th>
-                                  <th>Type</th>
-                                  <th>Qty</th>
-                                  <th>Avg Cost</th>
-                                  <th>Market Value</th>
-                                  <th>Unrealized PnL</th>
-                                  <th>Weight</th>
-                                </tr>
-                              </thead>
-                              <tbody id="positions-body">
-                                <tr><td colspan="7" class="empty-row">No positions in latest snapshot.</td></tr>
-                              </tbody>
-                            </table>
-                          </div>
-                        </section>
-                      </div>
+                        </div>
+                        <div class="table-shell">
+                          <table class="data-table">
+                            <thead>
+                              <tr>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Qty</th>
+                                <th>Status</th>
+                                <th>Limit</th>
+                                <th>Updated</th>
+                                <th>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody id="orders-body">
+                              <tr><td colspan="7" class="empty-row">No orders loaded.</td></tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
                     </section>
                   </main>
                 </div>
 
-                <script src="/static/app.js" defer></script>
+                <script src="{app_js_url}" defer></script>
               </body>
             </html>
             """
