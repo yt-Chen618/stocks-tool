@@ -172,6 +172,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - manually or script-created events for `earnings`, `dividend`, `fomc`, `cpi`, `jobs`, and `other`
   - optional symbol, event time, source, severity, notes, and raw payload
   - covered-call previews now surface event warnings from this calendar
+  - CSV import helper: `.venv\Scripts\python.exe scripts\import_market_events.py --csv artifacts/market-events.csv`
 
 ### Automatic reconciliation
 
@@ -394,6 +395,7 @@ Frontend files:
 - Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
 - Added a dashboard market-event calendar panel and mock UI regression coverage for upcoming events.
 - Added covered-call buy-to-close order submission for executed proposals.
+- Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.

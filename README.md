@@ -246,6 +246,12 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --execute --json-output artifacts/real-paper-executed.json
 ```
 
+Market events can also be imported from a local CSV:
+
+```powershell
+.venv\Scripts\python.exe scripts\import_market_events.py --csv artifacts/market-events.csv
+```
+
 ## Next milestones
 
 1. Add covered-call roll order execution after close guidance.
