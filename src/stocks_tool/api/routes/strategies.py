@@ -38,12 +38,17 @@ def get_pre_open_risk_assessment(
         default=None,
         description="Optional UTC timestamp for deterministic pre-open checks, e.g. 2026-05-26T12:35:00Z",
     ),
+    include_option_overlays: bool = Query(
+        default=False,
+        description="When true, also load directional put and option-chain overlays. Defaults off so the dashboard refresh stays responsive.",
+    ),
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
 ) -> PreOpenDownsideAssessment:
     try:
         return service.get_pre_open_downside_assessment(
             as_of=as_of,
             external_account_id=external_account_id,
+            include_option_overlays=include_option_overlays,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -74,6 +79,10 @@ def capture_pre_open_run(
     external_account_id: str,
     as_of: datetime | None = Query(default=None),
     force: bool = Query(default=False),
+    include_option_overlays: bool = Query(
+        default=False,
+        description="When true, persist slower directional put and option-chain overlays with the capture.",
+    ),
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
 ) -> PreOpenAssessmentCaptureResult:
     try:
@@ -81,6 +90,7 @@ def capture_pre_open_run(
             external_account_id=external_account_id,
             as_of=as_of,
             force=force,
+            include_option_overlays=include_option_overlays,
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

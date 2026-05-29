@@ -783,6 +783,21 @@ def test_preview_spread_selects_tradeable_candidate() -> None:
     assert adapter.get_best_bid_ask.call_count >= 2
 
 
+def test_top_of_book_uses_quote_bid_ask_without_depth_lookup() -> None:
+    service, adapter, _, _ = build_service()
+    quote = build_option_quotes()[0].model_copy(
+        update={
+            "bid": Decimal("2.40"),
+            "ask": Decimal("2.60"),
+        }
+    )
+
+    enriched = service._with_top_of_book(quote, mode=ExecutionMode.PAPER)
+
+    assert enriched == quote
+    adapter.get_best_bid_ask.assert_not_called()
+
+
 def test_preview_spread_fails_trend_filter() -> None:
     service, _, _, _ = build_service(underlying_quote=build_underlying_quote(last_done=Decimal("430")))
 
@@ -1210,12 +1225,16 @@ def test_run_review_returns_not_due_before_threshold() -> None:
 
 
 def test_pre_open_downside_assessment_prefers_qqq_puts_when_semis_and_qqq_are_weaker() -> None:
-    service, _, _, _ = build_service()
+    service, adapter, _, _ = build_service()
 
     result = service.get_pre_open_downside_assessment(
         as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
     )
 
+    adapter.get_quotes.assert_any_call(
+        symbols=["SPY.US", "QQQ.US", "SOXX.US", "USO.US", "TLT.US"],
+        mode=ExecutionMode.PAPER,
+    )
     assert result.session == "premarket"
     assert result.market_open is False
     assert result.downside_score >= 5
@@ -1256,6 +1275,22 @@ def test_pre_open_assessment_targets_next_trading_day_on_memorial_day() -> None:
     assert result.next_regular_open_at.astimezone(service.new_york).date() == date(2026, 5, 26)
 
 
+def test_pre_open_assessment_can_skip_option_overlays_for_fast_board() -> None:
+    service, adapter, _, _ = build_service()
+
+    result = service.get_pre_open_downside_assessment(
+        as_of=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+        include_option_overlays=False,
+    )
+
+    assert result.freshness_status == "partial"
+    assert "Option overlays skipped" in (result.freshness_detail or "")
+    assert result.signals
+    assert result.put_snapshots == []
+    assert result.chain_analyses == []
+    adapter.list_option_expiry_dates.assert_not_called()
+
+
 def test_capture_pre_open_run_persists_assessment_for_next_session() -> None:
     service, _, _, _ = build_service()
 
@@ -1273,16 +1308,13 @@ def test_capture_pre_open_run_persists_assessment_for_next_session() -> None:
 
 def test_capture_pre_open_run_persists_partial_assessment_when_only_spy_proxy_is_available() -> None:
     service, adapter, _, _ = build_service()
-    original_get_quote = adapter.get_quote.side_effect
+    original_get_quotes = adapter.get_quotes.side_effect
 
-    def flaky_get_quote(symbol, mode):
-        if symbol != "SPY.US":
-            raise LongbridgeIntegrationError(
-                f"Longbridge timed out while trying to load quote for '{symbol}' after 6s."
-            )
-        return original_get_quote(symbol, mode)
+    def partial_get_quotes(symbols, mode):
+        quotes = original_get_quotes(symbols, mode)
+        return {"SPY.US": quotes["SPY.US"]}
 
-    adapter.get_quote.side_effect = flaky_get_quote
+    adapter.get_quotes.side_effect = partial_get_quotes
 
     result = service.capture_pre_open_run(
         external_account_id="LBPT10087357",
@@ -1302,8 +1334,8 @@ def test_get_pre_open_assessment_falls_back_to_latest_persisted_run_on_transient
         external_account_id="LBPT10087357",
         as_of=datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc),
     )
-    adapter.get_quote.side_effect = LongbridgeIntegrationError(
-        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    adapter.get_quotes.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quotes for SPY.US, QQQ.US, SOXX.US, USO.US, TLT.US after 20s."
     )
 
     result = service.get_pre_open_downside_assessment(
@@ -1320,8 +1352,8 @@ def test_get_pre_open_assessment_falls_back_to_latest_persisted_run_on_transient
 
 def test_get_pre_open_assessment_returns_unavailable_board_without_persisted_fallback() -> None:
     service, adapter, _, _ = build_service()
-    adapter.get_quote.side_effect = LongbridgeIntegrationError(
-        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    adapter.get_quotes.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quotes for SPY.US, QQQ.US, SOXX.US, USO.US, TLT.US after 20s."
     )
 
     result = service.get_pre_open_downside_assessment(
@@ -1337,8 +1369,8 @@ def test_get_pre_open_assessment_returns_unavailable_board_without_persisted_fal
 
 def test_get_pre_open_assessment_raises_without_fallback_when_disabled() -> None:
     service, adapter, _, _ = build_service()
-    adapter.get_quote.side_effect = LongbridgeIntegrationError(
-        "Longbridge timed out while trying to load quote for 'QQQ.US' after 6s."
+    adapter.get_quotes.side_effect = LongbridgeIntegrationError(
+        "Longbridge timed out while trying to load quotes for SPY.US, QQQ.US, SOXX.US, USO.US, TLT.US after 20s."
     )
 
     with pytest.raises(LongbridgeIntegrationError, match="timed out"):
@@ -1351,16 +1383,14 @@ def test_get_pre_open_assessment_raises_without_fallback_when_disabled() -> None
 
 def test_get_pre_open_assessment_keeps_partial_board_when_optional_proxy_times_out() -> None:
     service, adapter, _, _ = build_service()
-    original_get_quote = adapter.get_quote.side_effect
+    original_get_quotes = adapter.get_quotes.side_effect
 
-    def flaky_get_quote(symbol, mode):
-        if symbol == "SOXX.US":
-            raise LongbridgeIntegrationError(
-                "Longbridge timed out while trying to load quote for 'SOXX.US' after 6s."
-            )
-        return original_get_quote(symbol, mode)
+    def partial_get_quotes(symbols, mode):
+        quotes = original_get_quotes(symbols, mode)
+        quotes.pop("SOXX.US")
+        return quotes
 
-    adapter.get_quote.side_effect = flaky_get_quote
+    adapter.get_quotes.side_effect = partial_get_quotes
 
     result = service.get_pre_open_downside_assessment(
         external_account_id="LBPT10087357",
@@ -1375,16 +1405,14 @@ def test_get_pre_open_assessment_keeps_partial_board_when_optional_proxy_times_o
 
 def test_get_pre_open_assessment_keeps_partial_board_when_spy_proxy_times_out() -> None:
     service, adapter, _, _ = build_service()
-    original_get_quote = adapter.get_quote.side_effect
+    original_get_quotes = adapter.get_quotes.side_effect
 
-    def flaky_get_quote(symbol, mode):
-        if symbol == "SPY.US":
-            raise LongbridgeIntegrationError(
-                "Longbridge timed out while trying to load quote for 'SPY.US' after 6s."
-            )
-        return original_get_quote(symbol, mode)
+    def partial_get_quotes(symbols, mode):
+        quotes = original_get_quotes(symbols, mode)
+        quotes.pop("SPY.US")
+        return quotes
 
-    adapter.get_quote.side_effect = flaky_get_quote
+    adapter.get_quotes.side_effect = partial_get_quotes
 
     result = service.get_pre_open_downside_assessment(
         external_account_id="LBPT10087357",

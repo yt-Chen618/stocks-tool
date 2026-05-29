@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     longbridge_language: str = "en"
     longbridge_enable_overnight: bool = False
     longbridge_print_quote_packages: bool = False
-    longbridge_request_timeout_seconds: int = 6
+    longbridge_request_timeout_seconds: int = Field(default=20, ge=1)
     longbridge_circuit_breaker_seconds: int = 30
     longbridge_executor_max_workers: int = 2
     bull_put_strategy: BullPutSpreadStrategySettings = Field(

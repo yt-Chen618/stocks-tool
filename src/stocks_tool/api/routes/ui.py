@@ -309,7 +309,7 @@ def render_dashboard() -> HTMLResponse:
                             <article class="mini-metric-tile">
                               <span class="metric-label">Last Monitor</span>
                               <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">Waiting for first spread check.</span>
+                              <span class="mini-metric-detail">No open or exit-pending spreads are being monitored.</span>
                             </article>
                           </div>
                           <div class="table-shell">
@@ -321,7 +321,7 @@ def render_dashboard() -> HTMLResponse:
                                   <th>Width</th>
                                   <th>Status</th>
                                   <th>Entry Credit</th>
-                                  <th>Last Monitor</th>
+                                  <th>Last Update</th>
                                   <th>Latest Action</th>
                                   <th>Actions</th>
                                 </tr>
@@ -336,18 +336,40 @@ def render_dashboard() -> HTMLResponse:
                         <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
-                              <span class="section-kicker">Macro</span>
-                              <h2>Pre-open Risk Board</h2>
+                              <span class="section-kicker">Live Macro</span>
+                              <h2>Real-time Macro Board</h2>
                             </div>
-                            <button id="load-preopen-board" class="icon-button" type="button">
-                              <span class="icon" aria-hidden="true">
-                                <svg viewBox="0 0 24 24" focusable="false">
-                                  <path d="M12 5v14"/>
-                                  <path d="M5 12h14"/>
-                                </svg>
-                              </span>
-                              <span>Load Macro Board</span>
-                            </button>
+                            <div class="panel-actions">
+                              <button id="load-preopen-board" class="icon-button" type="button">
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
+                                    <path d="M21 3v6h-6"/>
+                                  </svg>
+                                </span>
+                                <span>Load Live Macro</span>
+                              </button>
+                              <button id="load-preopen-overlays" class="icon-button" type="button">
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <path d="M4 7h16"/>
+                                    <path d="M7 12h10"/>
+                                    <path d="M10 17h4"/>
+                                  </svg>
+                                </span>
+                                <span>Load Option Overlays</span>
+                              </button>
+                              <button id="save-preopen-board" class="icon-button" type="button" disabled>
+                                <span class="icon" aria-hidden="true">
+                                  <svg viewBox="0 0 24 24" focusable="false">
+                                    <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                                    <path d="M17 21v-8H7v8"/>
+                                    <path d="M7 3v5h8"/>
+                                  </svg>
+                                </span>
+                                <span>Save Current Board</span>
+                              </button>
+                            </div>
                           </div>
                           <div id="preopen-summary-strip" class="mini-metric-strip">
                             <article class="mini-metric-tile">
@@ -390,11 +412,11 @@ def render_dashboard() -> HTMLResponse:
                                 <div class="holding-empty">Waiting for front and next-expiry option chain analysis.</div>
                               </div>
                             </section>
-                            <section>
-                              <div class="compact-header">
-                                <span class="section-kicker">Review</span>
-                                <h3>Opening Follow-through</h3>
-                              </div>
+                              <section>
+                                <div class="compact-header">
+                                  <span class="section-kicker">Stored Review</span>
+                                  <h3>Stored Opening Follow-through</h3>
+                                </div>
                               <div id="preopen-run-review" class="strategy-note-body empty">
                                 Select a broker account to load the latest pre-open capture and opening review.
                               </div>

@@ -151,28 +151,30 @@ The bull put spread workflow is currently paper-only:
 - journaling: the strategy now writes entry, close, scan-skip, and parameter-review notes into the existing journal workflow
 - pre-open run persistence: the strategy now stores one structured pre-open assessment per target U.S. session date, auto-journals the captured read, and records opening follow-through at `09:30 / 09:45 / 10:00 ET`
 - holiday handling: the pre-open assessment now distinguishes normal Mondays from exchange holidays, so `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26 09:30 ET`
-- dashboard: the `/` workbench now shows a pre-open risk board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, richer reference-put liquidity summaries, a deeper option-chain analysis layer with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus the latest persisted opening follow-through run for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
-- dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest pre-open run now render first; Longbridge-backed `Quick Quote` and `Pre-open Risk Board` refresh in the background so `/` stays usable even when broker quote calls are slow
-- dashboard strategy-first behavior: `/` now loads bull put runtime, spreads, orders, executions, journals, and stored pre-open runs first; live `Quick Quote` and live `Pre-open Risk Board` are both manual so broker budget stays focused on option-strategy actions
+- dashboard: the `/` workbench now shows a real-time macro board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, optional reference-put liquidity summaries, optional deeper option-chain analysis with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus a separate stored opening follow-through review for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
+- dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run render first; Longbridge-backed `Quick Quote` and the real-time macro board are manual so `/` stays usable even when broker quote calls are slow
+- dashboard strategy-first behavior: `/` now loads bull put runtime, spreads, orders, executions, journals, and stored pre-open runs first; `Load Live Macro` uses the fast macro path, `Load Option Overlays` fetches slower option-chain layers on demand, and `Save Current Board` persists the current live/partial macro read for follow-through review
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
-- Longbridge resilience: broker SDK calls now use a bounded request timeout plus a short circuit breaker to fail fast when quote connectivity degrades instead of hanging the whole local API
+- Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades
 - scheduler resilience: automatic Longbridge tasks now add an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not keep retrying every poll while the broker is unstable
-- scheduler priority: the background loop now prioritizes bull put monitor / scan / review before pre-open capture / review so strategy tasks get first access to Longbridge when broker connectivity is unstable
+- Longbridge circuit isolation: account/order failures and market-data failures now use separate circuit-breaker buckets, so a failed account sync does not automatically block quote-backed dashboard panels
+- scheduler priority: the background loop now runs bull put monitor / scan / review and pre-open capture / review before account and order reconciliation so strategy and market-data tasks get first access to Longbridge when broker connectivity is unstable
 - pre-open board resilience: `/strategies/pre-open-risk` now falls back to the latest stored pre-open run when transient Longbridge failures hit, returns a partial board when only some proxies are unavailable, and degrades to a structured unavailable board when no live or stored pre-open snapshot exists yet
 - homepage quote behavior: the dashboard no longer auto-loads `Quick Quote` on first paint, so the default `UNH.US` lookup does not open the shared Longbridge circuit before the pre-open board has a chance to refresh
-- pre-open proxy fetch path: the pre-open board now loads its proxy symbols through one batched Longbridge quote request instead of five sequential quote calls, which cuts down circuit poisoning and log noise during broker instability
+- pre-open proxy fetch path: the pre-open board now loads its proxy symbols through one batched Longbridge quote request instead of five sequential quote calls, and the dashboard skips slow option overlays by default so fresh macro proxy data can render first
 - overlay timeout margin: the homepage now gives `pre-open-risk` slightly more time than the underlying Longbridge fail-fast window, so the first degraded render lands as structured `Unavailable` instead of a client-side `Timed Out`
 - dashboard asset versioning: `/` now serves versioned `app.css` and `app.js` URLs so browser tabs pick up the latest frontend after a reload instead of sticking to stale cached static assets
 
 ## Regression scripts
 
-The repo includes four regression workflows plus a single entrypoint:
+The repo includes six regression workflows plus a single entrypoint:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 .venv\Scripts\python.exe scripts\run_regression.py real-paper
+.venv\Scripts\python.exe scripts\run_regression.py real-preopen-board
 .venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh
 ```
 
@@ -180,11 +182,12 @@ Available workflows:
 
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
-- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the pre-open risk board, opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
+- `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
+- `real-preopen-board`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, clicks `Load Live Macro`, and verifies the response is live fast-path data for the expected U.S. session date instead of a stored fallback
 - `real-ui-refresh`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, reloads it repeatedly, and reports dashboard-ready plus overlay-settled timings for the warm real instance
 
-Both scripts now emit the same JSON envelope shape:
+All workflow scripts emit the same JSON envelope shape:
 
 - `script`
 - `workflow`
@@ -202,6 +205,7 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json
+.venv\Scripts\python.exe scripts\run_regression.py real-preopen-board --expected-session-date 2026-05-29 --json-output artifacts/real-preopen-board-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --json-output artifacts/real-ui-refresh-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --execute --json-output artifacts/real-paper-executed.json
 ```

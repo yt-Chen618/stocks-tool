@@ -184,6 +184,7 @@ def test_pre_open_risk_route_returns_assessment() -> None:
     assert body["chain_analyses"][0]["front_expiration"]["atm_put_symbol"] == "QQQ260529P710000.US"
     request = service.get_pre_open_downside_assessment.call_args.kwargs
     assert request["external_account_id"] == "LBPT10087357"
+    assert request["include_option_overlays"] is False
 
 
 def test_capture_pre_open_run_route_returns_run_result() -> None:
@@ -231,6 +232,8 @@ def test_capture_pre_open_run_route_returns_run_result() -> None:
     body = response.json()
     assert body["captured"] is True
     assert body["run"]["target_session_date"] == "2026-05-26"
+    request = service.capture_pre_open_run.call_args.kwargs
+    assert request["include_option_overlays"] is False
 
 
 def test_review_pre_open_run_route_returns_review_result() -> None:

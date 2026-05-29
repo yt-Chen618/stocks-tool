@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-05-24
+Last updated: 2026-05-29
 
 ## Project
 
@@ -114,13 +114,17 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
 - Automatic Longbridge scheduler tasks now apply an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not retry every `15s` while the broker is unstable.
-- The scheduler now prioritizes bull put monitor / scan / review before pre-open capture / review so option-strategy tasks get first access to Longbridge when quote connectivity is unstable.
+- The default Longbridge SDK request timeout is now `20s`, which gives background account/order/strategy loads more room to finish before timeout and backoff logic starts.
+- Longbridge circuit breakers are now separated by channel (`account`, `trade`, `market-data`), so a failed account/order reconciliation no longer directly blocks quote-backed dashboard panels like the pre-open risk board.
+- The scheduler now runs bull put monitor / scan / review and pre-open capture / review before account and order reconciliation so strategy and market-data tasks get first access to Longbridge when quote connectivity is unstable.
 - `GET /strategies/pre-open-risk` now degrades in three steps instead of failing the board outright:
   - return the latest stored pre-open run as `stale` on transient Longbridge failures when a persisted run exists
   - return a `partial` board when only some proxy symbols are unavailable
   - return a structured `unavailable` board when live proxy data fails and no stored run exists yet
 - The dashboard no longer auto-loads `Quick Quote` on first paint; quote refresh is now explicit button-click or trusted Enter only.
-- The dashboard no longer auto-loads or auto-seeds the live pre-open board on first paint; stored pre-open runs still render immediately, while live macro refresh is manual through `Load Macro Board`.
+- The dashboard no longer auto-loads or auto-seeds the live pre-open board on first paint; stored pre-open runs still render immediately in the separate stored review card, while live macro refresh is manual through `Load Live Macro`.
+- The dashboard pre-open refresh now requests the fast macro board path by default: proxy symbols load in one batched quote call and option overlays are skipped unless the user clicks `Load Option Overlays`.
+- The dashboard can persist the current live or partial macro read through `Save Current Board`, which calls the pre-open capture route and updates the stored opening follow-through card.
 - The homepage gives `pre-open-risk` a small timeout margin above the broker fail-fast window so the first degraded response lands as structured `unavailable` instead of a client-side `timed_out`.
 - The HTML dashboard now serves versioned `app.css` and `app.js` URLs so browser tabs pick up fresh frontend assets after reload instead of reusing stale cached scripts.
 - Default intervals:
@@ -129,6 +133,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - order sync: `300s`
   - working-order sync: `60s`
   - bull put spread monitor: `300s`
+  - Longbridge SDK request timeout: `20s`
 - Broker-account records now persist:
   - `account_sync_status`
   - `account_last_sync_attempt_at`
@@ -311,14 +316,16 @@ Frontend files:
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
 - Added holiday-aware target-session handling so the pre-open board and persisted runs correctly treat `2026-05-25` as a Memorial Day closure with the next open on `2026-05-26`.
-- Added an `Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
-- Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays refresh asynchronously in the background.
+- Added a `Stored Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
+- Split the dashboard macro workflow into `Load Live Macro` for the fast real-time proxy board, `Load Option Overlays` for slower option-chain detail, and `Save Current Board` for persisting the current live/partial read.
+- Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays stay manual.
 - Added `GET /account-snapshots/latest` so the dashboard can fetch the latest local snapshot summary without reloading the full snapshot-history payload on each refresh.
-- Added explicit dashboard overlay states for `Quick Quote` and `Pre-open Risk Board`, including `Live`, `Refreshing`, `Timed Out`, `Circuit Open`, and `Stale`, while preserving the last successful broker-backed data when a later refresh fails.
-- Added bounded Longbridge SDK timeouts plus a short circuit breaker so quote/connectivity failures fail fast instead of blocking the whole local API process.
+- Added explicit dashboard overlay states for `Quick Quote` and the real-time macro board, including `Live`, `Refreshing`, `Partial`, `Timed Out`, `Circuit Open`, and `Stale`, while preserving the last successful broker-backed data when a later refresh fails.
+- Added bounded Longbridge SDK timeouts plus short per-channel circuit breakers so quote/connectivity failures fail fast instead of blocking the whole local API process; the default timeout is now `20s` so slow background loads have more room to complete.
 - Added a service-level bull put regression workflow at `scripts/run_bull_put_strategy_regression.py` and exposed it through `scripts/run_regression.py bull-put-paper`.
 - Added a real Longbridge bull put smoke script at `scripts/run_bull_put_real_paper_smoke.py` and exposed it through `scripts/run_regression.py bull-put-real-paper`.
-- Added a headless browser-driven `mock-ui` regression that now also checks the pre-open risk board, opening follow-through review card, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
+- Added a headless browser-driven `mock-ui` regression that now also checks the real-time macro board, save-current-board action, stored opening follow-through review card, alongside strategy controls, strategy review, spread monitor, execution summary, journal submit, and submit / replace / cancel from the dashboard.
+- Added `scripts/run_real_local_preopen_board_regression.py` plus `scripts/real_local_preopen_board_flow.js`, exposed as `scripts/run_regression.py real-preopen-board`, to click `Load Live Macro` on a real localhost dashboard and verify live fast-path data for the expected U.S. session date.
 - Productized the regression scripts with a unified `scripts/run_regression.py` entrypoint, shared JSON report envelope, and optional `--json-output`.
 - Updated the mock dashboard backend to expose reconciliation/account metadata, `GET /executions`, and `GET/POST /journals` so the mock workflow matches the current dashboard data surface.
 - Added `tests/test_orders_api.py` for submit / replace / cancel route coverage.
@@ -329,20 +336,27 @@ Frontend files:
 - Added `tests/test_strategies_api.py` for strategy preview, execute, monitor, and runtime-review route coverage.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the dashboard load decoupling and Longbridge fast-fail additions:
+- Latest local verification run after the dashboard macro-board and Longbridge scheduler updates:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `64 passed`
+- Result: `75 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the pre-open risk board, opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the overlay status surfaces for `Quick Quote` and the pre-open board
+- Result: `passed` and now includes the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the macro board state surfaces
+- Latest real local pre-open board regression:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py real-preopen-board --expected-session-date 2026-05-29
+```
+
+- Result from the long-running local `127.0.0.1:8000` instance: `passed`; the clicked `Load Live Macro` request returned `target_session_date="2026-05-29"`, `source_run_id=null`, `freshness_status="partial"`, and `include_option_overlays=false`.
 - Latest bull put service-regression run:
 
 ```powershell
@@ -372,7 +386,7 @@ Frontend files:
   - overlay-settled: `129-248 ms`
 - The current real local dashboard now settles with explicit degraded overlay states instead of hanging:
   - `Quick Quote`: `Idle` until the user explicitly loads a symbol
-  - `Pre-open Risk Board`: `Unavailable` when broker proxy data is down and there is no stored seed run yet
+  - real-time macro board: `Unavailable` when broker proxy data is down and there is no stored seed run yet
 - One earlier first-pass regression run saw a single `13.7s` outlier that was not reproduced by the later default-threshold reruns or the post-idle rerun.
 - Verified current pre-open fallback behavior on a fresh temporary local server process:
   - `GET /strategies/pre-open-risk?external_account_id=LBPT10087357` now returns `200` with `freshness_status="error"` and a structured unavailable board when Longbridge connectivity fails before any first successful stored run exists
@@ -380,8 +394,9 @@ Frontend files:
   - `#quote-card` stays on `Load a quote manually to keep the dashboard fast.`
   - `#preopen-assessment-card` renders the structured unavailable board instead of a client-side timed-out shell
 - Verified the new strategy-first dashboard behavior:
-  - mock browser regression now clicks `Load Macro Board` explicitly instead of assuming a live pre-open auto-refresh
-  - full test suite passes with the new manual-macro flow and scheduler priority ordering
+  - mock browser regression now clicks `Load Live Macro` and `Save Current Board` explicitly instead of assuming a live pre-open auto-refresh
+  - real localhost regression confirms the visible top macro board can show `05/29` live data while the lower stored follow-through card may still show the latest persisted `05/27` review until saved
+  - full test suite passes with the manual macro flow, optional option overlays, and scheduler priority ordering
 - Verified opening follow-through checkpoint degradation:
   - `review_pre_open_run()` no longer leaves `09:30 / 09:45 / 10:00 ET` checkpoints stuck in `pending` when one or two Longbridge proxy quotes time out
   - transient `SPY / SOXX / QQQ` quote failures now produce a captured partial checkpoint with missing fields noted in `detail`, so the run can keep progressing instead of surfacing a blanket `502`

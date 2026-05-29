@@ -163,10 +163,13 @@ def main() -> None:
             dashboard.raise_for_status()
             assert "Strategy Center" in dashboard.text
             assert "Holdings Overview" in dashboard.text
-            assert "Pre-open Risk Board" in dashboard.text
+            assert "Real-time Macro Board" in dashboard.text
+            assert "Load Live Macro" in dashboard.text
+            assert "Load Option Overlays" in dashboard.text
+            assert "Save Current Board" in dashboard.text
             assert "Risk Proxies" in dashboard.text
             assert "QQQ / SPY Put Check" in dashboard.text
-            assert "Opening Follow-through" in dashboard.text
+            assert "Stored Opening Follow-through" in dashboard.text
             assert "Bull Put Strategy" in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
@@ -198,6 +201,7 @@ def main() -> None:
                 "prepareMarketOverlayPanels()",
                 "renderPreOpenAssessment(",
                 "renderLatestPreOpenRun()",
+                "saveCurrentPreOpenBoard()",
                 "strategy-controls-form",
                 "runStrategyScan()",
                 "runStrategyReview()",

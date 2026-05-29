@@ -475,13 +475,17 @@ class BullPutStrategyService:
         as_of: datetime | None = None,
         external_account_id: str | None = None,
         allow_fallback: bool = True,
+        include_option_overlays: bool = True,
     ) -> PreOpenDownsideAssessment:
         evaluated_at = as_of or datetime.now(timezone.utc)
         if evaluated_at.tzinfo is None:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
 
         try:
-            return self._build_live_pre_open_downside_assessment(evaluated_at)
+            return self._build_live_pre_open_downside_assessment(
+                evaluated_at,
+                include_option_overlays=include_option_overlays,
+            )
         except LongbridgeIntegrationError as exc:
             if isinstance(exc, (LongbridgeDependencyError, LongbridgeConfigurationError)):
                 raise
@@ -501,6 +505,8 @@ class BullPutStrategyService:
     def _build_live_pre_open_downside_assessment(
         self,
         evaluated_at: datetime,
+        *,
+        include_option_overlays: bool = True,
     ) -> PreOpenDownsideAssessment:
         if evaluated_at.tzinfo is None:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
@@ -603,15 +609,26 @@ class BullPutStrategyService:
             spy_change=spy_change,
             semis_change=semis_change,
         )
-        put_snapshots, missing_put_snapshots = self._build_directional_put_snapshots(
-            evaluated_at=evaluated_at,
-            signals=[signal_by_key[key] for key in ("spy", "qqq") if key in signal_by_key],
-        )
-        chain_analyses, missing_chain_analyses = self._build_option_chain_analyses(
-            evaluated_at=evaluated_at,
-            signals=[signal_by_key[key] for key in ("spy", "qqq") if key in signal_by_key],
-        )
+        put_snapshots: list[DirectionalPutSnapshot] = []
+        chain_analyses: list[OptionChainAnalysis] = []
+        missing_put_snapshots: list[str] = []
+        missing_chain_analyses: list[str] = []
+        overlay_signals = [signal_by_key[key] for key in ("spy", "qqq") if key in signal_by_key]
+        if include_option_overlays:
+            put_snapshots, missing_put_snapshots = self._build_directional_put_snapshots(
+                evaluated_at=evaluated_at,
+                signals=overlay_signals,
+            )
+            chain_analyses, missing_chain_analyses = self._build_option_chain_analyses(
+                evaluated_at=evaluated_at,
+                signals=overlay_signals,
+            )
         missing_overlay_layers: list[str] = []
+        if overlay_signals and not include_option_overlays:
+            missing_overlay_layers.append("Option overlays skipped for fast macro refresh.")
+            reasons.append(
+                "Option overlays were skipped so the macro board can refresh without waiting on slow option-chain calls."
+            )
         if missing_put_snapshots:
             missing_overlay_layers.append(
                 "Directional put snapshots unavailable for "
@@ -696,17 +713,28 @@ class BullPutStrategyService:
         signal_by_key: dict[str, PreOpenProxySignal] = {}
         missing_signals: list[str] = []
         proxy_errors: list[str] = []
+        symbols = [symbol for _, _, symbol in signal_specs]
+        try:
+            quotes_by_symbol = self.longbridge_adapter.get_quotes(
+                symbols=symbols,
+                mode=ExecutionMode.PAPER,
+            )
+        except LongbridgeIntegrationError as exc:
+            return (
+                [],
+                {},
+                [label for _, label, _ in signal_specs],
+                [str(exc)],
+            )
+
         for key, label, symbol in signal_specs:
-            try:
-                quote = self.longbridge_adapter.get_quote(symbol, mode=ExecutionMode.PAPER)
-            except LongbridgeIntegrationError as exc:
+            quote = quotes_by_symbol.get(symbol)
+            if quote is None:
                 missing_signals.append(label)
-                proxy_errors.append(str(exc))
                 logger.warning(
-                    "Pre-open proxy %s (%s) was unavailable; continuing with partial board when possible. %s",
+                    "Pre-open proxy %s (%s) was unavailable from the batch quote response; continuing with partial board when possible.",
                     label,
                     symbol,
-                    exc,
                 )
                 continue
             signal = self._build_pre_open_signal(
@@ -743,6 +771,7 @@ class BullPutStrategyService:
         as_of: datetime | None = None,
         force: bool = False,
         automatic: bool = False,
+        include_option_overlays: bool = False,
     ) -> PreOpenAssessmentCaptureResult:
         broker_account = self.broker_accounts.get_by_external_account_id(external_account_id)
         if broker_account is None or broker_account.broker != BrokerName.LONGBRIDGE:
@@ -763,6 +792,7 @@ class BullPutStrategyService:
                         as_of=evaluated_at,
                         external_account_id=external_account_id,
                         allow_fallback=False,
+                        include_option_overlays=include_option_overlays,
                     ),
                 )
                 return PreOpenAssessmentCaptureResult(
@@ -788,6 +818,7 @@ class BullPutStrategyService:
             as_of=evaluated_at,
             external_account_id=external_account_id,
             allow_fallback=False,
+            include_option_overlays=include_option_overlays,
         )
         run = existing or PreOpenAssessmentRun(
             external_account_id=external_account_id,
@@ -3440,6 +3471,8 @@ class BullPutStrategyService:
         *,
         mode: ExecutionMode,
     ) -> OptionMarketSnapshot:
+        if quote.bid is not None and quote.ask is not None:
+            return quote
         bid, ask = self.longbridge_adapter.get_best_bid_ask(symbol=quote.symbol, mode=mode)
         return quote.model_copy(update={"bid": bid, "ask": ask})
 

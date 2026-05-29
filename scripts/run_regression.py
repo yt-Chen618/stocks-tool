@@ -11,6 +11,7 @@ SCRIPT_BY_WORKFLOW = {
     "bull-put-real-paper": ROOT / "scripts" / "run_bull_put_real_paper_smoke.py",
     "mock-ui": ROOT / "scripts" / "run_mock_ui_order_regression.py",
     "real-paper": ROOT / "scripts" / "run_real_paper_order_smoke.py",
+    "real-preopen-board": ROOT / "scripts" / "run_real_local_preopen_board_regression.py",
     "real-ui-refresh": ROOT / "scripts" / "run_real_local_dashboard_refresh_regression.py",
 }
 
@@ -21,7 +22,8 @@ def parse_args() -> argparse.Namespace:
             "Unified entrypoint for dashboard/order regression scripts. "
             "Use `mock-ui` for the local in-memory UI flow, `bull-put-paper` for the in-memory bull put service flow, "
             "`bull-put-real-paper` for real Longbridge bull put preview smoke, `real-paper` for the stock-order paper smoke flow, "
-            "and `real-ui-refresh` for repeated reload timing checks against an already running localhost dashboard."
+            "`real-preopen-board` for live localhost pre-open board checks, and `real-ui-refresh` for repeated reload "
+            "timing checks against an already running localhost dashboard."
         )
     )
     parser.add_argument(

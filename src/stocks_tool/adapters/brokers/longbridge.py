@@ -61,8 +61,8 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             thread_name_prefix="longbridge-sdk",
         )
         self._circuit_lock = threading.Lock()
-        self._circuit_open_until = 0.0
-        self._circuit_reason = ""
+        self._circuit_open_until_by_key: dict[str, float] = {}
+        self._circuit_reason_by_key: dict[str, str] = {}
         self._quote_cache_lock = threading.Lock()
         self._quote_cache: dict[tuple[str, str], tuple[float, SecurityQuoteSnapshot]] = {}
 
@@ -325,88 +325,100 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         currency: str | None = None,
         options_level: str | None = None,
     ) -> AccountSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
-        quote_context = sdk["QuoteContext"](config)
+        def _build_snapshot() -> AccountSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            quote_context = sdk["QuoteContext"](config)
 
-        balances = trade_context.account_balance(currency)
-        balance = self._pick_account_balance(balances=balances, currency=currency)
+            balances = trade_context.account_balance(currency)
+            balance = self._pick_account_balance(balances=balances, currency=currency)
 
-        positions_response = trade_context.stock_positions()
-        stock_positions = self._extract_stock_positions(positions_response)
-        quote_by_symbol = self._load_quotes_by_symbol(quote_context, stock_positions)
-        captured_at = datetime.now(timezone.utc)
+            positions_response = trade_context.stock_positions()
+            stock_positions = self._extract_stock_positions(positions_response)
+            quote_by_symbol = self._load_quotes_by_symbol(quote_context, stock_positions)
+            captured_at = datetime.now(timezone.utc)
 
-        positions = [
-            self._map_position_snapshot(position=position, quote=quote_by_symbol.get(position.symbol))
-            for position in stock_positions
-        ]
+            positions = [
+                self._map_position_snapshot(position=position, quote=quote_by_symbol.get(position.symbol))
+                for position in stock_positions
+            ]
 
-        return AccountSnapshot(
-            broker=self.name,
-            account_id=external_account_id,
-            currency=(getattr(balance, "currency", None) or currency or "USD"),
-            cash_balance=self._to_decimal(getattr(balance, "total_cash", None)),
-            net_liquidation=self._to_decimal(getattr(balance, "net_assets", None)),
-            buying_power=self._to_decimal(getattr(balance, "buy_power", None)),
-            day_trade_buying_power=None,
-            options_level=options_level,
-            positions=positions,
-            raw_payload={
-                "mode": mode.value,
-                "balance": self._serialize_attrs(
-                    balance,
-                    [
-                        "total_cash",
-                        "max_finance_amount",
-                        "remaining_finance_amount",
-                        "risk_level",
-                        "margin_call",
-                        "currency",
-                        "cash_infos",
-                        "net_assets",
-                        "init_margin",
-                        "maintenance_margin",
-                        "buy_power",
-                        "frozen_transaction_fees",
-                    ],
-                ),
-                "position_channels": self._serialize_position_channels(positions_response),
-                "quotes": {
-                    symbol: self._serialize_quote(quote)
-                    for symbol, quote in sorted(quote_by_symbol.items())
+            return AccountSnapshot(
+                broker=self.name,
+                account_id=external_account_id,
+                currency=(getattr(balance, "currency", None) or currency or "USD"),
+                cash_balance=self._to_decimal(getattr(balance, "total_cash", None)),
+                net_liquidation=self._to_decimal(getattr(balance, "net_assets", None)),
+                buying_power=self._to_decimal(getattr(balance, "buy_power", None)),
+                day_trade_buying_power=None,
+                options_level=options_level,
+                positions=positions,
+                raw_payload={
+                    "mode": mode.value,
+                    "balance": self._serialize_attrs(
+                        balance,
+                        [
+                            "total_cash",
+                            "max_finance_amount",
+                            "remaining_finance_amount",
+                            "risk_level",
+                            "margin_call",
+                            "currency",
+                            "cash_infos",
+                            "net_assets",
+                            "init_margin",
+                            "maintenance_margin",
+                            "buy_power",
+                            "frozen_transaction_fees",
+                        ],
+                    ),
+                    "position_channels": self._serialize_position_channels(positions_response),
+                    "quotes": {
+                        symbol: self._serialize_quote(quote)
+                        for symbol, quote in sorted(quote_by_symbol.items())
+                    },
                 },
-            },
-            captured_at=captured_at,
+                captured_at=captured_at,
+            )
+
+        return self._run_sdk_action(
+            f"build account snapshot for '{external_account_id}'",
+            _build_snapshot,
         )
 
     def submit_order(
         self,
         request: CreateOrderRequest,
     ) -> BrokerOrderSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=request.mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
+        def _submit_order() -> BrokerOrderSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=request.mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
 
-        order_type = self._map_submit_order_type(request.order_type, request.limit_price, request.stop_price, sdk)
-        time_in_force = self._map_submit_time_in_force(request.time_in_force, sdk)
-        side = self._map_submit_side(request.side, sdk)
+            order_type = self._map_submit_order_type(request.order_type, request.limit_price, request.stop_price, sdk)
+            time_in_force = self._map_submit_time_in_force(request.time_in_force, sdk)
+            side = self._map_submit_side(request.side, sdk)
 
-        submit_response = trade_context.submit_order(
-            symbol=request.symbol,
-            order_type=order_type,
-            side=side,
-            submitted_quantity=Decimal(request.quantity),
-            time_in_force=time_in_force,
-            submitted_price=request.limit_price,
-            trigger_price=request.stop_price,
-            remark=request.remark,
-        )
-        order_detail = trade_context.order_detail(submit_response.order_id)
-        return self._map_order_snapshot(
-            detail=order_detail,
-            mode=request.mode,
+            submit_response = trade_context.submit_order(
+                symbol=request.symbol,
+                order_type=order_type,
+                side=side,
+                submitted_quantity=Decimal(request.quantity),
+                time_in_force=time_in_force,
+                submitted_price=request.limit_price,
+                trigger_price=request.stop_price,
+                remark=request.remark,
+            )
+            order_detail = trade_context.order_detail(submit_response.order_id)
+            return self._map_order_snapshot(
+                detail=order_detail,
+                mode=request.mode,
+            )
+
+        return self._run_sdk_action(
+            f"submit order for '{request.symbol}'",
+            _submit_order,
         )
 
     def cancel_order(
@@ -414,12 +426,18 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         external_order_id: str,
         mode: ExecutionMode,
     ) -> BrokerOrderSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
-        trade_context.cancel_order(external_order_id)
-        order_detail = trade_context.order_detail(external_order_id)
-        return self._map_order_snapshot(detail=order_detail, mode=mode)
+        def _cancel_order() -> BrokerOrderSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            trade_context.cancel_order(external_order_id)
+            order_detail = trade_context.order_detail(external_order_id)
+            return self._map_order_snapshot(detail=order_detail, mode=mode)
+
+        return self._run_sdk_action(
+            f"cancel order '{external_order_id}'",
+            _cancel_order,
+        )
 
     def replace_order(
         self,
@@ -431,29 +449,41 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         remark: str | None,
         mode: ExecutionMode,
     ) -> BrokerOrderSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
-        trade_context.replace_order(
-            external_order_id,
-            quantity=Decimal(quantity),
-            price=limit_price,
-            trigger_price=stop_price,
-            remark=remark,
+        def _replace_order() -> BrokerOrderSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            trade_context.replace_order(
+                external_order_id,
+                quantity=Decimal(quantity),
+                price=limit_price,
+                trigger_price=stop_price,
+                remark=remark,
+            )
+            order_detail = trade_context.order_detail(external_order_id)
+            return self._map_order_snapshot(detail=order_detail, mode=mode)
+
+        return self._run_sdk_action(
+            f"replace order '{external_order_id}'",
+            _replace_order,
         )
-        order_detail = trade_context.order_detail(external_order_id)
-        return self._map_order_snapshot(detail=order_detail, mode=mode)
 
     def get_order(
         self,
         external_order_id: str,
         mode: ExecutionMode,
     ) -> BrokerOrderSnapshot:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
-        order_detail = trade_context.order_detail(external_order_id)
-        return self._map_order_snapshot(detail=order_detail, mode=mode)
+        def _get_order() -> BrokerOrderSnapshot:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            order_detail = trade_context.order_detail(external_order_id)
+            return self._map_order_snapshot(detail=order_detail, mode=mode)
+
+        return self._run_sdk_action(
+            f"load order '{external_order_id}'",
+            _get_order,
+        )
 
     def list_today_orders(
         self,
@@ -462,11 +492,18 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         symbol: str | None = None,
         external_order_id: str | None = None,
     ) -> list[BrokerOrderSnapshot]:
-        sdk = self._load_sdk()
-        config = self._build_config(mode=mode, sdk=sdk)
-        trade_context = sdk["TradeContext"](config)
-        orders = trade_context.today_orders(symbol=symbol, order_id=external_order_id)
-        return [self._map_order_snapshot(detail=order, mode=mode) for order in orders]
+        def _list_today_orders() -> list[BrokerOrderSnapshot]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            orders = trade_context.today_orders(symbol=symbol, order_id=external_order_id)
+            return [self._map_order_snapshot(detail=order, mode=mode) for order in orders]
+
+        target = external_order_id or symbol or "account"
+        return self._run_sdk_action(
+            f"list today orders for '{target}'",
+            _list_today_orders,
+        )
 
     def _load_sdk(self) -> dict[str, Any]:
         try:
@@ -549,13 +586,15 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return mapping.get(self.settings.longbridge_language.lower(), getattr(language_enum, "EN"))
 
     def _run_sdk_action(self, action: str, func):
-        self._raise_if_circuit_open(action)
+        circuit_key = self._circuit_key_for_action(action)
+        self._raise_if_circuit_open(action, circuit_key=circuit_key)
         future = self._executor.submit(func)
         try:
             return future.result(timeout=max(1, self.settings.longbridge_request_timeout_seconds))
         except FuturesTimeoutError as exc:
             future.cancel()
             self._open_circuit(
+                circuit_key=circuit_key,
                 reason=(
                     f"Longbridge timed out while trying to {action} after "
                     f"{self.settings.longbridge_request_timeout_seconds}s."
@@ -570,32 +609,50 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         except Exception as exc:
             if self._should_open_circuit(exc):
                 self._open_circuit(
+                    circuit_key=circuit_key,
                     reason=f"Longbridge connectivity failed while trying to {action}: {exc}"
                 )
             raise LongbridgeIntegrationError(
                 f"Longbridge failed to {action}: {exc}"
             ) from exc
 
-    def _raise_if_circuit_open(self, action: str) -> None:
+    def _raise_if_circuit_open(self, action: str, *, circuit_key: str) -> None:
         with self._circuit_lock:
             now = time.monotonic()
-            if now >= self._circuit_open_until:
-                self._circuit_open_until = 0.0
-                self._circuit_reason = ""
+            circuit_open_until = self._circuit_open_until_by_key.get(circuit_key, 0.0)
+            if now >= circuit_open_until:
+                self._circuit_open_until_by_key.pop(circuit_key, None)
+                self._circuit_reason_by_key.pop(circuit_key, None)
                 return
-            remaining = max(1, int(round(self._circuit_open_until - now)))
-            reason = self._circuit_reason or "Longbridge connectivity is temporarily unavailable."
+            remaining = max(1, int(round(circuit_open_until - now)))
+            reason = self._circuit_reason_by_key.get(circuit_key) or "Longbridge connectivity is temporarily unavailable."
         raise LongbridgeIntegrationError(
             f"{reason} Skipping attempt to {action} for another {remaining}s."
         )
 
-    def _open_circuit(self, *, reason: str) -> None:
+    def _open_circuit(self, *, circuit_key: str, reason: str) -> None:
         with self._circuit_lock:
-            self._circuit_open_until = time.monotonic() + max(
+            self._circuit_open_until_by_key[circuit_key] = time.monotonic() + max(
                 1,
                 self.settings.longbridge_circuit_breaker_seconds,
             )
-            self._circuit_reason = reason
+            self._circuit_reason_by_key[circuit_key] = reason
+
+    @staticmethod
+    def _circuit_key_for_action(action: str) -> str:
+        normalized = action.lower()
+        if (
+            "quote" in normalized
+            or "option" in normalized
+            or "bid/ask" in normalized
+            or "daily bars" in normalized
+        ):
+            return "market-data"
+        if "account snapshot" in normalized:
+            return "account"
+        if "order" in normalized:
+            return "trade"
+        return "default"
 
     @staticmethod
     def _should_open_circuit(exc: Exception) -> bool:
@@ -801,6 +858,8 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             volume=int(getattr(quote, "volume", 0) or 0),
             turnover=self._to_decimal(getattr(quote, "turnover", None)),
             trade_status=self._enum_to_value(getattr(quote, "trade_status", None)),
+            bid=self._to_optional_decimal(getattr(quote, "bid", None)),
+            ask=self._to_optional_decimal(getattr(quote, "ask", None)),
             open_interest=int(open_interest) if open_interest is not None else None,
             implied_volatility=self._to_optional_decimal(implied_volatility),
             historical_volatility=self._to_optional_decimal(getattr(quote, "historical_volatility", None)),
@@ -824,6 +883,8 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                         "volume",
                         "turnover",
                         "trade_status",
+                        "bid",
+                        "ask",
                         "implied_volatility",
                         "open_interest",
                         "expiry_date",

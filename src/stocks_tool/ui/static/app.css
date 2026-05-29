@@ -184,6 +184,13 @@ a {
   margin-bottom: 18px;
 }
 
+.panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .controls-grid {
   display: grid;
   grid-template-columns: minmax(260px, 2fr) repeat(2, minmax(160px, 1fr));

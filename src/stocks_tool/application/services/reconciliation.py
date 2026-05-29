@@ -130,6 +130,60 @@ class ReconciliationCoordinator:
                 if broker_account.broker != BrokerName.LONGBRIDGE:
                     continue
 
+                if self.settings.bull_put_strategy.enabled:
+                    if self.settings.bull_put_strategy.auto_monitor_enabled:
+                        self._monitor_due_spreads(
+                            external_account_id=broker_account.external_account_id,
+                            spreads=spreads,
+                            strategy_service=strategy_service,
+                            now=now,
+                        )
+                    if self.settings.bull_put_strategy.auto_scan_enabled:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="bull-put-scan",
+                            task_label="bull put entry scan",
+                            now=now,
+                            callback=lambda: strategy_service.run_entry_scan(
+                                external_account_id=broker_account.external_account_id,
+                                mode=ExecutionMode.PAPER,
+                                as_of=now,
+                            ),
+                        )
+                    if self.settings.bull_put_strategy.auto_review_enabled:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="bull-put-review",
+                            task_label="bull put review",
+                            now=now,
+                            callback=lambda: strategy_service.run_review(
+                                external_account_id=broker_account.external_account_id,
+                                mode=ExecutionMode.PAPER,
+                                as_of=now,
+                            ),
+                        )
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="pre-open-capture",
+                        task_label="pre-open assessment capture",
+                        now=now,
+                        callback=lambda: strategy_service.capture_pre_open_run(
+                            external_account_id=broker_account.external_account_id,
+                            as_of=now,
+                            automatic=True,
+                        ),
+                    )
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="pre-open-review",
+                        task_label="pre-open review",
+                        now=now,
+                        callback=lambda: strategy_service.review_pre_open_run(
+                            external_account_id=broker_account.external_account_id,
+                            as_of=now,
+                        ),
+                    )
+
                 account_due = self._is_due(
                     broker_account.account_last_sync_attempt_at,
                     self.settings.reconciliation_account_interval_seconds,
@@ -170,61 +224,6 @@ class ReconciliationCoordinator:
                             mode=ExecutionMode.PAPER,
                         ),
                     )
-
-                if not self.settings.bull_put_strategy.enabled:
-                    continue
-                if self.settings.bull_put_strategy.auto_monitor_enabled:
-                    self._monitor_due_spreads(
-                        external_account_id=broker_account.external_account_id,
-                        spreads=spreads,
-                        strategy_service=strategy_service,
-                        now=now,
-                    )
-                if self.settings.bull_put_strategy.auto_scan_enabled:
-                    self._run_account_task(
-                        external_account_id=broker_account.external_account_id,
-                        task_key="bull-put-scan",
-                        task_label="bull put entry scan",
-                        now=now,
-                        callback=lambda: strategy_service.run_entry_scan(
-                            external_account_id=broker_account.external_account_id,
-                            mode=ExecutionMode.PAPER,
-                            as_of=now,
-                        ),
-                    )
-                if self.settings.bull_put_strategy.auto_review_enabled:
-                    self._run_account_task(
-                        external_account_id=broker_account.external_account_id,
-                        task_key="bull-put-review",
-                        task_label="bull put review",
-                        now=now,
-                        callback=lambda: strategy_service.run_review(
-                            external_account_id=broker_account.external_account_id,
-                            mode=ExecutionMode.PAPER,
-                            as_of=now,
-                        ),
-                    )
-                self._run_account_task(
-                    external_account_id=broker_account.external_account_id,
-                    task_key="pre-open-capture",
-                    task_label="pre-open assessment capture",
-                    now=now,
-                    callback=lambda: strategy_service.capture_pre_open_run(
-                        external_account_id=broker_account.external_account_id,
-                        as_of=now,
-                        automatic=True,
-                    ),
-                )
-                self._run_account_task(
-                    external_account_id=broker_account.external_account_id,
-                    task_key="pre-open-review",
-                    task_label="pre-open review",
-                    now=now,
-                    callback=lambda: strategy_service.review_pre_open_run(
-                        external_account_id=broker_account.external_account_id,
-                        as_of=now,
-                    ),
-                )
 
     def _run_account_task(
         self,

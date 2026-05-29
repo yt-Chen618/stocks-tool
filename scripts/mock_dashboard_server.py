@@ -617,6 +617,40 @@ class MockDashboardState:
             rows = [row for row in rows if row["external_account_id"] == external_account_id]
         return deepcopy(rows[:limit])
 
+    def capture_pre_open_run(self, external_account_id: str) -> dict[str, Any]:
+        now = iso_now()
+        target_session_date = self.pre_open_assessment.get("target_session_date", "2026-05-23")
+        existing = next(
+            (
+                row
+                for row in self.pre_open_runs
+                if row["external_account_id"] == external_account_id
+                and row["target_session_date"] == target_session_date
+            ),
+            None,
+        )
+        if existing is None:
+            existing = {
+                "id": f"mock-preopen-run-{len(self.pre_open_runs) + 1:04d}",
+                "strategy_id": "pre_open_put_check_v1",
+                "external_account_id": external_account_id,
+                "target_session_date": target_session_date,
+                "assessment": deepcopy(self.pre_open_assessment),
+                "checkpoints": [],
+                "review_status": "awaiting_open",
+                "review_summary": None,
+                "last_reviewed_at": None,
+                "review_completed_at": None,
+                "raw_payload": {"source": "mock-preopen-save"},
+                "created_at": now,
+                "updated_at": now,
+            }
+            self.pre_open_runs.insert(0, existing)
+        else:
+            existing["assessment"] = deepcopy(self.pre_open_assessment)
+            existing["updated_at"] = now
+        return {"run": deepcopy(existing), "captured": True, "reason": None}
+
     def get_order(self, order_id: str) -> dict[str, Any]:
         for order in self.orders:
             if order["id"] == order_id:
@@ -1004,7 +1038,8 @@ def create_app() -> FastAPI:
         return data
 
     @app.get("/strategies/pre-open-risk")
-    def pre_open_risk() -> dict[str, Any]:
+    def pre_open_risk(include_option_overlays: bool = Query(default=False)) -> dict[str, Any]:
+        _ = include_option_overlays
         return deepcopy(state.pre_open_assessment)
 
     @app.get("/strategies/pre-open-runs")
@@ -1013,6 +1048,15 @@ def create_app() -> FastAPI:
         limit: int = Query(default=20, ge=1, le=100),
     ) -> list[dict[str, Any]]:
         return state.list_pre_open_runs(external_account_id=external_account_id, limit=limit)
+
+    @app.post("/strategies/pre-open-runs/{external_account_id}/capture")
+    def capture_pre_open_run(
+        external_account_id: str,
+        force: bool = Query(default=False),
+        include_option_overlays: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        _ = force, include_option_overlays
+        return state.capture_pre_open_run(external_account_id)
 
     @app.get("/account-snapshots")
     def account_snapshots(external_account_id: str = Query(...)) -> list[dict[str, Any]]:

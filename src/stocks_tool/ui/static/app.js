@@ -1,5 +1,8 @@
 const LANGUAGE_STORAGE_KEY = "stocks-tool-language";
 const DEFAULT_LANGUAGE = "zh";
+const BROKER_REQUEST_TIMEOUT_MS = 25000;
+const PRE_OPEN_BOARD_TIMEOUT_MS = 35000;
+const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const TEXT_NODE_ORIGINALS = new WeakMap();
 const ATTRIBUTE_ORIGINALS = new WeakMap();
 const TRANSLATIONS = {
@@ -77,8 +80,11 @@ const TRANSLATIONS = {
     "Actions": "操作",
     "No bull put spreads loaded.": "尚未加载牛市看跌价差。",
     "Macro": "宏观",
-    "Pre-open Risk Board": "盘前风险板",
-    "Load Macro Board": "加载宏观板",
+    "Live Macro": "实时宏观",
+    "Real-time Macro Board": "实时宏观板",
+    "Load Live Macro": "加载实时宏观",
+    "Load Option Overlays": "加载期权叠加层",
+    "Save Current Board": "保存当前看板",
     "Downside Score": "下行分数",
     "Loading pre-open assessment...": "正在加载盘前评估...",
     "Signals": "信号",
@@ -91,6 +97,8 @@ const TRANSLATIONS = {
     "Option Chain Analysis": "期权链分析",
     "Waiting for front and next-expiry option chain analysis.": "等待近月和次近月期权链分析。",
     "Opening Follow-through": "开盘延续复盘",
+    "Stored Review": "存档复盘",
+    "Stored Opening Follow-through": "存档开盘复盘",
     "Select a broker account to load the latest pre-open capture and opening review.": "选择券商账户后加载最新盘前记录和开盘复盘。",
     "Portfolio": "持仓",
     "Holdings Overview": "持仓总览",
@@ -153,6 +161,7 @@ const TRANSLATIONS = {
     "Plain Put View": "裸买看跌视图",
     "Preferred Vehicle": "偏好工具",
     "Action": "动作",
+    "Coverage": "覆盖范围",
     "Gap Chase Risk": "追跳空风险",
     "Session": "交易时段",
     "Target Session": "目标交易日",
@@ -290,10 +299,21 @@ const TRANSLATIONS = {
     "No pending spread exits": "暂无待处理平仓",
     "No exit actions recorded yet": "暂无平仓动作",
     "Waiting for first monitor run": "等待首次监控运行",
+    "No open or exit-pending spreads are being monitored.": "当前没有打开或平仓待处理价差在监控中。",
+    "Last Update": "最近更新",
+    "Live board loaded with partial coverage. Option overlays skipped for fast macro refresh.": "实时宏观代理已加载；为保持刷新速度，本次跳过期权叠加层。",
+    "Option overlays were skipped so the macro board can refresh without waiting on slow option-chain calls.": "已跳过期权叠加层，避免宏观板等待较慢的期权链请求。",
+    "Option overlays were skipped for fast macro refresh. Use Load Option Overlays to inspect QQQ / SPY puts.": "为保持宏观板快速刷新，本次跳过期权叠加层。需要查看 QQQ / SPY 看跌期权时请点击“加载期权叠加层”。",
+    "Option-chain overlays were skipped for fast macro refresh. Load option overlays when you need volatility and liquidity detail.": "为保持宏观板快速刷新，本次跳过期权链叠加层。需要波动率和流动性细节时请加载期权叠加层。",
+    "Refreshing live macro board with option overlays...": "正在刷新实时宏观板和期权叠加层...",
+    "Select a broker account before saving the macro board.": "保存宏观板前请先选择券商账户。",
+    "Load the live macro board before saving it.": "保存前请先加载实时宏观板。",
+    "Only a live or partial live macro board can be saved.": "只能保存实时或部分实时宏观板。",
+    "Saving macro board failed.": "保存宏观板失败。",
     "Select a broker account to load bull put controls.": "选择券商账户后加载牛市看跌控制项。",
     "No bull put skip reason recorded.": "暂无牛市看跌跳过原因。",
     "No bull put spreads for this account.": "此账户暂无牛市看跌价差。",
-    "Load the pre-open board to classify market tone.": "加载盘前风险板以判断市场状态。",
+    "Load the live macro board to classify market tone.": "加载实时宏观板以判断市场状态。",
     "QQQ / SPY directional put bias will render here.": "QQQ / SPY 方向性看跌偏向将在此显示。",
     "Waiting for proxy dispersion.": "等待代理分化信号。",
     "No major bearish trigger is active": "暂无主要看跌触发器",
@@ -320,7 +340,7 @@ const TRANSLATIONS = {
     "Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.": "工作台已更新。期权策略面板优先加载，宏观覆盖层可按需加载。",
     "No broker account selected.": "未选择券商账户。",
     "Enter a symbol.": "请输入标的。",
-    "Refreshing pre-open board...": "正在刷新盘前风险板...",
+    "Refreshing live macro board...": "正在刷新实时宏观板...",
     "Account sync failed.": "账户同步失败。",
     "Order sync failed.": "订单同步失败。",
     "Bull put controls update failed.": "牛市看跌控制项更新失败。",
@@ -407,6 +427,8 @@ function bindElements() {
   els.loadQuote = document.getElementById("load-quote");
   els.quoteCard = document.getElementById("quote-card");
   els.loadPreOpenBoard = document.getElementById("load-preopen-board");
+  els.loadPreOpenOverlays = document.getElementById("load-preopen-overlays");
+  els.savePreOpenBoard = document.getElementById("save-preopen-board");
   els.preOpenSummaryStrip = document.getElementById("preopen-summary-strip");
   els.preOpenAssessmentCard = document.getElementById("preopen-assessment-card");
   els.preOpenSignals = document.getElementById("preopen-signals");
@@ -506,7 +528,21 @@ function wireEvents() {
   }
 
   els.loadPreOpenBoard.addEventListener("click", async () => {
-    await loadPreOpenAssessment({ timeoutMs: 8500 });
+    await loadPreOpenAssessment({
+      includeOptionOverlays: false,
+      timeoutMs: PRE_OPEN_BOARD_TIMEOUT_MS,
+    });
+  });
+
+  els.loadPreOpenOverlays.addEventListener("click", async () => {
+    await loadPreOpenAssessment({
+      includeOptionOverlays: true,
+      timeoutMs: PRE_OPEN_OVERLAY_TIMEOUT_MS,
+    });
+  });
+
+  els.savePreOpenBoard.addEventListener("click", async () => {
+    await saveCurrentPreOpenBoard();
   });
 
   els.strategyControlsForm.addEventListener("submit", async (event) => {
@@ -763,17 +799,21 @@ function translateText(text, dictionary) {
     [/^Refreshing ([A-Z0-9.]+) quote\.\.\.$/, "正在刷新 $1 行情..."],
     [/^Quote refreshed successfully\.$/, "行情刷新成功。"],
     [/^Quote refreshed (.+)\.$/, "行情已于 $1 刷新。"],
-    [/^Pre-open board refreshed (.+)\.$/, "盘前风险板已于 $1 刷新。"],
-    [/^Showing the latest stored pre-open board captured (.+)\.$/, "正在显示 $1 捕获的最新盘前风险板。"],
+    [/^Live macro board refreshed (.+)\.$/, "实时宏观板已于 $1 刷新。"],
+    [/^Showing the latest stored macro board captured (.+)\.$/, "正在显示 $1 捕获的最新存档宏观板。"],
     [/^Latest stored run for (.+)\.$/, "最新存储运行对应 $1。"],
     [/^Select a broker account before loading the macro board\.$/, "加载宏观板前请先选择券商账户。"],
     [/^No stored macro board is available yet\. Load it on demand when strategy work is done\.$/, "暂无存储的宏观板。策略工作完成后可按需加载。"],
+    [/^(.+) proxies \/ option overlays skipped$/, "$1 个代理 / 已跳过期权叠加层"],
+    [/^(.+) proxies \/ (.+) puts \/ (.+) chain layers$/, "$1 个代理 / $2 个看跌快照 / $3 个期权链层"],
     [/^Syncing account (.+)\.\.\.$/, "正在同步账户 $1..."],
     [/^Account (.+) synced\.$/, "账户 $1 已同步。"],
     [/^Syncing orders for (.+)\.\.\.$/, "正在同步 $1 的订单..."],
     [/^Orders for (.+) synced\.$/, "$1 的订单已同步。"],
     [/^Saving bull put controls for (.+)\.\.\.$/, "正在保存 $1 的牛市看跌控制项..."],
     [/^Bull put controls updated for (.+)\.$/, "$1 的牛市看跌控制项已更新。"],
+    [/^Saving live macro board for (.+)\.\.\.$/, "正在保存 $1 的实时宏观板..."],
+    [/^Stored macro board for (.+)\.$/, "已保存 $1 的宏观板。"],
     [/^Running bull put scan for (.+)\.\.\.$/, "正在为 $1 运行牛市看跌扫描..."],
     [/^Bull put scan opened (.+)\.$/, "牛市看跌扫描已开仓 $1。"],
     [/^Running bull put review for (.+)\.\.\.$/, "正在为 $1 运行牛市看跌复盘..."],
@@ -883,6 +923,7 @@ async function loadAccountData() {
     renderSelectedOrder();
     updateSyncButtons();
     updateOrderTicketAvailability();
+    updatePreOpenButtons();
     return;
   }
 
@@ -921,6 +962,7 @@ async function loadAccountData() {
     renderSelectedOrder();
     updateSyncButtons();
     updateOrderTicketAvailability();
+    updatePreOpenButtons();
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load account data.", "error");
@@ -945,7 +987,7 @@ async function loadQuote(options = {}) {
   if (!els.quoteSymbol || !els.quoteCard) {
     return;
   }
-  const { timeoutMs = 8000 } = options;
+  const { timeoutMs = BROKER_REQUEST_TIMEOUT_MS } = options;
   const symbol = els.quoteSymbol.value.trim().toUpperCase();
   if (!symbol) {
     state.quote = null;
@@ -984,18 +1026,24 @@ async function loadQuote(options = {}) {
 }
 
 async function loadPreOpenAssessment(options = {}) {
-  const { timeoutMs = 10000 } = options;
+  const { includeOptionOverlays = false, timeoutMs = PRE_OPEN_BOARD_TIMEOUT_MS } = options;
   if (!state.selectedAccountId) {
     state.preOpenStatus = buildOverlayStatus("idle", "Select a broker account before loading the macro board.");
     renderPreOpenAssessment();
     return;
   }
-  state.preOpenStatus = buildOverlayStatus("loading", "Refreshing pre-open board...");
+  state.preOpenStatus = buildOverlayStatus(
+    "loading",
+    includeOptionOverlays
+      ? "Refreshing live macro board with option overlays..."
+      : "Refreshing live macro board..."
+  );
   renderPreOpenAssessment();
 
   try {
     const params = new URLSearchParams();
     params.set("external_account_id", state.selectedAccountId);
+    params.set("include_option_overlays", includeOptionOverlays ? "true" : "false");
     const assessment = await fetchJson(
       `/strategies/pre-open-risk?${params.toString()}`,
       { timeoutMs }
@@ -1004,11 +1052,53 @@ async function loadPreOpenAssessment(options = {}) {
   } catch (error) {
     console.error(error);
     state.preOpenStatus = classifyOverlayFailure(error, {
-      label: "pre-open board",
+      label: "live macro board",
       stale: Boolean(state.preOpenAssessment),
       staleAt: state.preOpenAssessment?.analyzed_at,
     });
     renderPreOpenAssessment();
+  }
+}
+
+async function saveCurrentPreOpenBoard() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before saving the macro board.", "warning");
+    return;
+  }
+  if (!state.preOpenAssessment || state.preOpenStatus.kind === "idle" || state.preOpenStatus.kind === "loading") {
+    setStatus("Load the live macro board before saving it.", "warning");
+    return;
+  }
+  if (state.preOpenStatus.kind !== "live" && state.preOpenStatus.kind !== "partial") {
+    setStatus("Only a live or partial live macro board can be saved.", "warning");
+    return;
+  }
+
+  setStatus(`Saving live macro board for ${state.selectedAccountId}...`, "warning");
+  updatePreOpenButtons(true);
+  try {
+    const result = await fetchJson(
+      `/strategies/pre-open-runs/${encodeURIComponent(state.selectedAccountId)}/capture?force=true&include_option_overlays=false`,
+      {
+        method: "POST",
+        timeoutMs: PRE_OPEN_BOARD_TIMEOUT_MS,
+      }
+    );
+    if (result.run) {
+      state.preOpenRuns = [
+        result.run,
+        ...state.preOpenRuns.filter((run) => run.id !== result.run.id),
+      ];
+      state.preOpenAssessment = result.run.assessment || state.preOpenAssessment;
+      applyPreOpenAssessmentResponse(state.preOpenAssessment);
+      renderLatestPreOpenRun();
+    }
+    setStatus(`Stored macro board for ${formatSessionDate(result.run?.target_session_date)}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Saving macro board failed.", "error");
+  } finally {
+    updatePreOpenButtons(false);
   }
 }
 
@@ -1031,7 +1121,7 @@ function seedPreOpenAssessmentFromLatestRun({ clearWhenMissing = false } = {}) {
   if (state.preOpenStatus.kind !== "loading") {
     state.preOpenStatus = buildOverlayStatus(
       "stale",
-      run.assessment.freshness_detail || `Showing the latest stored pre-open board captured ${formatDateTime(run.assessment.analyzed_at)}.`,
+      run.assessment.freshness_detail || `Showing the latest stored macro board captured ${formatDateTime(run.assessment.analyzed_at)}.`,
       run.assessment.stale_reason || `Latest stored run for ${formatSessionDate(run.target_session_date)}.`
     );
   }
@@ -1043,7 +1133,7 @@ function applyPreOpenAssessmentResponse(assessment) {
   if (assessment?.freshness_status === "stale") {
     state.preOpenStatus = buildOverlayStatus(
       "stale",
-      assessment.freshness_detail || buildStaleOverlayDetail("pre-open board", "circuit_open", assessment.analyzed_at),
+      assessment.freshness_detail || buildStaleOverlayDetail("live macro board", "circuit_open", assessment.analyzed_at),
       assessment.stale_reason || ""
     );
   } else if (assessment?.freshness_status === "partial") {
@@ -1055,16 +1145,17 @@ function applyPreOpenAssessmentResponse(assessment) {
   } else if (assessment?.freshness_status === "error") {
     state.preOpenStatus = buildOverlayStatus(
       "error",
-      assessment.freshness_detail || "Live broker data is unavailable for the pre-open board.",
+      assessment.freshness_detail || "Live broker data is unavailable for the live macro board.",
       assessment.stale_reason || ""
     );
   } else {
     state.preOpenStatus = buildOverlayStatus(
       "live",
-      assessment?.freshness_detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at)
+      assessment?.freshness_detail || overlayLiveDetail("Live macro board", assessment.analyzed_at)
     );
   }
   renderPreOpenAssessment();
+  updatePreOpenButtons();
 }
 
 async function syncAccount() {
@@ -1776,8 +1867,10 @@ function renderSpreads() {
   );
   const activeSpreads = spreads.filter(isActiveSpread);
   const exitPendingSpreads = spreads.filter(isExitPendingSpread);
-  const latestActionSpread = spreads.find((spread) => spread.exit_reason) || null;
-  const lastMonitoredSpread = spreads.find((spread) => spread.last_synced_at) || null;
+  const monitorableSpreads = spreads.filter(isMonitorableSpread);
+  const latestExitActionSpread =
+    spreads.find((spread) => spread.exit_reason && (spread.status === "closed" || isExitPendingSpread(spread))) || null;
+  const lastMonitoredSpread = monitorableSpreads.find((spread) => spread.last_synced_at) || null;
 
   const summaryValues = [
     {
@@ -1798,10 +1891,10 @@ function renderSpreads() {
     },
     {
       label: "Latest Exit Action",
-      value: latestActionSpread ? formatSpreadExitReason(latestActionSpread.exit_reason) : "--",
-      tone: latestActionSpread ? spreadStatusClass(latestActionSpread.status) : "",
-      detail: latestActionSpread
-        ? `${latestActionSpread.underlying_symbol} / ${formatDateTime(latestActionSpread.updated_at)}`
+      value: latestExitActionSpread ? formatSpreadExitReason(latestExitActionSpread.exit_reason) : "--",
+      tone: latestExitActionSpread ? spreadStatusClass(latestExitActionSpread.status) : "",
+      detail: latestExitActionSpread
+        ? `${latestExitActionSpread.underlying_symbol} / ${formatDateTime(latestExitActionSpread.updated_at)}`
         : "No exit actions recorded yet",
     },
     {
@@ -1810,7 +1903,9 @@ function renderSpreads() {
       tone: "",
       detail: lastMonitoredSpread
         ? `${lastMonitoredSpread.underlying_symbol} / ${formatSpreadStatusLabel(lastMonitoredSpread.status)}`
-        : "Waiting for first monitor run",
+        : monitorableSpreads.length
+          ? "Waiting for first monitor run"
+          : "No open or exit-pending spreads are being monitored.",
     },
   ];
 
@@ -1837,6 +1932,7 @@ function renderSpreads() {
       const statusTone = spreadStatusClass(spread.status);
       const actionText = spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--";
       const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
+      const lastUpdatedAt = spread.last_synced_at || spread.updated_at || spread.created_at;
       return `
         <tr>
           <td>
@@ -1849,7 +1945,7 @@ function renderSpreads() {
           <td>${escapeHtml(formatSpreadStrike(spread.width))}</td>
           <td><span class="pill ${statusTone}">${escapeHtml(formatSpreadStatusLabel(spread.status))}</span></td>
           <td>${escapeHtml(formatSpreadCredit(spread.entry_net_credit))}</td>
-          <td>${escapeHtml(formatDateTime(spread.last_synced_at))}</td>
+          <td>${escapeHtml(formatDateTime(lastUpdatedAt))}</td>
           <td>
             <div class="strategy-action-cell">
               <strong>${escapeHtml(actionText)}</strong>
@@ -2011,6 +2107,7 @@ function renderQuote() {
 function renderPreOpenAssessment() {
   const assessment = state.preOpenAssessment;
   const overlay = state.preOpenStatus;
+  updatePreOpenButtons();
   if (!assessment) {
     const detail = overlay.detail || "Waiting for the latest macro proxy snapshot.";
     const summaryValues = [
@@ -2030,7 +2127,7 @@ function renderPreOpenAssessment() {
         label: "Regime",
         value: "--",
         tone: "",
-        detail: "Load the pre-open board to classify market tone.",
+        detail: "Load the live macro board to classify market tone.",
       },
       {
         label: "Plain Put View",
@@ -2062,7 +2159,7 @@ function renderPreOpenAssessment() {
     els.preOpenAssessmentCard.innerHTML = `
       <div class="overlay-status-row">
         <div class="overlay-status-copy">
-          <strong>Pre-open Risk Board</strong>
+          <strong>Real-time Macro Board</strong>
           <span>${escapeHtml(detail)}</span>
         </div>
         <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
@@ -2080,7 +2177,7 @@ function renderPreOpenAssessment() {
       label: "Board Status",
       value: overlayStatusLabel(overlay.kind),
       tone: overlayStatusTone(overlay.kind),
-      detail: overlay.detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at),
+      detail: overlay.detail || overlayLiveDetail("Live macro board", assessment.analyzed_at),
     },
     {
       label: "Downside Score",
@@ -2169,7 +2266,7 @@ function renderPreOpenAssessment() {
       </div>
       <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
     </div>
-    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Pre-open board", assessment.analyzed_at))}</p>
+    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Live macro board", assessment.analyzed_at))}</p>
     ${renderOverlayReason(overlay)}
     <div class="status-list">
       <div>
@@ -2187,6 +2284,10 @@ function renderPreOpenAssessment() {
       <div>
         <dt>Session</dt>
         <dd>${escapeHtml(formatPreOpenTimingDetail(assessment))}</dd>
+      </div>
+      <div>
+        <dt>Coverage</dt>
+        <dd>${escapeHtml(formatPreOpenCoverage(assessment))}</dd>
       </div>
     </div>
     <article class="strategy-journal-entry">
@@ -2238,7 +2339,9 @@ function renderPreOpenAssessment() {
   }
 
   if (!assessment.put_snapshots.length) {
-    els.preOpenPuts.innerHTML = '<div class="holding-empty">No short-dated reference puts were found.</div>';
+    els.preOpenPuts.innerHTML = preOpenOptionOverlaysSkipped(assessment)
+      ? '<div class="holding-empty">Option overlays were skipped for fast macro refresh. Use Load Option Overlays to inspect QQQ / SPY puts.</div>'
+      : '<div class="holding-empty">No short-dated reference puts were found.</div>';
   } else {
     els.preOpenPuts.innerHTML = assessment.put_snapshots
       .map((snapshot) => {
@@ -2289,12 +2392,15 @@ function renderPreOpenAssessment() {
       .join("");
   }
 
-  renderPreOpenChainAnalysis(assessment.chain_analyses || []);
+  renderPreOpenChainAnalysis(assessment);
 }
 
-function renderPreOpenChainAnalysis(analyses) {
+function renderPreOpenChainAnalysis(assessment) {
+  const analyses = assessment?.chain_analyses || [];
   if (!Array.isArray(analyses) || !analyses.length) {
-    els.preOpenChainAnalysis.innerHTML = '<div class="holding-empty">No option chain analysis is available.</div>';
+    els.preOpenChainAnalysis.innerHTML = preOpenOptionOverlaysSkipped(assessment)
+      ? '<div class="holding-empty">Option-chain overlays were skipped for fast macro refresh. Load option overlays when you need volatility and liquidity detail.</div>'
+      : '<div class="holding-empty">No option chain analysis is available.</div>';
     return;
   }
 
@@ -2446,6 +2552,21 @@ function renderLatestPreOpenRun() {
     </article>
     ${checkpointMarkup}
   `;
+}
+
+function preOpenOptionOverlaysSkipped(assessment) {
+  const detail = `${assessment?.freshness_detail || ""} ${(assessment?.reasons || []).join(" ")}`.toLowerCase();
+  return detail.includes("option overlays skipped");
+}
+
+function formatPreOpenCoverage(assessment) {
+  const signalCount = Array.isArray(assessment?.signals) ? assessment.signals.length : 0;
+  const putCount = Array.isArray(assessment?.put_snapshots) ? assessment.put_snapshots.length : 0;
+  const chainCount = Array.isArray(assessment?.chain_analyses) ? assessment.chain_analyses.length : 0;
+  if (preOpenOptionOverlaysSkipped(assessment)) {
+    return `${signalCount} proxies / option overlays skipped`;
+  }
+  return `${signalCount} proxies / ${putCount} puts / ${chainCount} chain layers`;
 }
 
 function renderOptionExpiryAnalysis(expiry, label) {
@@ -2788,6 +2909,24 @@ function updateStrategyButtons() {
   els.saveStrategyControls.title = hasAccount ? "" : "Select a broker account first.";
   els.runStrategyScan.title = hasAccount ? "" : "Select a broker account first.";
   els.runStrategyReview.title = hasAccount ? "" : "Select a broker account first.";
+}
+
+function updatePreOpenButtons(forceSaving = false) {
+  if (!els.loadPreOpenBoard || !els.loadPreOpenOverlays || !els.savePreOpenBoard) {
+    return;
+  }
+  const hasAccount = Boolean(state.selectedAccountId);
+  const loading = state.preOpenStatus?.kind === "loading";
+  const hasLoadedAssessment = Boolean(state.preOpenAssessment) && !loading;
+  const canSaveAssessment = hasLoadedAssessment && (state.preOpenStatus.kind === "live" || state.preOpenStatus.kind === "partial");
+
+  els.loadPreOpenBoard.disabled = !hasAccount || loading;
+  els.loadPreOpenOverlays.disabled = !hasAccount || loading;
+  els.savePreOpenBoard.disabled = !hasAccount || !canSaveAssessment || forceSaving;
+
+  els.loadPreOpenBoard.title = hasAccount ? "Refresh the fast live macro board." : "Select a broker account first.";
+  els.loadPreOpenOverlays.title = hasAccount ? "Load slower QQQ / SPY option overlays on demand." : "Select a broker account first.";
+  els.savePreOpenBoard.title = canSaveAssessment ? "Store the current live macro board as the latest run." : "Load the live macro board first.";
 }
 
 function syncTicketOrderFields() {

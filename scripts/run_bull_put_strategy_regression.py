@@ -95,6 +95,41 @@ class InMemorySpreadRepository:
         return spread
 
 
+@dataclass
+class InMemoryPreOpenRunRepository:
+    items: dict[tuple[str, date, str], object]
+
+    def create_run(self, run):
+        self.items[(run.external_account_id, run.target_session_date, run.strategy_id)] = run
+        return run
+
+    def get_by_session_date(
+        self,
+        *,
+        external_account_id: str,
+        target_session_date: date,
+        strategy_id: str = "pre_open_put_check_v1",
+    ):
+        return self.items.get((external_account_id, target_session_date, strategy_id))
+
+    def list_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 20,
+    ):
+        rows = [
+            run
+            for (account_id, _, _), run in self.items.items()
+            if external_account_id is None or account_id == external_account_id
+        ]
+        return sorted(rows, key=lambda run: run.created_at, reverse=True)[:limit]
+
+    def update_run(self, run):
+        self.items[(run.external_account_id, run.target_session_date, run.strategy_id)] = run
+        return run
+
+
 class InMemoryJournalService:
     def __init__(self) -> None:
         self.entries: list[CreateJournalEntryRequest] = []
@@ -347,12 +382,14 @@ def main() -> None:
         journal_service = InMemoryJournalService()
         spreads = InMemorySpreadRepository(items={})
         runtime_states = InMemoryRuntimeRepository()
+        pre_open_runs = InMemoryPreOpenRunRepository(items={})
         service = BullPutStrategyService(
             settings=settings,
             broker_accounts=StaticBrokerAccounts(build_account()),
             account_snapshots=StaticSnapshots(build_snapshot()),
             spreads=spreads,
             runtime_states=runtime_states,
+            pre_open_runs=pre_open_runs,
             order_service=order_service,
             longbridge_adapter=adapter,
             risk_service=RiskService(settings=settings),

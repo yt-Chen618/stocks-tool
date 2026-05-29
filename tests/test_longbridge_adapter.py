@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import time
 from unittest.mock import Mock
 
@@ -11,7 +12,7 @@ from stocks_tool.adapters.brokers.longbridge import (
 )
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import ExecutionMode
-from stocks_tool.domain.models import SecurityQuoteSnapshot
+from stocks_tool.domain.models import AccountSnapshot, SecurityQuoteSnapshot
 
 
 def build_adapter(**overrides) -> LongbridgeBrokerAdapter:
@@ -22,6 +23,12 @@ def build_adapter(**overrides) -> LongbridgeBrokerAdapter:
         **overrides,
     )
     return LongbridgeBrokerAdapter(settings=settings)
+
+
+def test_default_longbridge_timeout_allows_slow_background_loads() -> None:
+    settings = Settings()
+
+    assert settings.longbridge_request_timeout_seconds == 20
 
 
 def test_run_sdk_action_times_out_and_opens_circuit() -> None:
@@ -48,6 +55,22 @@ def test_run_sdk_action_opens_circuit_on_connect_failure() -> None:
     with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
         adapter._run_sdk_action("load quote for 'SPY.US'", lambda: "never-called")
 
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_account_circuit_does_not_block_market_data_requests() -> None:
+    adapter = build_adapter()
+
+    with pytest.raises(LongbridgeIntegrationError, match="failed to build account snapshot"):
+        adapter._run_sdk_action(
+            "build account snapshot for 'LBPT10087357'",
+            lambda: (_ for _ in ()).throw(RuntimeError("client error (Connect)")),
+        )
+
+    with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
+        adapter._run_sdk_action("build account snapshot for 'LBPT10087357'", lambda: "never-called")
+
+    assert adapter._run_sdk_action("load quotes for SPY.US, QQQ.US", lambda: "ok") == "ok"
     adapter._executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -90,4 +113,93 @@ def test_get_quote_uses_recent_cache_after_transient_failure() -> None:
 
     assert first == cached_quote
     assert second == cached_quote
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_trade_order_listing_uses_timeout_guard() -> None:
+    adapter = build_adapter()
+
+    class SlowTradeContext:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def today_orders(self, *, symbol=None, order_id=None):
+            time.sleep(2)
+            return []
+
+    adapter._load_sdk = Mock(return_value={"TradeContext": SlowTradeContext})
+    adapter._build_config = Mock(return_value=object())
+
+    with pytest.raises(LongbridgeIntegrationError, match="timed out"):
+        adapter.list_today_orders(mode=ExecutionMode.PAPER)
+
+    with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
+        adapter.list_today_orders(mode=ExecutionMode.PAPER)
+
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_account_snapshot_uses_timeout_guard() -> None:
+    adapter = build_adapter()
+    snapshot = AccountSnapshot(
+        broker=adapter.name,
+        account_id="LBPT10087357",
+        currency="USD",
+        cash_balance=Decimal("100"),
+        net_liquidation=Decimal("100"),
+        buying_power=Decimal("100"),
+        positions=[],
+        captured_at=datetime(2026, 5, 29, 14, 0, tzinfo=timezone.utc),
+    )
+    adapter._run_sdk_action = Mock(return_value=snapshot)
+
+    result = adapter.build_account_snapshot(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert result == snapshot
+    assert adapter._run_sdk_action.call_args.args[0] == "build account snapshot for 'LBPT10087357'"
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_option_market_snapshot_maps_bid_ask_from_quote_payload() -> None:
+    adapter = build_adapter()
+    quote = SimpleNamespace(
+        symbol="QQQ260619P470000.US",
+        underlying_symbol="QQQ.US",
+        expiry_date="2026-06-19",
+        strike_price="470",
+        direction="PUT",
+        last_done="2.50",
+        prev_close="2.30",
+        open="2.40",
+        high="2.65",
+        low="2.35",
+        timestamp=datetime(2026, 5, 29, 14, 0, tzinfo=timezone.utc),
+        volume=2000,
+        turnover="500000",
+        trade_status="Normal",
+        bid="2.40",
+        ask="2.60",
+        open_interest=500,
+        implied_volatility="0.22",
+        historical_volatility="0.18",
+        contract_multiplier="100",
+        contract_size=None,
+        contract_type="Standard",
+    )
+    calc_index = SimpleNamespace(
+        delta="-0.22",
+        gamma="0.01",
+        theta="-0.02",
+        vega="0.05",
+    )
+
+    snapshot = adapter._map_option_market_snapshot(quote=quote, calc_index=calc_index)
+
+    assert snapshot.bid == Decimal("2.40")
+    assert snapshot.ask == Decimal("2.60")
+    assert snapshot.raw_payload["quote"]["bid"] == "2.40"
+    assert snapshot.raw_payload["quote"]["ask"] == "2.60"
     adapter._executor.shutdown(wait=False, cancel_futures=True)
