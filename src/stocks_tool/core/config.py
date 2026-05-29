@@ -136,6 +136,7 @@ class CoveredCallStrategySettings(BaseModel):
     max_bid_ask_spread_pct: Decimal = Field(default=Decimal("0.15"), gt=0)
     max_option_quote_age_seconds: int = Field(default=1800, ge=1)
     max_contracts_per_symbol: int = Field(default=1, ge=1)
+    event_blackout_days: int = Field(default=7, ge=0)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "CoveredCallStrategySettings":

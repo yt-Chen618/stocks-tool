@@ -56,6 +56,21 @@ class StrategyReviewStatus(str, Enum):
     BLOCKED = "blocked"
 
 
+class MarketEventType(str, Enum):
+    EARNINGS = "earnings"
+    DIVIDEND = "dividend"
+    FOMC = "fomc"
+    CPI = "cpi"
+    JOBS = "jobs"
+    OTHER = "other"
+
+
+class MarketEventSeverity(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
 class CatalystType(str, Enum):
     EARNINGS = "earnings"
     FILING = "filing"

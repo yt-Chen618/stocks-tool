@@ -12,6 +12,8 @@ from stocks_tool.domain.enums import (
     CatalystType,
     ExecutionMode,
     JournalEntryType,
+    MarketEventSeverity,
+    MarketEventType,
     MarketBias,
     OptionRight,
     OrderSide,
@@ -166,6 +168,31 @@ class AccountSnapshotSummary(BaseModel):
             ],
             captured_at=snapshot.captured_at,
         )
+
+
+class CreateMarketEventRequest(BaseModel):
+    symbol: str | None = Field(default=None, max_length=32)
+    event_type: MarketEventType
+    title: str = Field(min_length=1, max_length=160)
+    scheduled_at: datetime
+    source: str | None = Field(default=None, max_length=64)
+    severity: MarketEventSeverity = MarketEventSeverity.MEDIUM
+    notes: str | None = None
+    raw_payload: dict | None = None
+
+
+class MarketEvent(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    symbol: str | None = None
+    event_type: MarketEventType
+    title: str
+    scheduled_at: datetime
+    source: str | None = None
+    severity: MarketEventSeverity = MarketEventSeverity.MEDIUM
+    notes: str | None = None
+    raw_payload: dict | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class RiskCheckResult(BaseModel):

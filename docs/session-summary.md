@@ -30,6 +30,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `strategies`
 - `strategies/experiment`
 - `strategies/covered-call`
+- `market-events`
 - `executions`
 - `journals`
 - `orders`
@@ -78,6 +79,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
+- `GET /market-events`
+- `POST /market-events`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -146,6 +149,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `POST /strategies/covered-call/propose?external_account_id=LBPT10087357&symbol=UNH.US&mode=paper`
 - Current scope:
   - reads the latest local account snapshot and requires an existing stock / ETF covered lot of at least `100` shares
+  - reads local `/market-events` records and adds warnings for medium/high severity symbol-specific or market-wide events inside the configured blackout window
   - loads Longbridge quote, option expiries, option chain, and call market snapshots
   - selects a liquid out-of-the-money call using configured DTE, delta, OI, volume, bid, and bid/ask spread filters
   - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
@@ -153,6 +157,19 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
   - `monitor` reloads the underlying and short-call quote, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
   - no automatic covered-call scheduler or close / roll order path exists yet
+
+### Market event calendar
+
+- A first-pass local event calendar exists for strategy risk filters.
+- Table:
+  - `market_events`
+- Routes:
+  - `GET /market-events`
+  - `POST /market-events`
+- Current scope:
+  - manually or script-created events for `earnings`, `dividend`, `fomc`, `cpi`, `jobs`, and `other`
+  - optional symbol, event time, source, severity, notes, and raw payload
+  - covered-call previews now surface event warnings from this calendar
 
 ### Automatic reconciliation
 
@@ -371,6 +388,7 @@ Frontend files:
 - Added `covered_call_v1` preview/propose routes that create strategy experiment runs, signals, and proposals for covered-call candidates.
 - Added approved-proposal-only covered-call paper execution through `POST /strategies/covered-call/proposals/{proposal_id}/execute`.
 - Added covered-call monitoring guidance through `POST /strategies/covered-call/proposals/{proposal_id}/monitor`.
+- Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
 - Added `pre_open_assessment_runs` persistence, pre-open capture / review routes, and opening follow-through checkpoints at `09:30 / 09:45 / 10:00 ET`.
@@ -493,5 +511,5 @@ Frontend files:
 ## Recommended next steps
 
 1. Add covered-call close / roll order execution paths after monitor guidance.
-2. Add market/news/event ingestion so proposals can avoid earnings and macro-event traps.
+2. Add automated market/news/event ingestion workers to populate the local event calendar.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

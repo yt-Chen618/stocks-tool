@@ -23,6 +23,7 @@ This repository currently contains:
 - a bull put runtime-state layer with scheduled entry scans, review generation, kill-switch style controls, and strategy journaling
 - a strategy experiment ledger for proposals, runs, signals, and reviews before new strategies are automated
 - a first-pass `covered_call_v1` proposal workflow that records covered-call candidates without submitting orders
+- a local market-event calendar for earnings and macro risk windows
 - a pre-open downside board with SPY / QQQ option-chain analysis for directional long-put checks
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
 - an order-linked journal and review workflow for trade notes
@@ -94,6 +95,8 @@ Then open:
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
 - `GET /account-snapshots/latest?external_account_id=LBPT10087357`
+- `GET /market-events`
+- `POST /market-events`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/pre-open-risk`
@@ -179,7 +182,8 @@ The bull put spread workflow is currently paper-only:
 - bull put performance visibility: previews include `timing_ms`, and locked execute can reuse the cached candidate while refreshing only the two selected option legs before submission
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
-- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance
+- market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters
+- covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades

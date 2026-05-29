@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
     JournalEntryType,
+    MarketEventType,
     OrderStatus,
     ReconciliationStatus,
     SpreadStatus,
@@ -12,6 +13,7 @@ from stocks_tool.domain.models import (
     AccountSnapshot,
     AddWatchlistItemRequest,
     BrokerAccount,
+    CreateMarketEventRequest,
     PreOpenAssessmentRun,
     BullPutSpread,
     BullPutStrategyRuntimeState,
@@ -23,6 +25,7 @@ from stocks_tool.domain.models import (
     CreateWatchlistRequest,
     CreateBrokerAccountRequest,
     JournalEntry,
+    MarketEvent,
     Order,
     StrategyProposal,
     StrategyReview,
@@ -58,6 +61,24 @@ class WatchlistRepository(ABC):
 
     @abstractmethod
     def add_item(self, watchlist_id: str, request: AddWatchlistItemRequest) -> Watchlist | None:
+        raise NotImplementedError
+
+
+class MarketEventRepository(ABC):
+    @abstractmethod
+    def create_event(self, request: CreateMarketEventRequest) -> MarketEvent:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_events(
+        self,
+        *,
+        symbol: str | None = None,
+        event_type: MarketEventType | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 100,
+    ) -> list[MarketEvent]:
         raise NotImplementedError
 
 

@@ -28,6 +28,7 @@ This project assumes a local PostgreSQL instance managed by Docker Compose for d
 - `strategy_runs`
 - `strategy_signals`
 - `strategy_reviews`
+- `market_events`
 
 ## Local startup
 

@@ -25,6 +25,7 @@ from stocks_tool.ports.repository import (
     BullPutStrategyRuntimeRepository,
     ExecutionRepository,
     JournalRepository,
+    MarketEventRepository,
     OrderRepository,
     PreOpenAssessmentRunRepository,
     StrategyExperimentRepository,
@@ -57,6 +58,9 @@ from stocks_tool.repositories.sqlalchemy_trade_plan_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_watchlist_repository import (
     SQLAlchemyWatchlistRepository,
+)
+from stocks_tool.repositories.sqlalchemy_market_event_repository import (
+    SQLAlchemyMarketEventRepository,
 )
 from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
     SQLAlchemyPreOpenAssessmentRunRepository,
@@ -97,6 +101,12 @@ def get_watchlist_repository(
     session: Session = Depends(get_db_session),
 ) -> WatchlistRepository:
     return SQLAlchemyWatchlistRepository(session)
+
+
+def get_market_event_repository(
+    session: Session = Depends(get_db_session),
+) -> MarketEventRepository:
+    return SQLAlchemyMarketEventRepository(session)
 
 
 def get_broker_account_repository(
@@ -217,6 +227,7 @@ def get_covered_call_strategy_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
+    market_events: MarketEventRepository = Depends(get_market_event_repository),
     order_service: OrderService = Depends(get_order_service),
     adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
 ) -> CoveredCallStrategyService:
@@ -228,6 +239,7 @@ def get_covered_call_strategy_service(
         experiments=experiments,
         longbridge_adapter=adapter,
         order_service=order_service,
+        market_events=market_events,
     )
 
 

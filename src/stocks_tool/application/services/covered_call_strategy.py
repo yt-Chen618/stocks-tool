@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -11,6 +11,7 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    MarketEventSeverity,
     OptionRight,
     OrderSide,
     OrderType,
@@ -40,6 +41,7 @@ from stocks_tool.domain.models import (
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
+    MarketEventRepository,
     StrategyExperimentRepository,
 )
 
@@ -56,6 +58,7 @@ class CoveredCallStrategyService:
         experiments: StrategyExperimentRepository,
         longbridge_adapter: LongbridgeBrokerAdapter,
         order_service: OrderService | None = None,
+        market_events: MarketEventRepository | None = None,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
@@ -63,6 +66,7 @@ class CoveredCallStrategyService:
         self.experiments = experiments
         self.longbridge_adapter = longbridge_adapter
         self.order_service = order_service
+        self.market_events = market_events
         self.new_york = ZoneInfo("America/New_York")
 
     def preview(
@@ -172,6 +176,17 @@ class CoveredCallStrategyService:
             evaluated_at=evaluated_at,
         )
         risk = self._build_risk_summary(position=position, candidate=candidate)
+        event_warnings = self._event_warnings(
+            symbol=normalized_symbol,
+            evaluated_at=evaluated_at,
+        )
+        if event_warnings:
+            risk = risk.model_copy(
+                update={
+                    "status": RiskStatus.WARN,
+                    "warnings": [*risk.warnings, *event_warnings],
+                }
+            )
         return CoveredCallPreviewResult(
             external_account_id=external_account_id,
             mode=mode,
@@ -630,6 +645,28 @@ class CoveredCallStrategyService:
             break_even=break_even.quantize(Decimal("0.01")),
             shares_not_covered=shares_not_covered,
         )
+
+    def _event_warnings(self, *, symbol: str, evaluated_at: datetime) -> list[str]:
+        if self.market_events is None or self.settings.covered_call_strategy.event_blackout_days <= 0:
+            return []
+        window_end = evaluated_at + timedelta(days=self.settings.covered_call_strategy.event_blackout_days)
+        events = self.market_events.list_events(
+            start=evaluated_at,
+            end=window_end,
+            limit=50,
+        )
+        warnings: list[str] = []
+        for event in events:
+            if event.symbol is not None and event.symbol.upper() != symbol.upper():
+                continue
+            if event.severity not in {MarketEventSeverity.MEDIUM, MarketEventSeverity.HIGH}:
+                continue
+            event_scope = event.symbol or "market"
+            warnings.append(
+                f"{event_scope} has {event.severity.value} {event.event_type.value} event "
+                f"'{event.title}' scheduled at {event.scheduled_at.isoformat()}."
+            )
+        return warnings
 
     def _with_top_of_book(
         self,

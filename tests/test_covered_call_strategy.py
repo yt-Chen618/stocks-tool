@@ -8,6 +8,8 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    MarketEventSeverity,
+    MarketEventType,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -22,6 +24,7 @@ from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
     ExecuteCoveredCallProposalRequest,
+    MarketEvent,
     OptionMarketSnapshot,
     Order,
     PositionSnapshot,
@@ -135,6 +138,14 @@ class FakeExperiments:
         return self.proposal
 
 
+class FakeMarketEvents:
+    def __init__(self, events: list[MarketEvent]) -> None:
+        self.events = events
+
+    def list_events(self, **kwargs) -> list[MarketEvent]:
+        return self.events
+
+
 def build_snapshot(*, quantity: Decimal = Decimal("100")) -> AccountSnapshot:
     return AccountSnapshot(
         id="snapshot-1",
@@ -205,6 +216,7 @@ def build_service(
     experiments: FakeExperiments | None = None,
     order_service: Mock | None = None,
     adapter: Mock | None = None,
+    market_events: FakeMarketEvents | None = None,
 ) -> CoveredCallStrategyService:
     return CoveredCallStrategyService(
         settings=Settings(),
@@ -213,6 +225,7 @@ def build_service(
         experiments=experiments or FakeExperiments(),
         longbridge_adapter=adapter or build_adapter(),
         order_service=order_service,
+        market_events=market_events,
     )
 
 
@@ -250,6 +263,36 @@ def test_covered_call_preview_blocks_without_covered_lot() -> None:
     assert preview.eligible is False
     assert preview.candidate is None
     assert "at least 100 shares" in preview.reasons[0]
+
+
+def test_covered_call_preview_warns_on_upcoming_market_event() -> None:
+    events = FakeMarketEvents(
+        [
+            MarketEvent(
+                id="event-1",
+                symbol="UNH.US",
+                event_type=MarketEventType.EARNINGS,
+                title="UNH earnings",
+                scheduled_at=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc),
+                severity=MarketEventSeverity.HIGH,
+                created_at=NOW,
+                updated_at=NOW,
+            )
+        ]
+    )
+    service = build_service(market_events=events)
+
+    preview = service.preview(
+        external_account_id="LBPT10087357",
+        symbol="UNH.US",
+        mode=ExecutionMode.PAPER,
+        as_of=NOW,
+    )
+
+    assert preview.eligible is True
+    assert preview.risk is not None
+    assert preview.risk.status == RiskStatus.WARN
+    assert "UNH earnings" in preview.warnings[0]
 
 
 def test_covered_call_proposal_writes_strategy_experiment_records() -> None:

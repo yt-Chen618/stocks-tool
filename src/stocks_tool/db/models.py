@@ -88,6 +88,26 @@ class BrokerAccountRecord(TimestampMixin, Base):
     user: Mapped[UserRecord | None] = relationship()
 
 
+class MarketEventRecord(TimestampMixin, Base):
+    __tablename__ = "market_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    symbol: Mapped[str | None] = mapped_column(String(32), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    source: Mapped[str | None] = mapped_column(String(64), index=True)
+    severity: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="medium",
+        server_default="medium",
+        index=True,
+    )
+    notes: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+
 class WatchlistRecord(TimestampMixin, Base):
     __tablename__ = "watchlists"
 
