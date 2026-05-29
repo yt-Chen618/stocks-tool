@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_BY_WORKFLOW = {
     "bull-put-paper": ROOT / "scripts" / "run_bull_put_strategy_regression.py",
+    "bull-put-readiness": ROOT / "scripts" / "run_bull_put_readiness_check.py",
     "bull-put-real-paper": ROOT / "scripts" / "run_bull_put_real_paper_smoke.py",
     "mock-ui": ROOT / "scripts" / "run_mock_ui_order_regression.py",
     "real-paper": ROOT / "scripts" / "run_real_paper_order_smoke.py",
@@ -21,6 +22,7 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Unified entrypoint for dashboard/order regression scripts. "
             "Use `mock-ui` for the local in-memory UI flow, `bull-put-paper` for the in-memory bull put service flow, "
+            "`bull-put-readiness` for the read-only opening readiness check, "
             "`bull-put-real-paper` for real Longbridge bull put preview smoke, `real-paper` for the stock-order paper smoke flow, "
             "`real-preopen-board` for live localhost pre-open board checks, and `real-ui-refresh` for repeated reload "
             "timing checks against an already running localhost dashboard."

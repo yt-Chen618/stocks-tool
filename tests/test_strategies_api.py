@@ -20,6 +20,8 @@ from stocks_tool.domain.models import (
     OptionChainLiquidStrike,
     PreOpenDownsideAssessment,
     PreOpenProxySignal,
+    BullPutStrategyReadinessCheck,
+    BullPutStrategyReadinessResult,
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
@@ -68,6 +70,46 @@ def test_preview_bull_put_strategy_returns_scan_result() -> None:
     assert body["eligible"] is False
     assert body["moving_average_20"] == "450.50"
     request = service.preview_spread.call_args.kwargs
+    assert request["external_account_id"] == "LBPT10087357"
+
+
+def test_bull_put_readiness_route_returns_preflight_result() -> None:
+    service = Mock()
+    service.check_entry_readiness.return_value = BullPutStrategyReadinessResult(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        evaluated_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
+        ready=True,
+        status="ready",
+        checks=[
+            BullPutStrategyReadinessCheck(
+                name="candidate",
+                status="ok",
+                detail="QQQ.US has an eligible bull put candidate.",
+            )
+        ],
+        preferred_symbol="QQQ.US",
+        next_action="Review the QQQ.US preview before execution.",
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.get(
+            "/strategies/bull-put/readiness",
+            params={
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "as_of": "2026-05-22T14:45:00Z",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ready"] is True
+    assert body["preferred_symbol"] == "QQQ.US"
+    request = service.check_entry_readiness.call_args.kwargs
     assert request["external_account_id"] == "LBPT10087357"
 
 

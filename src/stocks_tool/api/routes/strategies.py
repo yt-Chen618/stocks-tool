@@ -19,6 +19,7 @@ from stocks_tool.domain.models import (
     PreOpenAssessmentCaptureResult,
     PreOpenAssessmentReviewResult,
     BullPutStrategyReviewResult,
+    BullPutStrategyReadinessResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     ExecuteBullPutSpreadRequest,
@@ -140,6 +141,34 @@ def preview_bull_put_spread(
         return service.preview_spread(
             external_account_id=external_account_id,
             symbol=symbol,
+            mode=mode,
+            as_of=as_of,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/bull-put/readiness", response_model=BullPutStrategyReadinessResult)
+def check_bull_put_readiness(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    as_of: datetime | None = Query(
+        default=None,
+        description="Optional UTC timestamp for deterministic readiness checks, e.g. 2026-05-22T14:45:00Z",
+    ),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> BullPutStrategyReadinessResult:
+    try:
+        return service.check_entry_readiness(
+            external_account_id=external_account_id,
             mode=mode,
             as_of=as_of,
         )

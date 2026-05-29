@@ -61,6 +61,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - A first-pass `paper_bull_put_v1` backend execution flow now exists.
 - Routes:
   - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
+  - `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
   - `GET /strategies/bull-put/spreads`
   - `GET /strategies/bull-put/spreads/{spread_id}`
   - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
@@ -87,6 +88,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - trend filter uses price vs `20 DMA / 50 DMA`, prior-close drift, and gap-down guard
   - risk preview computes spread credit, max profit, max loss, break-even, and account risk percentage
   - new entries are hard-gated to regular U.S. options hours: `09:30-16:00 ET`
+  - new entries also wait for the configured post-open confirmation window and stop before the close buffer, so manual paper execution does not chase the opening print or start a two-leg spread too late
   - execution buys the long put first, then sells the short put
   - long-leg and short-leg entries now use a bounded repricing ladder instead of a single static limit price
   - automatic entry scan can now run once per trading day during the configured `10:45-11:15 ET` window
@@ -318,6 +320,7 @@ Frontend files:
 - Added holiday-aware target-session handling so the pre-open board and persisted runs correctly treat `2026-05-25` as a Memorial Day closure with the next open on `2026-05-26`.
 - Added a `Stored Opening Follow-through` dashboard card that renders the latest persisted pre-open run for the selected broker account, including target session date, review status, stored summary, and checkpoint-by-checkpoint follow-through metrics.
 - Split the dashboard macro workflow into `Load Live Macro` for the fast real-time proxy board, `Load Option Overlays` for slower option-chain detail, and `Save Current Board` for persisting the current live/partial read.
+- Added `GET /strategies/bull-put/readiness` plus `scripts/run_bull_put_readiness_check.py` / `scripts/run_regression.py bull-put-readiness` so opening readiness can be checked without submitting orders.
 - Decoupled `/` startup so local account data renders first and Longbridge-backed quote/pre-open overlays stay manual.
 - Added `GET /account-snapshots/latest` so the dashboard can fetch the latest local snapshot summary without reloading the full snapshot-history payload on each refresh.
 - Added explicit dashboard overlay states for `Quick Quote` and the real-time macro board, including `Live`, `Refreshing`, `Partial`, `Timed Out`, `Circuit Open`, and `Stale`, while preserving the last successful broker-backed data when a later refresh fails.
@@ -364,6 +367,13 @@ Frontend files:
 ```
 
 - Result: `passed`
+- Latest targeted strategy/API verification after adding the readiness check and entry timing guard:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_bull_put_strategy.py tests\test_strategies_api.py -q
+```
+
+- Result: `48 passed`
 - Latest bull put real-paper smoke entrypoint:
 
 ```powershell

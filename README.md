@@ -93,6 +93,7 @@ Then open:
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
 - `GET /account-snapshots/latest?external_account_id=LBPT10087357`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
+- `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/pre-open-risk`
 - `GET /strategies/pre-open-runs`
 - `POST /strategies/pre-open-runs/{external_account_id}/capture`
@@ -139,6 +140,7 @@ The bull put spread workflow is currently paper-only:
 - trend filter: price above `20 DMA`, `20 DMA > 50 DMA`, not more than `0.5%` below prior close, and not more than `2%` below the open
 - risk model: conservative credit and per-trade account risk cap are enforced before the spread is marked eligible
 - entry session gate: new spread entries only execute during regular U.S. options hours (`09:30-16:00 ET`)
+- entry timing guard: new spread entries wait for the configured post-open confirmation window and stop before the close buffer, so manual execution does not chase the opening print or start a two-leg entry too late in the day
 - entry workflow: preview the candidate, buy the protective long put first, then sell the short put
 - repricing ladder: long-leg entry now starts at the current ask and can step higher by the configured increment; short-leg entry starts at bid and can reprice lower before the spread is abandoned and the hedge is rolled back
 - exit monitor: manual or scripted `monitor` calls evaluate `50%` take-profit, `200%` stop-loss, short-strike breach, and `<= 7 DTE`
@@ -154,6 +156,7 @@ The bull put spread workflow is currently paper-only:
 - dashboard: the `/` workbench now shows a real-time macro board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, optional reference-put liquidity summaries, optional deeper option-chain analysis with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus a separate stored opening follow-through review for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 - dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run render first; Longbridge-backed `Quick Quote` and the real-time macro board are manual so `/` stays usable even when broker quote calls are slow
 - dashboard strategy-first behavior: `/` now loads bull put runtime, spreads, orders, executions, journals, and stored pre-open runs first; `Load Live Macro` uses the fast macro path, `Load Option Overlays` fetches slower option-chain layers on demand, and `Save Current Board` persists the current live/partial macro read for follow-through review
+- bull put readiness: `GET /strategies/bull-put/readiness` performs a read-only opening readiness check across account configuration, runtime controls, entry window, candidate preview, capacity, and next action before any paper order is submitted
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades
 - scheduler resilience: automatic Longbridge tasks now add an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not keep retrying every poll while the broker is unstable
@@ -171,6 +174,7 @@ The repo includes six regression workflows plus a single entrypoint:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 .venv\Scripts\python.exe scripts\run_regression.py real-paper
@@ -181,6 +185,7 @@ The repo includes six regression workflows plus a single entrypoint:
 Available workflows:
 
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
+- `bull-put-readiness`: runs the read-only bull put opening readiness check against an already running local API session
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
 - `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
@@ -202,6 +207,7 @@ Useful examples:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper --json-output artifacts/bull-put-paper-regression.json
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness --json-output artifacts/bull-put-readiness.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json

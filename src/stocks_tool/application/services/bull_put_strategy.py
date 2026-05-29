@@ -35,6 +35,8 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadCandidate,
     BullPutSpreadMonitorResult,
+    BullPutStrategyReadinessCheck,
+    BullPutStrategyReadinessResult,
     BullPutSpreadScanResult,
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
@@ -238,6 +240,159 @@ class BullPutStrategyService:
                 **updates,
             )
         return state
+
+    def check_entry_readiness(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        as_of: datetime | None = None,
+    ) -> BullPutStrategyReadinessResult:
+        evaluated_at = as_of or datetime.now(timezone.utc)
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+
+        checks: list[BullPutStrategyReadinessCheck] = []
+        previews: list[BullPutSpreadScanResult] = []
+        strategy = self.settings.bull_put_strategy
+
+        def add_check(name: str, status: str, detail: str, *, blocking: bool = False) -> None:
+            checks.append(
+                BullPutStrategyReadinessCheck(
+                    name=name,
+                    status=status,
+                    detail=detail,
+                    blocking=blocking,
+                )
+            )
+
+        broker_account = self.broker_accounts.get_by_external_account_id(external_account_id)
+        if broker_account is None or broker_account.broker != BrokerName.LONGBRIDGE:
+            add_check(
+                "broker_account",
+                "blocked",
+                f"No local Longbridge broker account was found for '{external_account_id}'.",
+                blocking=True,
+            )
+            return self._build_readiness_result(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                checks=checks,
+                previews=previews,
+                next_action="Sync or create the Longbridge paper broker account before checking entries.",
+            )
+        add_check("broker_account", "ok", f"Longbridge paper account {external_account_id} is configured.")
+
+        if mode != ExecutionMode.PAPER:
+            add_check("execution_mode", "blocked", "paper_bull_put_v1 currently supports paper mode only.", blocking=True)
+        else:
+            add_check("execution_mode", "ok", "Paper execution mode is selected.")
+
+        if not strategy.enabled:
+            add_check("strategy_config", "blocked", "Bull put spread strategy is disabled by configuration.", blocking=True)
+        else:
+            add_check("strategy_config", "ok", "Bull put spread strategy is enabled.")
+
+        runtime_state = self._prepare_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+            as_of=evaluated_at,
+        )
+        runtime_reason = self._runtime_account_entry_block_reason(state=runtime_state)
+        if runtime_reason is not None:
+            add_check("runtime_controls", "blocked", runtime_reason, blocking=True)
+        else:
+            add_check("runtime_controls", "ok", "Runtime controls allow a new bull put entry.")
+
+        session_reason = self._entry_session_gate_reason(evaluated_at)
+        if session_reason is not None:
+            add_check("entry_window", "blocked", session_reason, blocking=True)
+        else:
+            add_check("entry_window", "ok", "Current time is inside the configured bull put entry window.")
+
+        if any(check.blocking for check in checks):
+            return self._build_readiness_result(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                checks=checks,
+                previews=previews,
+                next_action="Resolve the blocking checks before previewing or executing a bull put spread.",
+            )
+
+        eligible_previews: list[BullPutSpreadScanResult] = []
+        capacity_block: str | None = None
+        preview_errors: list[str] = []
+        for symbol in strategy.symbols:
+            try:
+                preview = self.preview_spread(
+                    external_account_id=external_account_id,
+                    symbol=symbol,
+                    mode=mode,
+                    as_of=evaluated_at,
+                )
+            except Exception as exc:
+                preview_errors.append(f"{symbol}: {exc}")
+                continue
+            previews.append(preview)
+            if not preview.eligible:
+                continue
+            try:
+                self._assert_entry_capacity(
+                    external_account_id=external_account_id,
+                    symbol=symbol,
+                    runtime_state=runtime_state,
+                )
+            except ValueError as exc:
+                capacity_block = str(exc)
+                continue
+            eligible_previews.append(preview)
+
+        if preview_errors:
+            add_check(
+                "candidate_scan",
+                "warning" if previews else "blocked",
+                "; ".join(preview_errors),
+                blocking=not previews,
+            )
+
+        if capacity_block is not None:
+            add_check("entry_capacity", "blocked", capacity_block, blocking=True)
+        elif eligible_previews:
+            add_check(
+                "entry_capacity",
+                "ok",
+                f"Entry capacity is available for {eligible_previews[0].symbol}.",
+            )
+
+        if eligible_previews:
+            best = eligible_previews[0]
+            add_check("candidate", "ok", f"{best.symbol} has an eligible bull put candidate.")
+            return self._build_readiness_result(
+                external_account_id=external_account_id,
+                mode=mode,
+                evaluated_at=evaluated_at,
+                checks=checks,
+                previews=previews,
+                preferred_symbol=best.symbol,
+                next_action=f"Review the {best.symbol} preview, then execute only if the live quote still matches the candidate.",
+            )
+
+        if not any(check.blocking for check in checks):
+            add_check(
+                "candidate",
+                "watching",
+                "No configured symbol currently satisfies the bull put liquidity, trend, credit, and risk filters.",
+            )
+        return self._build_readiness_result(
+            external_account_id=external_account_id,
+            mode=mode,
+            evaluated_at=evaluated_at,
+            checks=checks,
+            previews=previews,
+            next_action="Keep monitoring; do not execute until a readiness check reports an eligible candidate.",
+        )
 
     def run_entry_scan(
         self,
@@ -1469,6 +1624,38 @@ class BullPutStrategyService:
 
         return reasons
 
+    def _build_readiness_result(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        evaluated_at: datetime,
+        checks: list[BullPutStrategyReadinessCheck],
+        previews: list[BullPutSpreadScanResult],
+        preferred_symbol: str | None = None,
+        next_action: str | None = None,
+    ) -> BullPutStrategyReadinessResult:
+        if any(check.blocking for check in checks):
+            status = "blocked"
+            ready = False
+        elif preferred_symbol is not None:
+            status = "ready"
+            ready = True
+        else:
+            status = "watching"
+            ready = False
+        return BullPutStrategyReadinessResult(
+            external_account_id=external_account_id,
+            mode=mode,
+            evaluated_at=evaluated_at,
+            ready=ready,
+            status=status,
+            checks=checks,
+            previews=previews,
+            preferred_symbol=preferred_symbol,
+            next_action=next_action,
+        )
+
     def _get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot:
         snapshots = self.account_snapshots.list_account_snapshots(
             external_account_id=external_account_id
@@ -1533,6 +1720,18 @@ class BullPutStrategyService:
         state: BullPutStrategyRuntimeState,
         symbol: str,
     ) -> str | None:
+        account_reason = self._runtime_account_entry_block_reason(state=state)
+        if account_reason is not None:
+            return account_reason
+        if symbol in state.paused_symbols:
+            return f"Bull put strategy is paused for '{symbol}'."
+        return None
+
+    def _runtime_account_entry_block_reason(
+        self,
+        *,
+        state: BullPutStrategyRuntimeState,
+    ) -> str | None:
         strategy = self.settings.bull_put_strategy
         if not state.auto_entry_enabled:
             return "Automatic bull put entry is disabled for this account."
@@ -1540,8 +1739,6 @@ class BullPutStrategyService:
             return "Bull put strategy is manually paused for this account."
         if state.kill_switch_active:
             return "Bull put kill switch is active for this account."
-        if symbol in state.paused_symbols:
-            return f"Bull put strategy is paused for '{symbol}'."
         if state.daily_entry_count >= strategy.max_new_spreads_per_day:
             return "Bull put daily entry cap has already been reached for this account."
         if state.daily_realized_pnl <= (strategy.daily_realized_loss_limit * Decimal("-1")):
@@ -1593,6 +1790,18 @@ class BullPutStrategyService:
         end_minutes = (strategy.entry_session_end_hour_et * 60) + strategy.entry_session_end_minute_et
         if session_minutes < start_minutes or session_minutes >= end_minutes:
             return "Bull put entries only execute during regular U.S. options hours (09:30-16:00 ET)."
+        confirmed_start = start_minutes + strategy.entry_open_confirmation_minutes
+        if session_minutes < confirmed_start:
+            return (
+                "Bull put entries wait for the configured opening confirmation window "
+                f"({strategy.entry_open_confirmation_minutes} minutes after the regular open)."
+            )
+        buffered_end = end_minutes - strategy.entry_close_buffer_minutes
+        if session_minutes >= buffered_end:
+            return (
+                "Bull put entries stop before the close so both legs have time to fill "
+                f"({strategy.entry_close_buffer_minutes} minute buffer)."
+            )
         return None
 
     def _review_not_due_reason(

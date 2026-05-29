@@ -516,6 +516,26 @@ class BullPutSpreadScanResult(BaseModel):
     risk: BullPutSpreadRiskSummary | None = None
 
 
+class BullPutStrategyReadinessCheck(BaseModel):
+    name: str
+    status: str
+    detail: str
+    blocking: bool = False
+
+
+class BullPutStrategyReadinessResult(BaseModel):
+    strategy_id: str = "paper_bull_put_v1"
+    external_account_id: str
+    mode: ExecutionMode
+    evaluated_at: datetime
+    ready: bool
+    status: str
+    checks: list[BullPutStrategyReadinessCheck] = Field(default_factory=list)
+    previews: list[BullPutSpreadScanResult] = Field(default_factory=list)
+    preferred_symbol: str | None = None
+    next_action: str | None = None
+
+
 class ExecuteBullPutSpreadRequest(BaseModel):
     external_account_id: str
     symbol: str

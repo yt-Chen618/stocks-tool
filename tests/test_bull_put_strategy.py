@@ -998,6 +998,51 @@ def test_execute_spread_blocks_outside_regular_session() -> None:
         raise AssertionError("Expected execute_spread to block outside regular U.S. options hours.")
 
 
+def test_execute_spread_waits_for_opening_confirmation_window() -> None:
+    service, _, _, _ = build_service()
+
+    with pytest.raises(ValueError, match="opening confirmation window"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=datetime(2026, 5, 22, 13, 35, tzinfo=timezone.utc),
+            )
+        )
+
+
+def test_check_entry_readiness_reports_ready_candidate() -> None:
+    service, _, _, _ = build_service()
+
+    result = service.check_entry_readiness(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert result.ready is True
+    assert result.status == "ready"
+    assert result.preferred_symbol == "QQQ.US"
+    assert any(check.name == "entry_window" and check.status == "ok" for check in result.checks)
+    assert any(preview.eligible for preview in result.previews)
+
+
+def test_check_entry_readiness_blocks_before_opening_confirmation() -> None:
+    service, _, _, _ = build_service()
+
+    result = service.check_entry_readiness(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=datetime(2026, 5, 22, 13, 35, tzinfo=timezone.utc),
+    )
+
+    assert result.ready is False
+    assert result.status == "blocked"
+    assert any(check.name == "entry_window" and check.blocking for check in result.checks)
+    assert result.previews == []
+
+
 def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
     service, _, _, order_service = build_service()
     service.settings.bull_put_strategy.entry_fill_timeout_seconds = 0

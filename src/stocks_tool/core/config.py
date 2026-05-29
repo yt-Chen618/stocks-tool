@@ -38,6 +38,8 @@ class BullPutSpreadStrategySettings(BaseModel):
     entry_session_start_minute_et: int = Field(default=30, ge=0, le=59)
     entry_session_end_hour_et: int = Field(default=16, ge=0, le=23)
     entry_session_end_minute_et: int = Field(default=0, ge=0, le=59)
+    entry_open_confirmation_minutes: int = Field(default=15, ge=0)
+    entry_close_buffer_minutes: int = Field(default=5, ge=0)
     entry_long_limit_buffer: Decimal = Field(default=Decimal("0.10"), ge=0)
     entry_fill_timeout_seconds: int = Field(default=45, ge=0)
     entry_fill_poll_interval_seconds: int = Field(default=5, ge=0)
@@ -71,6 +73,14 @@ class BullPutSpreadStrategySettings(BaseModel):
             self.entry_session_start_minute_et,
         ):
             raise ValueError("Bull put spread entry session end must be after the entry session start.")
+        entry_start_minutes = (self.entry_session_start_hour_et * 60) + self.entry_session_start_minute_et
+        entry_end_minutes = (self.entry_session_end_hour_et * 60) + self.entry_session_end_minute_et
+        if self.entry_open_confirmation_minutes + self.entry_close_buffer_minutes >= (
+            entry_end_minutes - entry_start_minutes
+        ):
+            raise ValueError(
+                "Bull put spread entry confirmation and close buffers must leave a positive execution window."
+            )
         if (self.scan_window_end_hour_et, self.scan_window_end_minute_et) < (
             self.scan_window_start_hour_et,
             self.scan_window_start_minute_et,
