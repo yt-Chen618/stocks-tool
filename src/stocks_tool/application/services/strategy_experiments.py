@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 
 from stocks_tool.domain.enums import StrategyProposalStatus
 from stocks_tool.domain.models import (
+    CoveredCallActivitySnapshot,
+    CoveredCallActivitySummary,
     CreateStrategyProposalRequest,
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
@@ -56,6 +58,26 @@ class StrategyExperimentService:
                 strategy_id=strategy_id,
                 limit=limit,
             ),
+        )
+
+    def get_covered_call_activity(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 12,
+    ) -> CoveredCallActivitySnapshot:
+        snapshot = self.get_snapshot(
+            external_account_id=external_account_id,
+            strategy_id="covered_call_v1",
+            limit=limit,
+        )
+        return CoveredCallActivitySnapshot(
+            external_account_id=external_account_id,
+            summary=self._covered_call_activity_summary(snapshot),
+            proposals=snapshot.proposals,
+            runs=snapshot.runs,
+            signals=snapshot.signals,
+            reviews=snapshot.reviews,
         )
 
     def create_proposal(self, request: CreateStrategyProposalRequest) -> StrategyProposal:
@@ -174,3 +196,36 @@ class StrategyExperimentService:
     def _ensure_account(self, external_account_id: str) -> None:
         if self.broker_accounts.get_by_external_account_id(external_account_id) is None:
             raise LookupError(f"Broker account '{external_account_id}' was not found.")
+
+    @staticmethod
+    def _covered_call_activity_summary(
+        snapshot: StrategyExperimentSnapshot,
+    ) -> CoveredCallActivitySummary:
+        active_statuses = {
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+        }
+        latest_candidates = [
+            proposal.updated_at for proposal in snapshot.proposals if proposal.updated_at is not None
+        ]
+        latest_candidates.extend(run.created_at for run in snapshot.runs if run.created_at is not None)
+        latest_candidates.extend(signal.emitted_at for signal in snapshot.signals if signal.emitted_at is not None)
+        latest_candidates.extend(review.reviewed_at for review in snapshot.reviews if review.reviewed_at is not None)
+        return CoveredCallActivitySummary(
+            external_account_id=snapshot.external_account_id,
+            total_proposals=len(snapshot.proposals),
+            active_proposals=sum(1 for proposal in snapshot.proposals if proposal.status in active_statuses),
+            executed_positions=sum(
+                1
+                for proposal in snapshot.proposals
+                if proposal.proposed_action == "sell_covered_call"
+                and proposal.status == StrategyProposalStatus.EXECUTED
+            ),
+            pending_rolls=sum(
+                1
+                for proposal in snapshot.proposals
+                if proposal.proposed_action == "roll_covered_call" and proposal.status in active_statuses
+            ),
+            close_runs=sum(1 for run in snapshot.runs if run.run_type == "proposal_close"),
+            latest_activity_at=max(latest_candidates) if latest_candidates else None,
+        )

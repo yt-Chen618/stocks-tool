@@ -335,6 +335,15 @@ def render_dashboard() -> HTMLResponse:
                           <div class="strategy-notes-grid experiment-grid">
                             <article class="strategy-note-card">
                               <div class="form-header">
+                                <span class="section-kicker">Covered Calls</span>
+                                <h3>Activity History</h3>
+                              </div>
+                              <div id="covered-call-activity-card" class="strategy-note-body empty">
+                                No covered-call activity yet.
+                              </div>
+                            </article>
+                            <article class="strategy-note-card">
+                              <div class="form-header">
                                 <span class="section-kicker">Proposals</span>
                                 <h3>Strategy Proposals</h3>
                               </div>

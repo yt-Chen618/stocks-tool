@@ -537,6 +537,25 @@ class StrategyExperimentSnapshot(BaseModel):
     reviews: list[StrategyReview] = Field(default_factory=list)
 
 
+class CoveredCallActivitySummary(BaseModel):
+    external_account_id: str | None = None
+    total_proposals: int = 0
+    active_proposals: int = 0
+    executed_positions: int = 0
+    pending_rolls: int = 0
+    close_runs: int = 0
+    latest_activity_at: datetime | None = None
+
+
+class CoveredCallActivitySnapshot(BaseModel):
+    external_account_id: str | None = None
+    summary: CoveredCallActivitySummary = Field(default_factory=CoveredCallActivitySummary)
+    proposals: list[StrategyProposal] = Field(default_factory=list)
+    runs: list[StrategyRun] = Field(default_factory=list)
+    signals: list[StrategySignal] = Field(default_factory=list)
+    reviews: list[StrategyReview] = Field(default_factory=list)
+
+
 class BrokerCapability(BaseModel):
     name: str
     supported: bool

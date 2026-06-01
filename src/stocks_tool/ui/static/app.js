@@ -417,6 +417,7 @@ const state = {
   spreads: [],
   runtime: null,
   strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
+  coveredCallActivity: { summary: {}, proposals: [], runs: [], signals: [], reviews: [] },
   marketEvents: [],
   executions: [],
   journals: [],
@@ -471,6 +472,7 @@ function bindElements() {
   els.strategyJournalFeed = document.getElementById("strategy-journal-feed");
   els.strategyReviewCard = document.getElementById("strategy-review-card");
   els.strategyExperimentStrip = document.getElementById("strategy-experiment-strip");
+  els.coveredCallActivityCard = document.getElementById("covered-call-activity-card");
   els.strategyProposalsCard = document.getElementById("strategy-proposals-card");
   els.strategyRunsCard = document.getElementById("strategy-runs-card");
   els.strategySignalsCard = document.getElementById("strategy-signals-card");
@@ -979,6 +981,7 @@ async function loadAccountData() {
     state.spreads = [];
     state.runtime = null;
     state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
+    state.coveredCallActivity = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
     state.marketEvents = [];
     state.executions = [];
     state.journals = [];
@@ -993,6 +996,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderCoveredCallActivity();
     renderStrategyExperiment();
     renderMarketEvents();
     renderSpreads();
@@ -1006,12 +1010,27 @@ async function loadAccountData() {
   }
 
   try {
-    const [latestSnapshot, orders, spreads, runtime, strategyExperiment, marketEvents, executions, journals, preOpenRuns] = await Promise.all([
+    const [
+      latestSnapshot,
+      orders,
+      spreads,
+      runtime,
+      strategyExperiment,
+      coveredCallActivity,
+      marketEvents,
+      executions,
+      journals,
+      preOpenRuns,
+    ] = await Promise.all([
       fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/experiment?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=6`),
+      fetchJson(`/strategies/covered-call/activity?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=8`).catch((error) => {
+        console.error(error);
+        return { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+      }),
       fetchJson("/market-events?limit=8"),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
@@ -1021,6 +1040,7 @@ async function loadAccountData() {
     state.spreads = spreads;
     state.runtime = runtime;
     state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
+    state.coveredCallActivity = coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
     state.marketEvents = Array.isArray(marketEvents) ? marketEvents : [];
     state.executions = executions;
     state.journals = journals;
@@ -1038,6 +1058,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderCoveredCallActivity();
     renderStrategyExperiment();
     renderMarketEvents();
     renderSpreads();
@@ -2096,6 +2117,68 @@ function renderStrategyRuntime() {
   updateStrategyButtons();
 }
 
+function renderCoveredCallActivity() {
+  if (!els.coveredCallActivityCard) {
+    return;
+  }
+  const activity = state.coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+  const summary = objectPayload(activity.summary);
+  const proposals = Array.isArray(activity.proposals) ? activity.proposals : [];
+  const runs = Array.isArray(activity.runs) ? activity.runs : [];
+  const signals = Array.isArray(activity.signals) ? activity.signals : [];
+  const reviews = Array.isArray(activity.reviews) ? activity.reviews : [];
+  if (!proposals.length && !runs.length && !signals.length && !reviews.length) {
+    els.coveredCallActivityCard.className = "strategy-note-body empty";
+    els.coveredCallActivityCard.textContent = "No covered-call activity yet.";
+    return;
+  }
+
+  const latestRun = runs[0] || null;
+  const latestSignal = signals[0] || null;
+  const summaryItems = [
+    ["Active", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s) tracked`],
+    ["Open CC", formatActivityCount(summary.executed_positions), "Executed covered-call proposals"],
+    ["Rolls", formatActivityCount(summary.pending_rolls), "Pending or approved roll proposals"],
+    ["Closes", formatActivityCount(summary.close_runs), `Latest ${formatDateTime(summary.latest_activity_at)}`],
+  ];
+  const proposalMarkup = proposals.length
+    ? proposals
+        .slice(0, 3)
+        .map(
+          (proposal) => `
+            <article class="strategy-journal-entry">
+              <div class="strategy-journal-head">
+                <strong>${escapeHtml(proposal.title)}</strong>
+                <span class="pill ${strategyStatusClass(proposal.status)}">${escapeHtml(formatStrategyStatusLabel(proposal.status))}</span>
+              </div>
+              <p>${escapeHtml([proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</p>
+              ${renderStrategyProposalDetails(proposal, proposals)}
+              ${renderStrategyProposalActions(proposal)}
+            </article>
+          `
+        )
+        .join("")
+    : '<article class="strategy-journal-entry"><p>No covered-call proposals recorded.</p></article>';
+  const latestActivityMarkup = `
+    <article class="strategy-journal-entry">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(latestRun ? `${latestRun.run_type} / ${formatStrategyStatusLabel(latestRun.status)}` : "Latest signal")}</strong>
+        <span>${escapeHtml(formatDateTime(latestRun?.created_at || latestSignal?.emitted_at))}</span>
+      </div>
+      <p>${escapeHtml(latestRun?.summary || latestRun?.reason || latestSignal?.summary || "No run or signal detail recorded.")}</p>
+    </article>
+  `;
+
+  els.coveredCallActivityCard.className = "strategy-note-body";
+  els.coveredCallActivityCard.innerHTML = `
+    <div class="proposal-detail-grid">
+      ${summaryItems.map(renderStrategyProposalDetail).join("")}
+    </div>
+    ${proposalMarkup}
+    ${latestActivityMarkup}
+  `;
+}
+
 function renderStrategyExperiment() {
   const experiment = state.strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
   const proposals = Array.isArray(experiment.proposals) ? experiment.proposals : [];
@@ -2360,6 +2443,11 @@ function renderStrategyProposalActions(proposal) {
         .join("")}
     </div>
   `;
+}
+
+function formatActivityCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? String(number) : "0";
 }
 
 function objectPayload(value) {

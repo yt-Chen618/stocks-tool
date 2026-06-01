@@ -115,6 +115,7 @@ Then open:
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/covered-call/preview`
+- `GET /strategies/covered-call/activity`
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
@@ -191,6 +192,7 @@ The bull put spread workflow is currently paper-only:
 - market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters; `/market-events/import` ingests CSV-shaped batches with duplicate suppression; `/market-events/import/provider` can import normalized FMP earnings and U.S. macro events through the same dedupe path
 - covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance; `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose` records a manual-approval roll proposal with current buyback estimate and next OTM call candidate; `POST /strategies/covered-call/proposals/{proposal_id}/roll-execute` executes an approved roll proposal by submitting buy-to-close first and only submitting sell-to-open when the buyback is already filled; `POST /strategies/covered-call/proposals/{proposal_id}/roll-continue` refreshes a pending buyback order and submits the sell-to-open leg after it fills; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed proposal
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
+- dashboard covered-call activity: `/` now includes a dedicated covered-call activity card backed by `GET /strategies/covered-call/activity`, with proposal counts, open covered-call count, pending roll count, close-run count, and recent proposal/run history
 - dashboard proposal controls: the strategy experiment panel now exposes approve / reject, covered-call execute / monitor / close / roll-propose, and covered-call roll execute / continue actions, with compact proposal payload details, optional execution limit-price overrides, and roll-chain references
 - dashboard event calendar: `/` now shows upcoming market events so strategy proposal risk warnings have a visible source
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
@@ -285,5 +287,5 @@ FMP_API_KEY=...
 ## Next milestones
 
 1. Exercise the new FMP event import against a configured key and verify upcoming earnings / macro events populate the dashboard before strategy previews.
-2. Add a dedicated covered-call activity/history view or scheduler once paper roll behavior is exercised during market hours.
+2. Add a covered-call scheduler after paper roll behavior is exercised during market hours.
 3. Add authentication, audit logging, and strategy-level permission controls before any live execution path expands.

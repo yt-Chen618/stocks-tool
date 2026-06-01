@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_strategy_experiment_service
+from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.domain.enums import (
     ExecutionMode,
     StrategyProposalStatus,
@@ -13,6 +14,8 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    CoveredCallActivitySnapshot,
+    CoveredCallActivitySummary,
     StrategyExperimentSnapshot,
     StrategyProposal,
     StrategyReview,
@@ -53,6 +56,28 @@ def build_proposal(status: StrategyProposalStatus = StrategyProposalStatus.PENDI
     )
 
 
+def build_covered_call_proposal(
+    *,
+    proposal_id: str = "proposal-cc-1",
+    action: str = "sell_covered_call",
+    status: StrategyProposalStatus = StrategyProposalStatus.PENDING,
+) -> StrategyProposal:
+    return StrategyProposal(
+        id=proposal_id,
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action=action,
+        rationale="Candidate passed covered-call readiness checks.",
+        status=status,
+        confidence=Decimal("0.55"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
 def build_run() -> StrategyRun:
     return StrategyRun(
         id="run-1",
@@ -63,6 +88,23 @@ def build_run() -> StrategyRun:
         status=StrategyRunStatus.EXECUTED,
         symbol="QQQ.US",
         summary="Preview returned an eligible candidate.",
+        started_at=NOW,
+        completed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def build_covered_call_run(run_type: str = "proposal_close") -> StrategyRun:
+    return StrategyRun(
+        id=f"run-{run_type}",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        run_type=run_type,
+        status=StrategyRunStatus.EXECUTED,
+        symbol="UNH.US",
+        summary="Covered-call action recorded.",
         started_at=NOW,
         completed_at=NOW,
         created_at=NOW,
@@ -130,6 +172,89 @@ def test_strategy_experiment_snapshot_route_returns_unified_lists() -> None:
         external_account_id="LBPT10087357",
         strategy_id=None,
         limit=6,
+    )
+
+
+def test_covered_call_activity_route_returns_dedicated_snapshot() -> None:
+    service = Mock()
+    service.get_covered_call_activity.return_value = CoveredCallActivitySnapshot(
+        external_account_id="LBPT10087357",
+        summary=CoveredCallActivitySummary(
+            external_account_id="LBPT10087357",
+            total_proposals=2,
+            active_proposals=1,
+            executed_positions=1,
+            pending_rolls=1,
+            close_runs=1,
+            latest_activity_at=NOW,
+        ),
+        proposals=[
+            build_covered_call_proposal(status=StrategyProposalStatus.EXECUTED),
+            build_covered_call_proposal(
+                proposal_id="proposal-roll-1",
+                action="roll_covered_call",
+                status=StrategyProposalStatus.PENDING,
+            ),
+        ],
+        runs=[build_covered_call_run()],
+    )
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/covered-call/activity",
+            params={"external_account_id": "LBPT10087357", "limit": "8"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["executed_positions"] == 1
+    assert body["summary"]["pending_rolls"] == 1
+    assert body["proposals"][1]["proposed_action"] == "roll_covered_call"
+    service.get_covered_call_activity.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        limit=8,
+    )
+
+
+def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.list_proposals.return_value = [
+        build_covered_call_proposal(status=StrategyProposalStatus.EXECUTED),
+        build_covered_call_proposal(
+            proposal_id="proposal-roll-1",
+            action="roll_covered_call",
+            status=StrategyProposalStatus.APPROVED,
+        ),
+    ]
+    experiments.list_runs.return_value = [build_covered_call_run("proposal_close")]
+    experiments.list_signals.return_value = []
+    experiments.list_reviews.return_value = []
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+    )
+
+    activity = service.get_covered_call_activity(
+        external_account_id="LBPT10087357",
+        limit=8,
+    )
+
+    assert activity.summary.total_proposals == 2
+    assert activity.summary.active_proposals == 1
+    assert activity.summary.executed_positions == 1
+    assert activity.summary.pending_rolls == 1
+    assert activity.summary.close_runs == 1
+    assert activity.summary.latest_activity_at == NOW
+    experiments.list_proposals.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        strategy_id="covered_call_v1",
+        status=None,
+        limit=8,
     )
 
 

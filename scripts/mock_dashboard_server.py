@@ -929,6 +929,47 @@ class MockDashboardState:
             "reviews": self.list_strategy_reviews(external_account_id, strategy_id, limit=limit),
         }
 
+    def covered_call_activity_snapshot(
+        self,
+        external_account_id: str | None = None,
+        limit: int = 12,
+    ) -> dict[str, Any]:
+        proposals = self.list_strategy_proposals(external_account_id, "covered_call_v1", limit=limit)
+        runs = self.list_strategy_runs(external_account_id, "covered_call_v1", limit=limit)
+        signals = self.list_strategy_signals(external_account_id, "covered_call_v1", limit=limit)
+        reviews = self.list_strategy_reviews(external_account_id, "covered_call_v1", limit=limit)
+        active_statuses = {"pending", "approved"}
+        activity_times = [
+            *(row["updated_at"] for row in proposals if row.get("updated_at")),
+            *(row["created_at"] for row in runs if row.get("created_at")),
+            *(row["emitted_at"] for row in signals if row.get("emitted_at")),
+            *(row["reviewed_at"] for row in reviews if row.get("reviewed_at")),
+        ]
+        return {
+            "external_account_id": external_account_id,
+            "summary": {
+                "external_account_id": external_account_id,
+                "total_proposals": len(proposals),
+                "active_proposals": sum(1 for row in proposals if row["status"] in active_statuses),
+                "executed_positions": sum(
+                    1
+                    for row in proposals
+                    if row["proposed_action"] == "sell_covered_call" and row["status"] == "executed"
+                ),
+                "pending_rolls": sum(
+                    1
+                    for row in proposals
+                    if row["proposed_action"] == "roll_covered_call" and row["status"] in active_statuses
+                ),
+                "close_runs": sum(1 for row in runs if row["run_type"] == "proposal_close"),
+                "latest_activity_at": max(activity_times) if activity_times else None,
+            },
+            "proposals": proposals,
+            "runs": runs,
+            "signals": signals,
+            "reviews": reviews,
+        }
+
     def list_strategy_proposals(
         self,
         external_account_id: str | None = None,
@@ -1346,6 +1387,16 @@ def create_app() -> FastAPI:
         return state.strategy_experiment_snapshot(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    @app.get("/strategies/covered-call/activity")
+    def covered_call_activity(
+        external_account_id: str | None = Query(default=None),
+        limit: int = Query(default=12, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return state.covered_call_activity_snapshot(
+            external_account_id=external_account_id,
             limit=limit,
         )
 

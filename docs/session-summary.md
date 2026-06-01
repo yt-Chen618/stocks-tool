@@ -76,6 +76,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/experiment`
 - `GET /strategies/covered-call/preview`
+- `GET /strategies/covered-call/activity`
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
@@ -166,6 +167,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
   - `roll-continue` refreshes a pending buyback order and submits the sell-to-open leg once that buyback is filled
   - `close` submits a paper buy-to-close limit order for an executed proposal
+  - `activity` aggregates covered-call proposal/run/signal/review history into a dedicated dashboard snapshot with active proposal, open covered-call, pending roll, close-run, and latest-activity counts
   - no automatic covered-call scheduler exists yet
 
 ### Market event calendar
@@ -353,6 +355,7 @@ Current dashboard capabilities:
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View strategy experiment proposals, runs, signals, and reviews for the selected account
+- View dedicated covered-call activity/history with proposal counts, open covered-call count, pending roll count, close-run count, and latest proposal/run detail
 - Approve / reject strategy proposals and run covered-call proposal actions from the strategy experiment bench, with compact covered-call payload details, optional limit-price overrides, and roll-chain references
 - View upcoming market events used by strategy proposal risk warnings
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
@@ -426,6 +429,7 @@ Frontend files:
 - Added covered-call roll continuation for buyback orders that remain working after the initial roll submission.
 - Added dashboard strategy proposal controls for approval / rejection plus covered-call execute, monitor, close, roll-propose, roll-execute, and roll-continue actions.
 - Added richer covered-call proposal cards in the strategy experiment bench, including key candidate/risk payload fields, roll-from / roll-to summaries, roll-chain references, and optional limit-price prompts before covered-call execute / close / roll actions.
+- Added `GET /strategies/covered-call/activity` plus a dedicated dashboard covered-call activity/history card backed by the strategy experiment ledger.
 - Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
@@ -453,20 +457,20 @@ Frontend files:
 - Added `tests/test_strategy_experiments_api.py` for the unified strategy experiment routes.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the FMP market-event provider adapter update:
+- Latest local verification run after the covered-call activity dashboard update:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `120 passed`
+- Result: `122 passed`
 - Latest browser-regression run:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 ```
 
-- Result: `passed` and now includes the strategy experiment bench, real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the macro board state surfaces
+- Result: `passed` and now includes the strategy experiment bench, covered-call activity card, real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, bull put strategy controls, skip-reason rendering, latest-review rendering, plus the macro board state surfaces
 - Latest real local pre-open board regression:
 
 ```powershell
@@ -549,5 +553,5 @@ Frontend files:
 ## Recommended next steps
 
 1. Exercise the new FMP event import against a configured key and verify upcoming earnings / macro events populate the dashboard before strategy previews.
-2. Add a dedicated covered-call activity/history view or scheduler once paper roll behavior is exercised during market hours.
+2. Add a covered-call scheduler after paper roll behavior is exercised during market hours.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

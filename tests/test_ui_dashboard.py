@@ -34,6 +34,7 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Strategy Experiment Bench" in response.text
     assert "Market Event Calendar" in response.text
     assert "Strategy Proposals" in response.text
+    assert "Activity History" in response.text
     assert "Strategy Runs" in response.text
     assert "Signal Feed" in response.text
     assert "Review Feed" in response.text

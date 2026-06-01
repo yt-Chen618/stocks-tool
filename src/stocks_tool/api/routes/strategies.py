@@ -34,6 +34,7 @@ from stocks_tool.domain.models import (
     BullPutStrategyScanRunResult,
     CloseCoveredCallProposalRequest,
     ContinueCoveredCallRollRequest,
+    CoveredCallActivitySnapshot,
     CreateCoveredCallRollProposalRequest,
     CoveredCallCloseResult,
     CoveredCallExecutionResult,
@@ -241,6 +242,21 @@ def close_covered_call_proposal(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeIntegrationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/covered-call/activity", response_model=CoveredCallActivitySnapshot)
+def get_covered_call_activity(
+    external_account_id: str | None = Query(default=None, description="Optional broker account id filter, e.g. LBPT10087357"),
+    limit: int = Query(default=12, ge=1, le=100),
+    service: StrategyExperimentService = Depends(get_strategy_experiment_service),
+) -> CoveredCallActivitySnapshot:
+    try:
+        return service.get_covered_call_activity(
+            external_account_id=external_account_id,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/experiment", response_model=StrategyExperimentSnapshot)
