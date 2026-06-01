@@ -1363,6 +1363,11 @@ async function handleStrategyProposalAction(action, proposalId) {
   setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
   try {
     let result = null;
+    const requestPayload = buildStrategyProposalActionPayload(action);
+    if (requestPayload.canceled) {
+      setStatus("Strategy proposal action canceled.", "warning");
+      return;
+    }
     if (action === "approve" || action === "reject") {
       result = await fetchJson(`/strategies/proposals/${encodeURIComponent(proposalId)}/${action}`, {
         method: "POST",
@@ -1370,7 +1375,7 @@ async function handleStrategyProposalAction(action, proposalId) {
     } else if (action === "execute_covered_call") {
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/execute`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(requestPayload.body),
       });
     } else if (action === "monitor_covered_call") {
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/monitor`, {
@@ -1379,27 +1384,22 @@ async function handleStrategyProposalAction(action, proposalId) {
     } else if (action === "close_covered_call") {
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/close`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(requestPayload.body),
       });
     } else if (action === "roll_propose") {
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-propose`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(requestPayload.body),
       });
     } else if (action === "roll_execute") {
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-execute`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(requestPayload.body),
       });
     } else if (action === "roll_continue") {
-      const buybackOrderId = window.prompt("Buyback order id to refresh before opening the rolled call:");
-      if (!buybackOrderId) {
-        setStatus("Covered call roll continuation canceled.", "warning");
-        return;
-      }
       result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-continue`, {
         method: "POST",
-        body: JSON.stringify({ buyback_order_id: buybackOrderId.trim() }),
+        body: JSON.stringify(requestPayload.body),
       });
     } else {
       throw new Error(`Unsupported proposal action: ${action}`);
@@ -1410,6 +1410,88 @@ async function handleStrategyProposalAction(action, proposalId) {
     console.error(error);
     setStatus(error.message || "Strategy proposal action failed.", "error");
   }
+}
+
+function buildStrategyProposalActionPayload(action) {
+  if (action === "execute_covered_call") {
+    return buildOptionalLimitPayload({
+      field: "limit_price",
+      promptText: "Optional sell-call limit price. Leave blank to use the current bid:",
+      label: "Covered call sell limit price",
+    });
+  }
+  if (action === "close_covered_call") {
+    return buildOptionalLimitPayload({
+      field: "limit_price",
+      promptText: "Optional buy-to-close limit price. Leave blank to use the current call mark:",
+      label: "Covered call close limit price",
+    });
+  }
+  if (action === "roll_execute") {
+    const buyback = promptOptionalPositiveNumber(
+      "Optional buyback limit price for the old short call. Leave blank to use the current call mark:",
+      "Covered call roll buyback limit price"
+    );
+    if (buyback.canceled) {
+      return { canceled: true, body: {} };
+    }
+    const sell = promptOptionalPositiveNumber(
+      "Optional sell limit price for the new short call. Leave blank to use the candidate bid:",
+      "Covered call roll sell limit price"
+    );
+    if (sell.canceled) {
+      return { canceled: true, body: {} };
+    }
+    const body = {};
+    addOptionalNumberField(body, "buyback_limit_price", buyback.value);
+    addOptionalNumberField(body, "sell_limit_price", sell.value);
+    return { canceled: false, body };
+  }
+  if (action === "roll_continue") {
+    const buybackOrderId = window.prompt("Buyback order id to refresh before opening the rolled call:");
+    if (buybackOrderId === null || !buybackOrderId.trim()) {
+      return { canceled: true, body: {} };
+    }
+    const sell = promptOptionalPositiveNumber(
+      "Optional sell limit price for the new short call. Leave blank to use the candidate bid:",
+      "Covered call roll continuation sell limit price"
+    );
+    if (sell.canceled) {
+      return { canceled: true, body: {} };
+    }
+    const body = { buyback_order_id: buybackOrderId.trim() };
+    addOptionalNumberField(body, "sell_limit_price", sell.value);
+    return { canceled: false, body };
+  }
+  return { canceled: false, body: {} };
+}
+
+function buildOptionalLimitPayload({ field, promptText, label }) {
+  const limit = promptOptionalPositiveNumber(promptText, label);
+  if (limit.canceled) {
+    return { canceled: true, body: {} };
+  }
+  const body = {};
+  addOptionalNumberField(body, field, limit.value);
+  return { canceled: false, body };
+}
+
+function promptOptionalPositiveNumber(promptText, label) {
+  const value = window.prompt(promptText);
+  if (value === null) {
+    return { canceled: true, value: null };
+  }
+  return {
+    canceled: false,
+    value: parsePositiveNumber(value, label, false),
+  };
+}
+
+function addOptionalNumberField(payload, field, value) {
+  if (value !== null && value !== undefined) {
+    payload[field] = value;
+  }
+  return payload;
 }
 
 async function refreshAccounts() {
@@ -2077,6 +2159,7 @@ function renderStrategyExperiment() {
         </div>
         <p>${escapeHtml(proposal.rationale)}</p>
         <span>${escapeHtml([proposal.strategy_id, proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</span>
+        ${renderStrategyProposalDetails(proposal, proposals)}
         ${renderStrategyProposalActions(proposal)}
       </article>
     `,
@@ -2141,6 +2224,106 @@ function renderStrategyExperimentList({ element, items, emptyText, renderItem })
   element.innerHTML = items.slice(0, 4).map(renderItem).join("");
 }
 
+function renderStrategyProposalDetails(proposal, proposals = []) {
+  if (proposal.strategy_id !== "covered_call_v1") {
+    return "";
+  }
+  const candidate = objectPayload(proposal.candidate_payload);
+  const risk = objectPayload(proposal.risk_payload);
+  let items = [];
+  if (proposal.proposed_action === "sell_covered_call") {
+    items = [
+      [
+        "Call",
+        displayValue(candidate.call_symbol),
+        `${formatProposalDate(candidate.expiration_date)} / K ${formatProposalNumber(candidate.call_strike)}`,
+      ],
+      [
+        "Premium",
+        formatProposalCurrency(candidate.premium_income),
+        `${formatProposalCount(candidate.contracts)} contract(s) / bid ${formatProposalCurrency(candidate.call_bid)}`,
+      ],
+      [
+        "Risk",
+        `Max ${formatProposalCurrency(risk.max_income)}`,
+        `B/E ${formatProposalCurrency(risk.break_even)} / zero ${formatProposalCurrency(risk.max_loss_if_zero)}`,
+      ],
+      [
+        "Liquidity",
+        `${formatProposalNumber(candidate.delta)} delta`,
+        `OI ${formatProposalCount(candidate.open_interest)} / Vol ${formatProposalCount(candidate.volume)}`,
+      ],
+    ];
+  } else if (proposal.proposed_action === "roll_covered_call") {
+    const rollFrom = objectPayload(candidate.roll_from);
+    const rollTo = objectPayload(candidate.roll_to);
+    const currentMonitor = objectPayload(risk.current_monitor);
+    const nextRisk = objectPayload(risk.next_risk);
+    items = [
+      [
+        "Roll From",
+        displayValue(rollFrom.call_symbol),
+        `${formatProposalDate(rollFrom.expiration_date)} / K ${formatProposalNumber(rollFrom.call_strike)}`,
+      ],
+      [
+        "Roll To",
+        displayValue(rollTo.call_symbol),
+        `${formatProposalDate(rollTo.expiration_date)} / K ${formatProposalNumber(rollTo.call_strike)}`,
+      ],
+      [
+        "Buyback",
+        formatProposalCurrency(pickProposalValue(risk.estimated_buyback_debit, currentMonitor.estimated_buyback_debit)),
+        `Open PnL ${formatProposalSignedCurrency(pickProposalValue(risk.estimated_open_pnl, currentMonitor.estimated_open_pnl))}`,
+      ],
+      [
+        "Next Income",
+        formatProposalCurrency(rollTo.premium_income),
+        `Bid ${formatProposalCurrency(rollTo.call_bid)} / B/E ${formatProposalCurrency(nextRisk.break_even)}`,
+      ],
+    ];
+  }
+  const detailsMarkup = items.length
+    ? `
+      <div class="proposal-detail-grid">
+        ${items.map(renderStrategyProposalDetail).join("")}
+      </div>
+    `
+    : "";
+  const chainMarkup = renderStrategyProposalChainLine(proposal, proposals);
+  if (!detailsMarkup && !chainMarkup) {
+    return "";
+  }
+  return `${detailsMarkup}${chainMarkup}`;
+}
+
+function renderStrategyProposalDetail([label, value, detail]) {
+  return `
+    <div class="proposal-detail">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value)}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>
+  `;
+}
+
+function renderStrategyProposalChainLine(proposal, proposals) {
+  const candidate = objectPayload(proposal.candidate_payload);
+  if (proposal.proposed_action === "roll_covered_call") {
+    const sourceProposalId = pickProposalValue(candidate.source_proposal_id, objectPayload(proposal.risk_payload).source_proposal_id);
+    if (sourceProposalId) {
+      return `<p class="proposal-chain-line">Roll chain: ${escapeHtml(formatShortIdentifier(sourceProposalId))} -> ${escapeHtml(formatShortIdentifier(proposal.id))}</p>`;
+    }
+    return "";
+  }
+  const childRolls = proposals
+    .filter((child) => objectPayload(child.candidate_payload).source_proposal_id === proposal.id)
+    .map((child) => formatShortIdentifier(child.id));
+  if (!childRolls.length) {
+    return "";
+  }
+  return `<p class="proposal-chain-line">Roll proposals: ${escapeHtml(childRolls.join(", "))}</p>`;
+}
+
 function renderStrategyProposalActions(proposal) {
   const actions = [];
   if (proposal.status === "pending") {
@@ -2177,6 +2360,50 @@ function renderStrategyProposalActions(proposal) {
         .join("")}
     </div>
   `;
+}
+
+function objectPayload(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+}
+
+function pickProposalValue(...values) {
+  return values.find((value) => value !== null && value !== undefined && value !== "");
+}
+
+function displayValue(value) {
+  const selected = pickProposalValue(value);
+  return selected === undefined ? "--" : String(selected);
+}
+
+function formatProposalCurrency(value) {
+  const selected = pickProposalValue(value);
+  return selected === undefined ? "--" : formatCurrency(selected);
+}
+
+function formatProposalSignedCurrency(value) {
+  const selected = pickProposalValue(value);
+  return selected === undefined ? "--" : formatSignedCurrency(selected);
+}
+
+function formatProposalNumber(value) {
+  const selected = pickProposalValue(value);
+  return selected === undefined ? "--" : formatNumber(selected);
+}
+
+function formatProposalCount(value) {
+  const selected = pickProposalValue(value);
+  const number = Number(selected);
+  return Number.isFinite(number) ? number.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "--";
+}
+
+function formatProposalDate(value) {
+  const selected = pickProposalValue(value);
+  return selected === undefined ? "--" : formatSpreadDate(selected);
+}
+
+function formatShortIdentifier(value) {
+  const text = String(value || "");
+  return text.length > 12 ? text.slice(0, 8) : text || "--";
 }
 
 function renderMarketEvents() {
