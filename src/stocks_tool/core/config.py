@@ -122,6 +122,12 @@ class BullPutSpreadStrategySettings(BaseModel):
 
 class CoveredCallStrategySettings(BaseModel):
     enabled: bool = True
+    auto_propose_enabled: bool = False
+    auto_monitor_enabled: bool = False
+    auto_lifecycle_enabled: bool = False
+    proposal_interval_seconds: int = Field(default=3600, ge=60)
+    monitor_interval_seconds: int = Field(default=900, ge=60)
+    lifecycle_interval_seconds: int = Field(default=300, ge=60)
     min_shares: int = Field(default=100, ge=100)
     min_dte: int = Field(default=21, ge=1)
     max_dte: int = Field(default=45, ge=1)

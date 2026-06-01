@@ -30,6 +30,8 @@ class StrategyProposalStatus(str, Enum):
     REJECTED = "rejected"
     EXPIRED = "expired"
     EXECUTED = "executed"
+    CLOSED = "closed"
+    ROLLED = "rolled"
 
 
 class StrategyRunStatus(str, Enum):

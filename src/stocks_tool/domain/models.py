@@ -819,6 +819,7 @@ class ExecuteCoveredCallRollProposalRequest(BaseModel):
 
 class ContinueCoveredCallRollRequest(BaseModel):
     buyback_order_id: str = Field(min_length=1, max_length=36)
+    sell_order_id: str | None = Field(default=None, min_length=1, max_length=36)
     sell_limit_price: Decimal | None = Field(default=None, gt=0)
     remark: str | None = Field(default=None, max_length=64)
 

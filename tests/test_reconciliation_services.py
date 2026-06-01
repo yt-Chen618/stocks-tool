@@ -21,6 +21,7 @@ from stocks_tool.domain.enums import (
     OrderType,
     ReconciliationStatus,
     SpreadStatus,
+    StrategyProposalStatus,
     TimeInForce,
 )
 from stocks_tool.domain.models import (
@@ -126,6 +127,73 @@ def build_open_spread(*, last_synced_at: datetime | None = None) -> BullPutSprea
         opened_at=now,
         created_at=now,
         updated_at=now,
+    )
+
+
+def patch_covered_call_reconciliation_dependencies(
+    monkeypatch,
+    *,
+    broker_accounts: Mock,
+    orders: Mock,
+    experiments: Mock,
+    covered_call_service: Mock,
+) -> None:
+    class FakeCoveredCallStrategyService:
+        strategy_id = "covered_call_v1"
+        open_proposal_actions = {"sell_covered_call", "roll_covered_call"}
+
+        def __new__(cls, **kwargs):
+            return covered_call_service
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyMarketEventRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyStrategyExperimentRepository",
+        lambda session: experiments,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "CoveredCallStrategyService",
+        FakeCoveredCallStrategyService,
     )
 
 
@@ -491,6 +559,205 @@ def test_reconciliation_coordinator_imports_configured_market_event_provider(
     assert request.provider == "fmp"
     assert request.symbols == ["UNH.US"]
     assert (request.end - request.start).days == 14
+
+
+def test_reconciliation_coordinator_runs_covered_call_proposal_scan_when_enabled(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders = Mock()
+    orders.list_orders.return_value = []
+    experiments = Mock()
+    experiments.list_proposals.return_value = []
+    covered_call_service = Mock()
+
+    patch_covered_call_reconciliation_dependencies(
+        monkeypatch,
+        broker_accounts=broker_accounts,
+        orders=orders,
+        experiments=experiments,
+        covered_call_service=covered_call_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            bull_put_strategy={"enabled": False},
+            covered_call_strategy={"auto_propose_enabled": True, "proposal_interval_seconds": 60},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    covered_call_service.create_proposal.assert_called_once()
+    proposal_call = covered_call_service.create_proposal.call_args
+    assert proposal_call.kwargs["external_account_id"] == "LBPT10087357"
+    assert proposal_call.kwargs["mode"] == ExecutionMode.PAPER
+    assert proposal_call.kwargs["as_of"] is not None
+    experiments.list_proposals.assert_any_call(
+        external_account_id="LBPT10087357",
+        strategy_id="covered_call_v1",
+        status=StrategyProposalStatus.PENDING,
+        limit=100,
+    )
+
+
+def test_reconciliation_coordinator_skips_covered_call_scan_with_active_proposal(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders = Mock()
+    orders.list_orders.return_value = []
+    active_proposal = Mock()
+    active_proposal.proposed_action = "sell_covered_call"
+    experiments = Mock()
+    experiments.list_proposals.return_value = [active_proposal]
+    covered_call_service = Mock()
+
+    patch_covered_call_reconciliation_dependencies(
+        monkeypatch,
+        broker_accounts=broker_accounts,
+        orders=orders,
+        experiments=experiments,
+        covered_call_service=covered_call_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            bull_put_strategy={"enabled": False},
+            covered_call_strategy={"auto_propose_enabled": True, "proposal_interval_seconds": 60},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    covered_call_service.create_proposal.assert_not_called()
+
+
+def test_reconciliation_coordinator_monitors_executed_covered_calls_when_enabled(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders = Mock()
+    orders.list_orders.return_value = []
+    proposal = Mock()
+    proposal.id = "proposal-1"
+    proposal.proposed_action = "sell_covered_call"
+    experiments = Mock()
+    experiments.list_proposals.return_value = [proposal]
+    covered_call_service = Mock()
+
+    patch_covered_call_reconciliation_dependencies(
+        monkeypatch,
+        broker_accounts=broker_accounts,
+        orders=orders,
+        experiments=experiments,
+        covered_call_service=covered_call_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            bull_put_strategy={"enabled": False},
+            covered_call_strategy={"auto_monitor_enabled": True, "monitor_interval_seconds": 60},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    covered_call_service.monitor_proposal.assert_called_once()
+    monitor_call = covered_call_service.monitor_proposal.call_args
+    assert monitor_call.args[0] == "proposal-1"
+    assert monitor_call.kwargs["as_of"] is not None
+    assert monitor_call.kwargs["record_signal"] is True
+    experiments.list_proposals.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        strategy_id="covered_call_v1",
+        status=StrategyProposalStatus.EXECUTED,
+        limit=100,
+    )
+
+
+def test_reconciliation_coordinator_reconciles_covered_call_lifecycle_when_enabled(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders = Mock()
+    orders.list_orders.return_value = []
+    experiments = Mock()
+    covered_call_service = Mock()
+
+    patch_covered_call_reconciliation_dependencies(
+        monkeypatch,
+        broker_accounts=broker_accounts,
+        orders=orders,
+        experiments=experiments,
+        covered_call_service=covered_call_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            bull_put_strategy={"enabled": False},
+            covered_call_strategy={"auto_lifecycle_enabled": True, "lifecycle_interval_seconds": 60},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    covered_call_service.reconcile_pending_lifecycle.assert_called_once()
+    lifecycle_call = covered_call_service.reconcile_pending_lifecycle.call_args
+    assert lifecycle_call.kwargs["external_account_id"] == "LBPT10087357"
+    assert lifecycle_call.kwargs["as_of"] is not None
 
 
 def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch) -> None:

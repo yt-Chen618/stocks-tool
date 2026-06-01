@@ -14,6 +14,7 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeIntegrationError,
 )
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
+from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
 from stocks_tool.application.services.market_event_ingestion import MarketEventIngestionService
@@ -24,7 +25,7 @@ from stocks_tool.application.services.market_event_provider_ingestion import (
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
-from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus, SpreadStatus
+from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus, SpreadStatus, StrategyProposalStatus
 from stocks_tool.domain.models import ImportMarketEventsFromProviderRequest
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
@@ -52,6 +53,9 @@ from stocks_tool.repositories.sqlalchemy_order_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
     SQLAlchemyPreOpenAssessmentRunRepository,
+)
+from stocks_tool.repositories.sqlalchemy_strategy_experiment_repository import (
+    SQLAlchemyStrategyExperimentRepository,
 )
 from stocks_tool.repositories.sqlalchemy_trade_plan_repository import (
     SQLAlchemyTradePlanRepository,
@@ -92,6 +96,9 @@ class ReconciliationCoordinator:
         self._automatic_task_backoffs: dict[tuple[str, str], AutomaticTaskBackoffState] = {}
         self._last_market_event_import_at: datetime | None = None
         self._last_market_event_provider_import_at: datetime | None = None
+        self._last_covered_call_proposal_scan_at: dict[str, datetime] = {}
+        self._last_covered_call_monitor_at: dict[str, datetime] = {}
+        self._last_covered_call_lifecycle_at: dict[str, datetime] = {}
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -104,6 +111,7 @@ class ReconciliationCoordinator:
             runtime_states = SQLAlchemyBullPutStrategyRuntimeRepository(session)
             pre_open_runs = SQLAlchemyPreOpenAssessmentRunRepository(session)
             market_events = SQLAlchemyMarketEventRepository(session)
+            experiments = SQLAlchemyStrategyExperimentRepository(session)
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -134,6 +142,15 @@ class ReconciliationCoordinator:
                 longbridge_adapter=self.longbridge_adapter,
                 risk_service=RiskService(settings=self.settings),
                 journal_service=journal_service,
+            )
+            covered_call_service = CoveredCallStrategyService(
+                settings=self.settings,
+                broker_accounts=broker_accounts,
+                account_snapshots=account_snapshots,
+                experiments=experiments,
+                longbridge_adapter=self.longbridge_adapter,
+                order_service=order_service,
+                market_events=market_events,
             )
 
             now = datetime.now(timezone.utc)
@@ -199,6 +216,46 @@ class ReconciliationCoordinator:
                             as_of=now,
                         ),
                     )
+
+                if self.settings.covered_call_strategy.enabled:
+                    if self.settings.covered_call_strategy.auto_lifecycle_enabled:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="covered-call-lifecycle",
+                            task_label="covered call lifecycle reconciliation",
+                            now=now,
+                            callback=lambda: self._reconcile_covered_call_lifecycle(
+                                external_account_id=broker_account.external_account_id,
+                                covered_call_service=covered_call_service,
+                                now=now,
+                            ),
+                        )
+                    if self.settings.covered_call_strategy.auto_propose_enabled:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="covered-call-propose",
+                            task_label="covered call proposal scan",
+                            now=now,
+                            callback=lambda: self._run_covered_call_proposal_scan(
+                                external_account_id=broker_account.external_account_id,
+                                experiments=experiments,
+                                covered_call_service=covered_call_service,
+                                now=now,
+                            ),
+                        )
+                    if self.settings.covered_call_strategy.auto_monitor_enabled:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="covered-call-monitor",
+                            task_label="covered call monitor",
+                            now=now,
+                            callback=lambda: self._monitor_covered_call_proposals(
+                                external_account_id=broker_account.external_account_id,
+                                experiments=experiments,
+                                covered_call_service=covered_call_service,
+                                now=now,
+                            ),
+                        )
 
                 account_due = self._is_due(
                     broker_account.account_last_sync_attempt_at,
@@ -350,6 +407,111 @@ class ReconciliationCoordinator:
                 task_key=task_key,
             )
 
+    def _run_covered_call_proposal_scan(
+        self,
+        *,
+        external_account_id: str,
+        experiments: SQLAlchemyStrategyExperimentRepository,
+        covered_call_service: CoveredCallStrategyService,
+        now: datetime,
+    ) -> None:
+        last_scan_at = self._last_covered_call_proposal_scan_at.get(external_account_id)
+        if not self._is_due(
+            last_scan_at,
+            self.settings.covered_call_strategy.proposal_interval_seconds,
+            now,
+        ):
+            return
+        if self._has_active_covered_call_proposal(
+            external_account_id=external_account_id,
+            experiments=experiments,
+        ):
+            self._last_covered_call_proposal_scan_at[external_account_id] = now
+            return
+
+        covered_call_service.create_proposal(
+            external_account_id=external_account_id,
+            mode=ExecutionMode.PAPER,
+            as_of=now,
+        )
+        self._last_covered_call_proposal_scan_at[external_account_id] = now
+
+    def _monitor_covered_call_proposals(
+        self,
+        *,
+        external_account_id: str,
+        experiments: SQLAlchemyStrategyExperimentRepository,
+        covered_call_service: CoveredCallStrategyService,
+        now: datetime,
+    ) -> None:
+        last_monitor_at = self._last_covered_call_monitor_at.get(external_account_id)
+        if not self._is_due(
+            last_monitor_at,
+            self.settings.covered_call_strategy.monitor_interval_seconds,
+            now,
+        ):
+            return
+
+        proposals = experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=CoveredCallStrategyService.strategy_id,
+            status=StrategyProposalStatus.EXECUTED,
+            limit=100,
+        )
+        for proposal in proposals:
+            if proposal.proposed_action not in CoveredCallStrategyService.open_proposal_actions:
+                continue
+            covered_call_service.monitor_proposal(
+                proposal.id,
+                as_of=now,
+                record_signal=True,
+            )
+        self._last_covered_call_monitor_at[external_account_id] = now
+
+    def _reconcile_covered_call_lifecycle(
+        self,
+        *,
+        external_account_id: str,
+        covered_call_service: CoveredCallStrategyService,
+        now: datetime,
+    ) -> None:
+        last_reconciled_at = self._last_covered_call_lifecycle_at.get(external_account_id)
+        if not self._is_due(
+            last_reconciled_at,
+            self.settings.covered_call_strategy.lifecycle_interval_seconds,
+            now,
+        ):
+            return
+        covered_call_service.reconcile_pending_lifecycle(
+            external_account_id=external_account_id,
+            as_of=now,
+        )
+        self._last_covered_call_lifecycle_at[external_account_id] = now
+
+    @staticmethod
+    def _has_active_covered_call_proposal(
+        *,
+        external_account_id: str,
+        experiments: SQLAlchemyStrategyExperimentRepository,
+    ) -> bool:
+        for status in (
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
+        ):
+            proposals = experiments.list_proposals(
+                external_account_id=external_account_id,
+                strategy_id=CoveredCallStrategyService.strategy_id,
+                status=status,
+                limit=100,
+            )
+            if any(
+                proposal.proposed_action in {"sell_covered_call", "roll_covered_call"}
+                for proposal in proposals
+            ):
+                return True
+        return False
+
     def _import_market_events_if_due(
         self,
         *,
@@ -469,6 +631,9 @@ class ReconciliationCoordinator:
             self.settings.reconciliation_orders_interval_seconds,
             self.settings.reconciliation_working_orders_interval_seconds,
             self.settings.bull_put_strategy.monitor_interval_seconds,
+            self.settings.covered_call_strategy.proposal_interval_seconds,
+            self.settings.covered_call_strategy.monitor_interval_seconds,
+            self.settings.covered_call_strategy.lifecycle_interval_seconds,
         )
         return min(max_seconds, base_seconds * (2 ** max(0, consecutive_failures - 1)))
 

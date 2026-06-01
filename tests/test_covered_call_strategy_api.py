@@ -438,7 +438,11 @@ def test_covered_call_roll_continue_route_refreshes_pending_buyback() -> None:
     try:
         response = client.post(
             "/strategies/covered-call/proposals/proposal-2/roll-continue",
-            json={"buyback_order_id": "buyback-order-1", "sell_limit_price": "1.10"},
+            json={
+                "buyback_order_id": "buyback-order-1",
+                "sell_order_id": "roll-open-order-1",
+                "sell_limit_price": "1.10",
+            },
         )
     finally:
         clear_overrides()
@@ -450,6 +454,7 @@ def test_covered_call_roll_continue_route_refreshes_pending_buyback() -> None:
     request = service.continue_roll_proposal.call_args.args[1]
     assert service.continue_roll_proposal.call_args.args[0] == "proposal-2"
     assert request.buyback_order_id == "buyback-order-1"
+    assert request.sell_order_id == "roll-open-order-1"
     assert request.sell_limit_price == Decimal("1.10")
 
 

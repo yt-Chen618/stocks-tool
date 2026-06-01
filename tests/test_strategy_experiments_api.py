@@ -226,6 +226,19 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
     experiments.list_proposals.return_value = [
         build_covered_call_proposal(status=StrategyProposalStatus.EXECUTED),
         build_covered_call_proposal(
+            proposal_id="proposal-roll-executed",
+            action="roll_covered_call",
+            status=StrategyProposalStatus.EXECUTED,
+        ),
+        build_covered_call_proposal(
+            proposal_id="proposal-closed",
+            status=StrategyProposalStatus.CLOSED,
+        ),
+        build_covered_call_proposal(
+            proposal_id="proposal-rolled",
+            status=StrategyProposalStatus.ROLLED,
+        ),
+        build_covered_call_proposal(
             proposal_id="proposal-roll-1",
             action="roll_covered_call",
             status=StrategyProposalStatus.APPROVED,
@@ -244,9 +257,9 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
         limit=8,
     )
 
-    assert activity.summary.total_proposals == 2
+    assert activity.summary.total_proposals == 5
     assert activity.summary.active_proposals == 1
-    assert activity.summary.executed_positions == 1
+    assert activity.summary.executed_positions == 2
     assert activity.summary.pending_rolls == 1
     assert activity.summary.close_runs == 1
     assert activity.summary.latest_activity_at == NOW

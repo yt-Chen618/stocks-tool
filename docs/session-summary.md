@@ -162,13 +162,16 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
   - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
   - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
-  - `monitor` reloads the underlying and short-call quote, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
+  - `monitor` reloads the underlying and short-call quote for executed sell or roll proposals, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
   - `roll-propose` creates a manual-approval strategy proposal that combines the current buyback estimate with a later OTM covered-call candidate
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
   - `roll-continue` refreshes a pending buyback order and submits the sell-to-open leg once that buyback is filled
-  - `close` submits a paper buy-to-close limit order for an executed proposal
+  - `close` submits a paper buy-to-close limit order for an executed sell or roll proposal and marks the proposal `closed` only when the close order is filled
+  - completed roll executions mark the source proposal `rolled` only after the new short call fill is confirmed, while the newly opened roll proposal remains `executed` and monitorable
+  - `roll-continue` can refresh an existing roll sell order id so a pending roll-open order is not duplicated while waiting for fill
+  - optional lifecycle reconciliation can refresh pending close orders, pending roll buyback orders, and pending roll sell orders in the background; when a roll buyback fills and no roll sell order exists yet, it can submit the approved roll sell-to-open leg and store the new order id in a lifecycle run
   - `activity` aggregates covered-call proposal/run/signal/review history into a dedicated dashboard snapshot with active proposal, open covered-call, pending roll, close-run, and latest-activity counts
-  - no automatic covered-call scheduler exists yet
+  - optional scheduler flags can scan for covered-call proposals, reconcile pending lifecycle orders, and monitor executed covered-call sell or roll proposals in the background, but they default to disabled and do not approve new proposals automatically
 
 ### Market event calendar
 
@@ -205,6 +208,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - The same background loop now also captures one pre-open downside assessment during the ET pre-open window and reviews opening follow-through after the regular session opens.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
+- The same background loop can now run opt-in covered-call proposal scans, lifecycle reconciliation, and executed covered-call monitoring when `COVERED_CALL_STRATEGY__AUTO_PROPOSE_ENABLED=true`, `COVERED_CALL_STRATEGY__AUTO_LIFECYCLE_ENABLED=true`, or `COVERED_CALL_STRATEGY__AUTO_MONITOR_ENABLED=true`.
 - The same background loop can now periodically import a configured local market-event CSV when `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`, or FMP provider events when `MARKET_EVENT_PROVIDER_AUTO_IMPORT_ENABLED=true`.
 - Automatic Longbridge scheduler tasks now apply an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not retry every `15s` while the broker is unstable.
 - The default Longbridge SDK request timeout is now `20s`, which gives background account/order/strategy loads more room to finish before timeout and backoff logic starts.
@@ -226,6 +230,9 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - order sync: `300s`
   - working-order sync: `60s`
   - bull put spread monitor: `300s`
+  - covered-call proposal scan: `3600s` when enabled
+  - covered-call lifecycle reconciliation: `300s` when enabled
+  - covered-call executed-proposal monitor: `900s` when enabled
   - market event CSV import: `3600s` when enabled
   - Longbridge SDK request timeout: `20s`
 - Broker-account records now persist:
@@ -552,6 +559,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Exercise the new FMP event import against a configured key and verify upcoming earnings / macro events populate the dashboard before strategy previews.
-2. Add a covered-call scheduler after paper roll behavior is exercised during market hours.
+1. Exercise the opt-in covered-call scheduler with a paper account holding at least 100 covered shares, then verify it creates one candidate and monitors the resulting open proposal without duplicates.
+2. Add dashboard visibility for pending covered-call lifecycle tasks, including close order id, roll buyback order id, roll sell order id, and last refresh status.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

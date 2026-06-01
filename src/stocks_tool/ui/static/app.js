@@ -1473,6 +1473,10 @@ function buildStrategyProposalActionPayload(action) {
     if (buybackOrderId === null || !buybackOrderId.trim()) {
       return { canceled: true, body: {} };
     }
+    const sellOrderId = window.prompt("Optional existing roll sell order id to refresh. Leave blank to submit a new sell order if buyback is filled:");
+    if (sellOrderId === null) {
+      return { canceled: true, body: {} };
+    }
     const sell = promptOptionalPositiveNumber(
       "Optional sell limit price for the new short call. Leave blank to use the candidate bid:",
       "Covered call roll continuation sell limit price"
@@ -1481,6 +1485,9 @@ function buildStrategyProposalActionPayload(action) {
       return { canceled: true, body: {} };
     }
     const body = { buyback_order_id: buybackOrderId.trim() };
+    if (sellOrderId.trim()) {
+      body.sell_order_id = sellOrderId.trim();
+    }
     addOptionalNumberField(body, "sell_limit_price", sell.value);
     return { canceled: false, body };
   }
@@ -2137,7 +2144,7 @@ function renderCoveredCallActivity() {
   const latestSignal = signals[0] || null;
   const summaryItems = [
     ["Active", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s) tracked`],
-    ["Open CC", formatActivityCount(summary.executed_positions), "Executed covered-call proposals"],
+    ["Open CC", formatActivityCount(summary.executed_positions), "Open covered-call proposals"],
     ["Rolls", formatActivityCount(summary.pending_rolls), "Pending or approved roll proposals"],
     ["Closes", formatActivityCount(summary.close_runs), `Latest ${formatDateTime(summary.latest_activity_at)}`],
   ];
@@ -2413,17 +2420,22 @@ function renderStrategyProposalActions(proposal) {
     actions.push(["approve", "Approve", "primary"]);
     actions.push(["reject", "Reject", "danger"]);
   }
-  if (proposal.strategy_id === "covered_call_v1" && proposal.proposed_action === "sell_covered_call") {
+  const isCoveredCall = proposal.strategy_id === "covered_call_v1";
+  const isOpenCoveredCallAction =
+    proposal.proposed_action === "sell_covered_call" || proposal.proposed_action === "roll_covered_call";
+  if (isCoveredCall && proposal.proposed_action === "sell_covered_call") {
     if (proposal.status === "approved") {
       actions.push(["execute_covered_call", "Execute", "primary"]);
     }
+  }
+  if (isCoveredCall && isOpenCoveredCallAction) {
     if (proposal.status === "executed") {
       actions.push(["monitor_covered_call", "Monitor", ""]);
       actions.push(["roll_propose", "Roll", "primary"]);
       actions.push(["close_covered_call", "Close", "danger"]);
     }
   }
-  if (proposal.strategy_id === "covered_call_v1" && proposal.proposed_action === "roll_covered_call" && proposal.status === "approved") {
+  if (isCoveredCall && proposal.proposed_action === "roll_covered_call" && proposal.status === "approved") {
     actions.push(["roll_execute", "Execute Roll", "primary"]);
     actions.push(["roll_continue", "Continue Roll", ""]);
   }
@@ -4507,7 +4519,15 @@ function statusClass(status) {
 }
 
 function strategyStatusClass(status) {
-  if (status === "approved" || status === "executed" || status === "reviewed" || status === "suggested" || status === "low") {
+  if (
+    status === "approved" ||
+    status === "executed" ||
+    status === "closed" ||
+    status === "rolled" ||
+    status === "reviewed" ||
+    status === "suggested" ||
+    status === "low"
+  ) {
     return "success";
   }
   if (status === "pending" || status === "planned" || status === "running" || status === "candidate" || status === "risk_check" || status === "medium") {

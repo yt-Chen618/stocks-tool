@@ -218,7 +218,7 @@ class StrategyExperimentService:
             executed_positions=sum(
                 1
                 for proposal in snapshot.proposals
-                if proposal.proposed_action == "sell_covered_call"
+                if proposal.proposed_action in {"sell_covered_call", "roll_covered_call"}
                 and proposal.status == StrategyProposalStatus.EXECUTED
             ),
             pending_rolls=sum(
