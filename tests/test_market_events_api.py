@@ -101,3 +101,41 @@ def test_create_market_event_route_persists_event() -> None:
     assert body["id"] == "event-2"
     assert body["severity"] == "high"
     assert repository.create_request.symbol == "UNH.US"
+
+
+def test_import_market_events_route_deduplicates_batch() -> None:
+    repository = FakeMarketEventRepository()
+    app.dependency_overrides[get_market_event_repository] = lambda: repository
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/market-events/import",
+            json={
+                "events": [
+                    {
+                        "symbol": "UNH.US",
+                        "event_type": "earnings",
+                        "title": "unh earnings",
+                        "scheduled_at": "2026-06-01T13:30:00Z",
+                        "source": "manual",
+                        "severity": "high",
+                    },
+                    {
+                        "event_type": "fomc",
+                        "title": "FOMC statement",
+                        "scheduled_at": "2026-06-17T18:00:00Z",
+                        "source": "manual",
+                        "severity": "high",
+                    },
+                ]
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested"] == 2
+    assert body["created"] == 1
+    assert body["skipped_duplicates"] == 1
+    assert body["events"][0]["title"] == "FOMC statement"

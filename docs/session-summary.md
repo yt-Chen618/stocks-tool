@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-05-30
+Last updated: 2026-06-01
 
 ## Project
 
@@ -85,6 +85,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/covered-call/proposals/{proposal_id}/close`
 - `GET /market-events`
 - `POST /market-events`
+- `POST /market-events/import`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -174,11 +175,17 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - Routes:
   - `GET /market-events`
   - `POST /market-events`
+  - `POST /market-events/import`
 - Current scope:
   - manually or script-created events for `earnings`, `dividend`, `fomc`, `cpi`, `jobs`, and `other`
   - optional symbol, event time, source, severity, notes, and raw payload
+  - batch import suppresses duplicates with the same symbol, event type, normalized title, and scheduled UTC time
   - covered-call previews now surface event warnings from this calendar
   - CSV import helper: `.venv\Scripts\python.exe scripts\import_market_events.py --csv artifacts/market-events.csv`
+  - optional scheduler import settings:
+    - `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`
+    - `MARKET_EVENT_IMPORT_CSV_PATH=artifacts/market-events.csv`
+    - `MARKET_EVENT_IMPORT_INTERVAL_SECONDS=3600`
 
 ### Automatic reconciliation
 
@@ -188,6 +195,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - The same background loop now also captures one pre-open downside assessment during the ET pre-open window and reviews opening follow-through after the regular session opens.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
+- The same background loop can now periodically import a configured local market-event CSV when `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`.
 - Automatic Longbridge scheduler tasks now apply an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not retry every `15s` while the broker is unstable.
 - The default Longbridge SDK request timeout is now `20s`, which gives background account/order/strategy loads more room to finish before timeout and backoff logic starts.
 - Longbridge circuit breakers are now separated by channel (`account`, `trade`, `market-data`), so a failed account/order reconciliation no longer directly blocks quote-backed dashboard panels like the pre-open risk board.
@@ -208,6 +216,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - order sync: `300s`
   - working-order sync: `60s`
   - bull put spread monitor: `300s`
+  - market event CSV import: `3600s` when enabled
   - Longbridge SDK request timeout: `20s`
 - Broker-account records now persist:
   - `account_sync_status`
@@ -401,6 +410,7 @@ Frontend files:
 - Added covered-call monitoring guidance through `POST /strategies/covered-call/proposals/{proposal_id}/monitor`.
 - Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
 - Added a dashboard market-event calendar panel and mock UI regression coverage for upcoming events.
+- Added market-event batch ingestion through `/market-events/import`, duplicate suppression, and optional background CSV import scheduling.
 - Added covered-call buy-to-close order submission for executed proposals.
 - Added covered-call roll proposal generation for executed proposals; the route records buyback estimate, next-call candidate, run, signal, and pending strategy proposal without submitting either roll leg.
 - Added approved covered-call roll execution; the route submits buy-to-close first and only submits sell-to-open when the buyback order is already filled.
@@ -439,7 +449,7 @@ Frontend files:
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `88 passed`
+- Result: `111 passed`
 - Latest browser-regression run:
 
 ```powershell
@@ -528,6 +538,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add automated market/news/event ingestion workers to populate the local event calendar.
+1. Add provider-specific market/news/event adapters beyond local CSV import.
 2. Add richer covered-call dashboards for proposal payload inspection, limit-price overrides, and roll-chain history.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

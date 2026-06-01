@@ -181,6 +181,10 @@ class CreateMarketEventRequest(BaseModel):
     raw_payload: dict | None = None
 
 
+class ImportMarketEventsRequest(BaseModel):
+    events: list[CreateMarketEventRequest] = Field(default_factory=list)
+
+
 class MarketEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     symbol: str | None = None
@@ -193,6 +197,13 @@ class MarketEvent(BaseModel):
     raw_payload: dict | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class MarketEventImportResult(BaseModel):
+    requested: int
+    created: int
+    skipped_duplicates: int
+    events: list[MarketEvent] = Field(default_factory=list)
 
 
 class RiskCheckResult(BaseModel):

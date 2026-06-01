@@ -2,9 +2,18 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 
-from stocks_tool.api.dependencies import get_market_event_repository
+from stocks_tool.api.dependencies import (
+    get_market_event_ingestion_service,
+    get_market_event_repository,
+)
+from stocks_tool.application.services.market_event_ingestion import MarketEventIngestionService
 from stocks_tool.domain.enums import MarketEventType
-from stocks_tool.domain.models import CreateMarketEventRequest, MarketEvent
+from stocks_tool.domain.models import (
+    CreateMarketEventRequest,
+    ImportMarketEventsRequest,
+    MarketEvent,
+    MarketEventImportResult,
+)
 from stocks_tool.ports.repository import MarketEventRepository
 
 
@@ -35,3 +44,11 @@ def create_market_event(
     repository: MarketEventRepository = Depends(get_market_event_repository),
 ) -> MarketEvent:
     return repository.create_event(request)
+
+
+@router.post("/import", response_model=MarketEventImportResult)
+def import_market_events(
+    request: ImportMarketEventsRequest,
+    service: MarketEventIngestionService = Depends(get_market_event_ingestion_service),
+) -> MarketEventImportResult:
+    return service.import_events(request.events)

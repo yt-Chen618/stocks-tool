@@ -9,6 +9,9 @@ from stocks_tool.application.services.covered_call_strategy import CoveredCallSt
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
+from stocks_tool.application.services.market_event_ingestion import (
+    MarketEventIngestionService,
+)
 from stocks_tool.application.services.execution import ExecutionService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.planner import PlannerService
@@ -107,6 +110,12 @@ def get_market_event_repository(
     session: Session = Depends(get_db_session),
 ) -> MarketEventRepository:
     return SQLAlchemyMarketEventRepository(session)
+
+
+def get_market_event_ingestion_service(
+    repository: MarketEventRepository = Depends(get_market_event_repository),
+) -> MarketEventIngestionService:
+    return MarketEventIngestionService(repository)
 
 
 def get_broker_account_repository(

@@ -179,6 +179,9 @@ class Settings(BaseSettings):
     reconciliation_account_interval_seconds: int = 300
     reconciliation_orders_interval_seconds: int = 300
     reconciliation_working_orders_interval_seconds: int = 60
+    market_event_auto_import_enabled: bool = False
+    market_event_import_csv_path: str = ""
+    market_event_import_interval_seconds: int = Field(default=3600, ge=60)
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
     longbridge_access_token: str = ""

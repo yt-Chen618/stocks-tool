@@ -14,6 +14,8 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    MarketEventSeverity,
+    MarketEventType,
     OrderSide,
     OrderStatus,
     OrderType,
@@ -27,6 +29,7 @@ from stocks_tool.domain.models import (
     BrokerOrderSnapshot,
     BullPutSpread,
     Execution,
+    MarketEvent,
     PositionSnapshot,
 )
 
@@ -368,6 +371,67 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
     assert monitor_call.args[0] == "spread-1"
     assert monitor_call.kwargs["as_of"] is not None
+
+
+def test_reconciliation_coordinator_imports_configured_market_event_csv(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    csv_path = tmp_path / "events.csv"
+    csv_path.write_text(
+        "symbol,event_type,title,scheduled_at,severity,source\n"
+        "UNH.US,earnings,UNH earnings,2026-06-01T13:30:00Z,high,manual\n",
+        encoding="utf-8",
+    )
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = []
+    market_events = Mock()
+    market_events.list_events.return_value = []
+    market_events.create_event.side_effect = lambda request: MarketEvent(
+        id="event-1",
+        symbol=request.symbol,
+        event_type=request.event_type,
+        title=request.title,
+        scheduled_at=request.scheduled_at,
+        source=request.source,
+        severity=request.severity,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyMarketEventRepository",
+        lambda session: market_events,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            market_event_auto_import_enabled=True,
+            market_event_import_csv_path=str(csv_path),
+            bull_put_strategy={"enabled": False},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    market_events.create_event.assert_called_once()
+    request = market_events.create_event.call_args.args[0]
+    assert request.symbol == "UNH.US"
+    assert request.event_type == MarketEventType.EARNINGS
+    assert request.severity == MarketEventSeverity.HIGH
 
 
 def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch) -> None:

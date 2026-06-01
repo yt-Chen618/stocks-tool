@@ -97,6 +97,7 @@ Then open:
 - `GET /account-snapshots/latest?external_account_id=LBPT10087357`
 - `GET /market-events`
 - `POST /market-events`
+- `POST /market-events/import`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/pre-open-risk`
@@ -186,7 +187,7 @@ The bull put spread workflow is currently paper-only:
 - bull put performance visibility: previews include `timing_ms`, and locked execute can reuse the cached candidate while refreshing only the two selected option legs before submission
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
-- market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters
+- market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters; `/market-events/import` ingests CSV-shaped batches with duplicate suppression
 - covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance; `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose` records a manual-approval roll proposal with current buyback estimate and next OTM call candidate; `POST /strategies/covered-call/proposals/{proposal_id}/roll-execute` executes an approved roll proposal by submitting buy-to-close first and only submitting sell-to-open when the buyback is already filled; `POST /strategies/covered-call/proposals/{proposal_id}/roll-continue` refreshes a pending buyback order and submits the sell-to-open leg after it fills; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed proposal
 - dashboard experiment bench: `/` now includes a strategy experiment panel that surfaces pending proposals, recent runs, signal feed, and review feed for the selected paper account
 - dashboard proposal controls: the strategy experiment panel now exposes approve / reject, covered-call execute / monitor / close / roll-propose, and covered-call roll execute / continue actions
@@ -250,14 +251,22 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --execute --json-output artifacts/real-paper-executed.json
 ```
 
-Market events can also be imported from a local CSV:
+Market events can also be imported from a local CSV. The importer posts one batch to `/market-events/import`, so reruns skip events already present with the same symbol, type, title, and scheduled time.
 
 ```powershell
 .venv\Scripts\python.exe scripts\import_market_events.py --csv artifacts/market-events.csv
 ```
 
+To let the background scheduler import the same CSV periodically, set:
+
+```text
+MARKET_EVENT_AUTO_IMPORT_ENABLED=true
+MARKET_EVENT_IMPORT_CSV_PATH=artifacts/market-events.csv
+MARKET_EVENT_IMPORT_INTERVAL_SECONDS=3600
+```
+
 ## Next milestones
 
-1. Add scheduler and ingestion workers for market/news/event data so proposal generation can avoid earnings and macro-event traps.
+1. Add provider-specific market/news/event adapters beyond local CSV import.
 2. Add richer covered-call dashboards for proposal payload inspection, limit-price overrides, and roll-chain history.
 3. Add authentication, audit logging, and strategy-level permission controls before any live execution path expands.

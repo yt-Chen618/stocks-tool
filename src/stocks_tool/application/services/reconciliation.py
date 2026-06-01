@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 from sqlalchemy.orm import sessionmaker
@@ -15,6 +16,7 @@ from stocks_tool.adapters.brokers.longbridge import (
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
+from stocks_tool.application.services.market_event_ingestion import MarketEventIngestionService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
@@ -36,6 +38,9 @@ from stocks_tool.repositories.sqlalchemy_execution_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_journal_repository import (
     SQLAlchemyJournalRepository,
+)
+from stocks_tool.repositories.sqlalchemy_market_event_repository import (
+    SQLAlchemyMarketEventRepository,
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
@@ -80,6 +85,7 @@ class ReconciliationCoordinator:
         self.session_factory = session_factory
         self.longbridge_adapter = longbridge_adapter
         self._automatic_task_backoffs: dict[tuple[str, str], AutomaticTaskBackoffState] = {}
+        self._last_market_event_import_at: datetime | None = None
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -91,6 +97,7 @@ class ReconciliationCoordinator:
             spreads = SQLAlchemyBullPutSpreadRepository(session)
             runtime_states = SQLAlchemyBullPutStrategyRuntimeRepository(session)
             pre_open_runs = SQLAlchemyPreOpenAssessmentRunRepository(session)
+            market_events = SQLAlchemyMarketEventRepository(session)
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -124,6 +131,8 @@ class ReconciliationCoordinator:
             )
 
             now = datetime.now(timezone.utc)
+            self._import_market_events_if_due(market_events=market_events, now=now)
+
             for broker_account in broker_accounts.list_broker_accounts():
                 if not broker_account.is_active or not broker_account.auto_reconcile_enabled:
                     continue
@@ -332,6 +341,38 @@ class ReconciliationCoordinator:
             self._clear_task_backoff(
                 external_account_id=external_account_id,
                 task_key=task_key,
+            )
+
+    def _import_market_events_if_due(
+        self,
+        *,
+        market_events: SQLAlchemyMarketEventRepository,
+        now: datetime,
+    ) -> None:
+        if not self.settings.market_event_auto_import_enabled:
+            return
+        if not self.settings.market_event_import_csv_path:
+            return
+        if not self._is_due(
+            self._last_market_event_import_at,
+            self.settings.market_event_import_interval_seconds,
+            now,
+        ):
+            return
+
+        self._last_market_event_import_at = now
+        try:
+            result = MarketEventIngestionService(market_events).import_csv(
+                Path(self.settings.market_event_import_csv_path)
+            )
+        except Exception:
+            logger.exception("Automatic market event CSV import failed.")
+            return
+        if result.created or result.skipped_duplicates:
+            logger.info(
+                "Automatic market event CSV import completed: %s created, %s duplicate(s) skipped.",
+                result.created,
+                result.skipped_duplicates,
             )
 
     def _is_task_backoff_active(
