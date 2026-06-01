@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -7,6 +8,9 @@ import httpx
 
 from stocks_tool.domain.enums import MarketEventSeverity, MarketEventType
 from stocks_tool.domain.models import CreateMarketEventRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class FmpMarketEventProvider:
@@ -46,10 +50,11 @@ class FmpMarketEventProvider:
                 "/stable/earnings-calendar",
                 {"from": start.isoformat(), "to": end.isoformat()},
             )
-            economic = self._get_json(
+            economic = self._get_optional_json(
                 client,
                 "/stable/economic-calendar",
                 {"from": start.isoformat(), "to": end.isoformat()},
+                endpoint_name="economic calendar",
             )
 
         requests: list[CreateMarketEventRequest] = []
@@ -75,6 +80,27 @@ class FmpMarketEventProvider:
         if not isinstance(data, list):
             raise ValueError(f"FMP endpoint {path} returned a non-list payload.")
         return [row for row in data if isinstance(row, dict)]
+
+    def _get_optional_json(
+        self,
+        client: httpx.Client,
+        path: str,
+        params: dict[str, str],
+        *,
+        endpoint_name: str,
+    ) -> list[dict]:
+        try:
+            return self._get_json(client, path, params)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else "unknown"
+            logger.warning("Skipping optional FMP %s endpoint after HTTP %s.", endpoint_name, status_code)
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(
+                "Skipping optional FMP %s endpoint after provider error: %s.",
+                endpoint_name,
+                exc.__class__.__name__,
+            )
+        return []
 
     def _map_earnings_event(
         self,

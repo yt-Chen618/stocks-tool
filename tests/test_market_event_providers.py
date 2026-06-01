@@ -112,6 +112,35 @@ def test_fmp_market_event_provider_maps_earnings_and_macro_events() -> None:
     assert cpi.raw_payload["endpoint"] == "fmp_economic_calendar"
 
 
+def test_fmp_market_event_provider_keeps_earnings_when_optional_macro_endpoint_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["apikey"] == "test-key"
+        if request.url.path == "/stable/earnings-calendar":
+            return httpx.Response(
+                200,
+                json=[{"symbol": "UNH", "date": "2026-06-03", "time": "bmo"}],
+            )
+        if request.url.path == "/stable/economic-calendar":
+            return httpx.Response(402, json={"message": "payment required"})
+        return httpx.Response(404)
+
+    provider = FmpMarketEventProvider(
+        api_key="test-key",
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    events = provider.fetch_events(
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 15),
+        symbols=["UNH.US"],
+    )
+
+    assert len(events) == 1
+    assert events[0].symbol == "UNH.US"
+    assert events[0].event_type == MarketEventType.EARNINGS
+
+
 def test_market_event_provider_ingestion_uses_existing_duplicate_handling() -> None:
     existing = MarketEvent(
         id="event-1",
