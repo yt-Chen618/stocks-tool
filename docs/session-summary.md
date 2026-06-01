@@ -86,6 +86,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /market-events`
 - `POST /market-events`
 - `POST /market-events/import`
+- `POST /market-events/import/provider`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -180,12 +181,19 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - manually or script-created events for `earnings`, `dividend`, `fomc`, `cpi`, `jobs`, and `other`
   - optional symbol, event time, source, severity, notes, and raw payload
   - batch import suppresses duplicates with the same symbol, event type, normalized title, and scheduled UTC time
+  - provider import currently supports Financial Modeling Prep (`fmp`) earnings calendar plus relevant U.S. macro events from the economic calendar (`FOMC`, `CPI`, jobs/employment)
   - covered-call previews now surface event warnings from this calendar
   - CSV import helper: `.venv\Scripts\python.exe scripts\import_market_events.py --csv artifacts/market-events.csv`
+  - provider import helper: `.venv\Scripts\python.exe scripts\import_market_events.py --provider fmp --start 2026-06-01 --end 2026-06-30 --symbols UNH.US,QQQ.US`
   - optional scheduler import settings:
     - `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`
     - `MARKET_EVENT_IMPORT_CSV_PATH=artifacts/market-events.csv`
     - `MARKET_EVENT_IMPORT_INTERVAL_SECONDS=3600`
+    - `MARKET_EVENT_PROVIDER_AUTO_IMPORT_ENABLED=true`
+    - `MARKET_EVENT_PROVIDER=fmp`
+    - `MARKET_EVENT_PROVIDER_SYMBOLS=UNH.US,QQQ.US`
+    - `MARKET_EVENT_PROVIDER_LOOKAHEAD_DAYS=30`
+    - `FMP_API_KEY=...`
 
 ### Automatic reconciliation
 
@@ -195,7 +203,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - The same background loop now also captures one pre-open downside assessment during the ET pre-open window and reviews opening follow-through after the regular session opens.
 - The same background loop now also runs one bull put entry scan per account when the ET entry window is open.
 - The same background loop now also triggers periodic bull put review checks per account.
-- The same background loop can now periodically import a configured local market-event CSV when `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`.
+- The same background loop can now periodically import a configured local market-event CSV when `MARKET_EVENT_AUTO_IMPORT_ENABLED=true`, or FMP provider events when `MARKET_EVENT_PROVIDER_AUTO_IMPORT_ENABLED=true`.
 - Automatic Longbridge scheduler tasks now apply an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not retry every `15s` while the broker is unstable.
 - The default Longbridge SDK request timeout is now `20s`, which gives background account/order/strategy loads more room to finish before timeout and backoff logic starts.
 - Longbridge circuit breakers are now separated by channel (`account`, `trade`, `market-data`), so a failed account/order reconciliation no longer directly blocks quote-backed dashboard panels like the pre-open risk board.
@@ -411,6 +419,7 @@ Frontend files:
 - Added local market-event persistence through `market_events` plus `/market-events` list/create routes, and wired covered-call previews to warn on upcoming medium/high severity events.
 - Added a dashboard market-event calendar panel and mock UI regression coverage for upcoming events.
 - Added market-event batch ingestion through `/market-events/import`, duplicate suppression, and optional background CSV import scheduling.
+- Added provider-backed market-event ingestion through `/market-events/import/provider`, a first FMP adapter for earnings plus U.S. macro events, script support for `--provider fmp`, and optional scheduler-backed provider imports.
 - Added covered-call buy-to-close order submission for executed proposals.
 - Added covered-call roll proposal generation for executed proposals; the route records buyback estimate, next-call candidate, run, signal, and pending strategy proposal without submitting either roll leg.
 - Added approved covered-call roll execution; the route submits buy-to-close first and only submits sell-to-open when the buyback order is already filled.
@@ -444,13 +453,13 @@ Frontend files:
 - Added `tests/test_strategy_experiments_api.py` for the unified strategy experiment routes.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the covered-call proposal dashboard update:
+- Latest local verification run after the FMP market-event provider adapter update:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `115 passed`
+- Result: `120 passed`
 - Latest browser-regression run:
 
 ```powershell
@@ -539,6 +548,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Add provider-specific market/news/event adapters beyond local CSV import.
+1. Exercise the new FMP event import against a configured key and verify upcoming earnings / macro events populate the dashboard before strategy previews.
 2. Add a dedicated covered-call activity/history view or scheduler once paper roll behavior is exercised during market hours.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.

@@ -30,6 +30,7 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     Execution,
     MarketEvent,
+    MarketEventImportResult,
     PositionSnapshot,
 )
 
@@ -432,6 +433,64 @@ def test_reconciliation_coordinator_imports_configured_market_event_csv(
     assert request.symbol == "UNH.US"
     assert request.event_type == MarketEventType.EARNINGS
     assert request.severity == MarketEventSeverity.HIGH
+
+
+def test_reconciliation_coordinator_imports_configured_market_event_provider(
+    monkeypatch,
+) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = []
+    market_events = Mock()
+    provider_requests = []
+
+    class FakeProviderIngestionService:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def import_from_provider(self, request):
+            provider_requests.append(request)
+            return MarketEventImportResult(requested=1, created=1, skipped_duplicates=0, events=[])
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyMarketEventRepository",
+        lambda session: market_events,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "MarketEventProviderIngestionService",
+        FakeProviderIngestionService,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(
+            market_event_provider_auto_import_enabled=True,
+            market_event_provider="fmp",
+            market_event_provider_symbols="UNH.US",
+            market_event_provider_lookahead_days=14,
+            bull_put_strategy={"enabled": False},
+        ),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+    coordinator.run_once()
+
+    assert len(provider_requests) == 1
+    request = provider_requests[0]
+    assert request.provider == "fmp"
+    assert request.symbols == ["UNH.US"]
+    assert (request.end - request.start).days == 14
 
 
 def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch) -> None:

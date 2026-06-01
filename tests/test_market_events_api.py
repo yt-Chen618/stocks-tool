@@ -2,9 +2,17 @@ from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
-from stocks_tool.api.dependencies import get_market_event_repository
+from stocks_tool.api.dependencies import (
+    get_market_event_provider_ingestion_service,
+    get_market_event_repository,
+)
 from stocks_tool.domain.enums import MarketEventSeverity, MarketEventType
-from stocks_tool.domain.models import CreateMarketEventRequest, MarketEvent
+from stocks_tool.domain.models import (
+    CreateMarketEventRequest,
+    ImportMarketEventsFromProviderRequest,
+    MarketEvent,
+    MarketEventImportResult,
+)
 from stocks_tool.main import app
 
 
@@ -139,3 +147,76 @@ def test_import_market_events_route_deduplicates_batch() -> None:
     assert body["created"] == 1
     assert body["skipped_duplicates"] == 1
     assert body["events"][0]["title"] == "FOMC statement"
+
+
+def test_import_market_events_from_provider_route() -> None:
+    class FakeProviderIngestionService:
+        def __init__(self) -> None:
+            self.request = None
+
+        def import_from_provider(
+            self,
+            request: ImportMarketEventsFromProviderRequest,
+        ) -> MarketEventImportResult:
+            self.request = request
+            return MarketEventImportResult(
+                requested=1,
+                created=1,
+                skipped_duplicates=0,
+                events=[
+                    MarketEvent(
+                        id="event-3",
+                        symbol="UNH.US",
+                        event_type=MarketEventType.EARNINGS,
+                        title="UNH earnings",
+                        scheduled_at=NOW,
+                        source="fmp",
+                        severity=MarketEventSeverity.HIGH,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                ],
+            )
+
+    service = FakeProviderIngestionService()
+    app.dependency_overrides[get_market_event_provider_ingestion_service] = lambda: service
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/market-events/import/provider",
+            json={
+                "provider": "fmp",
+                "start": "2026-06-01",
+                "end": "2026-06-30",
+                "symbols": ["UNH.US"],
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requested"] == 1
+    assert body["created"] == 1
+    assert body["events"][0]["source"] == "fmp"
+    assert service.request.provider == "fmp"
+    assert service.request.symbols == ["UNH.US"]
+
+
+def test_import_market_events_from_provider_route_returns_bad_request_for_provider_error() -> None:
+    class FailingProviderIngestionService:
+        def import_from_provider(self, request: ImportMarketEventsFromProviderRequest) -> MarketEventImportResult:
+            raise ValueError("FMP market event import requires FMP_API_KEY.")
+
+    app.dependency_overrides[get_market_event_provider_ingestion_service] = lambda: FailingProviderIngestionService()
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/market-events/import/provider",
+            json={"provider": "fmp", "start": "2026-06-01", "end": "2026-06-30"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "FMP market event import requires FMP_API_KEY."

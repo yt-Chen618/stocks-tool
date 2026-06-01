@@ -182,6 +182,13 @@ class Settings(BaseSettings):
     market_event_auto_import_enabled: bool = False
     market_event_import_csv_path: str = ""
     market_event_import_interval_seconds: int = Field(default=3600, ge=60)
+    market_event_provider_auto_import_enabled: bool = False
+    market_event_provider: str = "fmp"
+    market_event_provider_symbols: str = ""
+    market_event_provider_lookahead_days: int = Field(default=30, ge=1)
+    market_event_provider_timeout_seconds: int = Field(default=20, ge=1)
+    fmp_api_key: str = ""
+    fmp_base_url: str = "https://financialmodelingprep.com"
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
     longbridge_access_token: str = ""

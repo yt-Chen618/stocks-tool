@@ -185,6 +185,13 @@ class ImportMarketEventsRequest(BaseModel):
     events: list[CreateMarketEventRequest] = Field(default_factory=list)
 
 
+class ImportMarketEventsFromProviderRequest(BaseModel):
+    provider: str = Field(default="fmp", min_length=1, max_length=32)
+    start: date
+    end: date
+    symbols: list[str] = Field(default_factory=list)
+
+
 class MarketEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     symbol: str | None = None

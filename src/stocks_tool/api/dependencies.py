@@ -12,6 +12,10 @@ from stocks_tool.application.services.longbridge_integration import (
 from stocks_tool.application.services.market_event_ingestion import (
     MarketEventIngestionService,
 )
+from stocks_tool.application.services.market_event_provider_ingestion import (
+    MarketEventProviderIngestionService,
+    SettingsMarketEventProviderFactory,
+)
 from stocks_tool.application.services.execution import ExecutionService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.planner import PlannerService
@@ -116,6 +120,16 @@ def get_market_event_ingestion_service(
     repository: MarketEventRepository = Depends(get_market_event_repository),
 ) -> MarketEventIngestionService:
     return MarketEventIngestionService(repository)
+
+
+def get_market_event_provider_ingestion_service(
+    ingestion_service: MarketEventIngestionService = Depends(get_market_event_ingestion_service),
+    settings: Settings = Depends(get_settings),
+) -> MarketEventProviderIngestionService:
+    return MarketEventProviderIngestionService(
+        ingestion_service=ingestion_service,
+        provider_factory=SettingsMarketEventProviderFactory(settings),
+    )
 
 
 def get_broker_account_repository(

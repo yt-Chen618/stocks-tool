@@ -1,0 +1,1 @@
+"""Market event provider adapters."""

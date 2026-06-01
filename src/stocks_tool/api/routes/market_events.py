@@ -1,15 +1,20 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from stocks_tool.api.dependencies import (
     get_market_event_ingestion_service,
+    get_market_event_provider_ingestion_service,
     get_market_event_repository,
 )
 from stocks_tool.application.services.market_event_ingestion import MarketEventIngestionService
+from stocks_tool.application.services.market_event_provider_ingestion import (
+    MarketEventProviderIngestionService,
+)
 from stocks_tool.domain.enums import MarketEventType
 from stocks_tool.domain.models import (
     CreateMarketEventRequest,
+    ImportMarketEventsFromProviderRequest,
     ImportMarketEventsRequest,
     MarketEvent,
     MarketEventImportResult,
@@ -52,3 +57,14 @@ def import_market_events(
     service: MarketEventIngestionService = Depends(get_market_event_ingestion_service),
 ) -> MarketEventImportResult:
     return service.import_events(request.events)
+
+
+@router.post("/import/provider", response_model=MarketEventImportResult)
+def import_market_events_from_provider(
+    request: ImportMarketEventsFromProviderRequest,
+    service: MarketEventProviderIngestionService = Depends(get_market_event_provider_ingestion_service),
+) -> MarketEventImportResult:
+    try:
+        return service.import_from_provider(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -17,10 +17,15 @@ from stocks_tool.application.services.bull_put_strategy import BullPutStrategySe
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
 from stocks_tool.application.services.market_event_ingestion import MarketEventIngestionService
+from stocks_tool.application.services.market_event_provider_ingestion import (
+    MarketEventProviderIngestionService,
+    SettingsMarketEventProviderFactory,
+)
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus, SpreadStatus
+from stocks_tool.domain.models import ImportMarketEventsFromProviderRequest
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
 )
@@ -86,6 +91,7 @@ class ReconciliationCoordinator:
         self.longbridge_adapter = longbridge_adapter
         self._automatic_task_backoffs: dict[tuple[str, str], AutomaticTaskBackoffState] = {}
         self._last_market_event_import_at: datetime | None = None
+        self._last_market_event_provider_import_at: datetime | None = None
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -132,6 +138,7 @@ class ReconciliationCoordinator:
 
             now = datetime.now(timezone.utc)
             self._import_market_events_if_due(market_events=market_events, now=now)
+            self._import_market_events_from_provider_if_due(market_events=market_events, now=now)
 
             for broker_account in broker_accounts.list_broker_accounts():
                 if not broker_account.is_active or not broker_account.auto_reconcile_enabled:
@@ -375,6 +382,47 @@ class ReconciliationCoordinator:
                 result.skipped_duplicates,
             )
 
+    def _import_market_events_from_provider_if_due(
+        self,
+        *,
+        market_events: SQLAlchemyMarketEventRepository,
+        now: datetime,
+    ) -> None:
+        if not self.settings.market_event_provider_auto_import_enabled:
+            return
+        if not self._is_due(
+            self._last_market_event_provider_import_at,
+            self.settings.market_event_import_interval_seconds,
+            now,
+        ):
+            return
+
+        self._last_market_event_provider_import_at = now
+        start = now.date()
+        end = (now + timedelta(days=self.settings.market_event_provider_lookahead_days)).date()
+        try:
+            result = MarketEventProviderIngestionService(
+                ingestion_service=MarketEventIngestionService(market_events),
+                provider_factory=SettingsMarketEventProviderFactory(self.settings),
+            ).import_from_provider(
+                ImportMarketEventsFromProviderRequest(
+                    provider=self.settings.market_event_provider,
+                    start=start,
+                    end=end,
+                    symbols=parse_config_symbols(self.settings.market_event_provider_symbols),
+                )
+            )
+        except Exception:
+            logger.exception("Automatic market event provider import failed.")
+            return
+        if result.created or result.skipped_duplicates:
+            logger.info(
+                "Automatic market event provider import completed from %s: %s created, %s duplicate(s) skipped.",
+                self.settings.market_event_provider,
+                result.created,
+                result.skipped_duplicates,
+            )
+
     def _is_task_backoff_active(
         self,
         *,
@@ -453,6 +501,10 @@ class ReconciliationCoordinator:
         if last_attempt_at is None:
             return True
         return (now - last_attempt_at).total_seconds() >= interval_seconds
+
+
+def parse_config_symbols(value: str) -> list[str]:
+    return [symbol.strip().upper() for symbol in value.split(",") if symbol.strip()]
 
 
 class ReconciliationScheduler:
