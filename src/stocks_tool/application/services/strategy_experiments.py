@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from decimal import Decimal, InvalidOperation
 
-from stocks_tool.domain.enums import StrategyProposalStatus, StrategySignalType
+from stocks_tool.domain.enums import ExecutionMode, StrategyProposalStatus, StrategySignalType
 from stocks_tool.domain.models import (
     CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
@@ -12,26 +12,34 @@ from stocks_tool.domain.models import (
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
+    StrategyAdvisorContext,
+    StrategyAutomationControl,
+    StrategyControlSnapshot,
     StrategyExperimentSnapshot,
+    StrategyPermissionBoundary,
     StrategyProposal,
     StrategyReview,
     StrategyRun,
     StrategySignal,
 )
+from stocks_tool.core.config import Settings
 from stocks_tool.ports.repository import BrokerAccountRepository, StrategyExperimentRepository
 
 
 class StrategyExperimentService:
     WORKING_ORDER_STALE_AFTER_SECONDS = 15 * 60
+    advisor_sources = {"deepseek", "llm", "llm_advisor", "openai", "external_advisor"}
 
     def __init__(
         self,
         *,
         experiments: StrategyExperimentRepository,
         broker_accounts: BrokerAccountRepository,
+        settings: Settings | None = None,
     ) -> None:
         self.experiments = experiments
         self.broker_accounts = broker_accounts
+        self.settings = settings
 
     def get_snapshot(
         self,
@@ -90,7 +98,11 @@ class StrategyExperimentService:
 
     def create_proposal(self, request: CreateStrategyProposalRequest) -> StrategyProposal:
         self._ensure_account(request.external_account_id)
-        return self.experiments.create_proposal(request)
+        self._assert_advisor_proposal_policy(request)
+        proposal = self.experiments.create_proposal(request)
+        if self._is_advisor_source(proposal.source):
+            self._record_advisor_proposal_audit(proposal)
+        return proposal
 
     def get_proposal(self, proposal_id: str) -> StrategyProposal:
         proposal = self.experiments.get_proposal(proposal_id)
@@ -98,7 +110,13 @@ class StrategyExperimentService:
             raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
         return proposal
 
-    def approve_proposal(self, proposal_id: str) -> StrategyProposal:
+    def approve_proposal(
+        self,
+        proposal_id: str,
+        *,
+        actor: str = "local_operator",
+        note: str | None = None,
+    ) -> StrategyProposal:
         proposal = self.get_proposal(proposal_id)
         if proposal.status != StrategyProposalStatus.PENDING:
             raise ValueError(f"Strategy proposal '{proposal_id}' is not pending approval.")
@@ -109,22 +127,127 @@ class StrategyExperimentService:
                 status=StrategyProposalStatus.EXPIRED,
             )
             raise ValueError(f"Strategy proposal '{proposal_id}' has expired.")
-        return self.experiments.update_proposal_status(
+        approved = self.experiments.update_proposal_status(
             proposal_id,
             status=StrategyProposalStatus.APPROVED,
             approved_at=now,
         )
+        self._record_policy_audit(
+            proposal=approved,
+            action="approve",
+            actor=actor,
+            note=note,
+            previous_status=proposal.status,
+            new_status=approved.status,
+        )
+        return approved
 
-    def reject_proposal(self, proposal_id: str) -> StrategyProposal:
+    def reject_proposal(
+        self,
+        proposal_id: str,
+        *,
+        actor: str = "local_operator",
+        note: str | None = None,
+    ) -> StrategyProposal:
         proposal = self.get_proposal(proposal_id)
         if proposal.status not in {StrategyProposalStatus.PENDING, StrategyProposalStatus.APPROVED}:
             raise ValueError(
                 f"Strategy proposal '{proposal_id}' cannot be rejected from status '{proposal.status.value}'."
             )
-        return self.experiments.update_proposal_status(
+        rejected = self.experiments.update_proposal_status(
             proposal_id,
             status=StrategyProposalStatus.REJECTED,
             rejected_at=datetime.now(timezone.utc),
+        )
+        self._record_policy_audit(
+            proposal=rejected,
+            action="reject",
+            actor=actor,
+            note=note,
+            previous_status=proposal.status,
+            new_status=rejected.status,
+        )
+        return rejected
+
+    def get_control_snapshot(self, *, external_account_id: str | None = None) -> StrategyControlSnapshot:
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        if self.settings is None:
+            raise RuntimeError("Strategy controls require settings to be available.")
+        covered_call = self.settings.covered_call_strategy
+        return StrategyControlSnapshot(
+            external_account_id=external_account_id,
+            execution_mode=self.settings.execution_mode,
+            live_trading_enabled=self.settings.allow_live_trading,
+            scheduler_enabled=self.settings.reconciliation_scheduler_enabled,
+            live_execution_allowed=self.settings.allow_live_trading,
+            automation_controls=[
+                StrategyAutomationControl(
+                    strategy_id="covered_call_v1",
+                    enabled=covered_call.enabled,
+                    auto_propose_enabled=covered_call.auto_propose_enabled,
+                    auto_monitor_enabled=covered_call.auto_monitor_enabled,
+                    auto_lifecycle_enabled=covered_call.auto_lifecycle_enabled,
+                    proposal_interval_seconds=covered_call.proposal_interval_seconds,
+                    monitor_interval_seconds=covered_call.monitor_interval_seconds,
+                    lifecycle_interval_seconds=covered_call.lifecycle_interval_seconds,
+                )
+            ],
+            permission_boundaries=[
+                StrategyPermissionBoundary(
+                    name="manual_approval_before_execution",
+                    allowed=True,
+                    detail="Opening and roll executions require an approved proposal before order submission.",
+                ),
+                StrategyPermissionBoundary(
+                    name="llm_read_only_advisor",
+                    allowed=False,
+                    detail="LLM or advisor-sourced proposals may be recorded, but cannot execute unless local checks and manual approval are present.",
+                ),
+                StrategyPermissionBoundary(
+                    name="paper_first_execution",
+                    allowed=True,
+                    detail="Paper execution is allowed; live execution remains blocked unless ALLOW_LIVE_TRADING=true.",
+                ),
+            ],
+        )
+
+    def get_advisor_context(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 10,
+    ) -> StrategyAdvisorContext:
+        controls = self.get_control_snapshot(external_account_id=external_account_id)
+        return StrategyAdvisorContext(
+            external_account_id=external_account_id,
+            controls=controls,
+            experiment=self.get_snapshot(
+                external_account_id=external_account_id,
+                limit=limit,
+            ),
+            covered_call_activity=self.get_covered_call_activity(
+                external_account_id=external_account_id,
+                limit=limit,
+            ),
+            advisor_sources=sorted(self.advisor_sources),
+            hard_rules=[
+                StrategyPermissionBoundary(
+                    name="advisor_context_is_read_only",
+                    allowed=False,
+                    detail="Advisor context may be used to write proposals, signals, or reviews, but never to submit broker orders.",
+                ),
+                StrategyPermissionBoundary(
+                    name="advisor_proposals_require_manual_approval",
+                    allowed=True,
+                    detail="Advisor-sourced proposals must keep approval_required=true before any local execution flow can inspect them.",
+                ),
+                StrategyPermissionBoundary(
+                    name="advisor_live_mode_blocked",
+                    allowed=False,
+                    detail="Advisor-sourced proposals cannot be created in live mode.",
+                ),
+            ],
         )
 
     def list_proposals(
@@ -204,6 +327,80 @@ class StrategyExperimentService:
     def _ensure_account(self, external_account_id: str) -> None:
         if self.broker_accounts.get_by_external_account_id(external_account_id) is None:
             raise LookupError(f"Broker account '{external_account_id}' was not found.")
+
+    def _assert_advisor_proposal_policy(self, request: CreateStrategyProposalRequest) -> None:
+        if not self._is_advisor_source(request.source):
+            return
+        if not request.approval_required:
+            raise ValueError("Advisor-sourced proposals must require manual approval.")
+        if request.mode == ExecutionMode.LIVE:
+            raise ValueError("Advisor-sourced proposals cannot be created in live mode.")
+
+    def _record_advisor_proposal_audit(self, proposal: StrategyProposal) -> StrategySignal:
+        return self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=proposal.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.REVIEW,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                summary="Advisor-sourced strategy proposal recorded as read-only advice.",
+                detail="Local deterministic checks and manual approval are still required before execution.",
+                source="strategy_policy",
+                signal_payload={
+                    "audit_event": "advisor_proposal_recorded",
+                    "advisor_source": self._normalized_source(proposal.source),
+                    "llm_direct_execution_allowed": False,
+                    "approval_required": proposal.approval_required,
+                    "proposed_action": proposal.proposed_action,
+                    "checks": proposal.checks,
+                },
+            )
+        )
+
+    @classmethod
+    def _is_advisor_source(cls, source: str | None) -> bool:
+        return cls._normalized_source(source) in cls.advisor_sources
+
+    @staticmethod
+    def _normalized_source(source: str | None) -> str | None:
+        if source is None:
+            return None
+        return source.strip().lower()
+
+    def _record_policy_audit(
+        self,
+        *,
+        proposal: StrategyProposal,
+        action: str,
+        actor: str,
+        note: str | None,
+        previous_status: StrategyProposalStatus,
+        new_status: StrategyProposalStatus,
+    ) -> StrategySignal:
+        return self.experiments.create_signal(
+            CreateStrategySignalRequest(
+                strategy_id=proposal.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                signal_type=StrategySignalType.REVIEW,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                summary=f"Strategy proposal {action} recorded.",
+                detail=note,
+                source="strategy_policy",
+                signal_payload={
+                    "audit_event": "proposal_decision",
+                    "action": action,
+                    "actor": actor,
+                    "previous_status": previous_status.value,
+                    "new_status": new_status.value,
+                    "approval_required": proposal.approval_required,
+                    "proposed_action": proposal.proposed_action,
+                },
+            )
+        )
 
     @staticmethod
     def _covered_call_activity_summary(

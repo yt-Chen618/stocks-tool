@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
@@ -46,7 +46,10 @@ from stocks_tool.domain.models import (
     ExecuteBullPutSpreadRequest,
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
+    StrategyAdvisorContext,
+    StrategyControlSnapshot,
     StrategyExperimentSnapshot,
+    StrategyProposalDecisionRequest,
     StrategyProposal,
     StrategyReview,
     StrategyRun,
@@ -299,6 +302,32 @@ def get_strategy_experiment_snapshot(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/controls", response_model=StrategyControlSnapshot)
+def get_strategy_controls(
+    external_account_id: str | None = Query(default=None),
+    service: StrategyExperimentService = Depends(get_strategy_experiment_service),
+) -> StrategyControlSnapshot:
+    try:
+        return service.get_control_snapshot(external_account_id=external_account_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/advisor-context", response_model=StrategyAdvisorContext)
+def get_strategy_advisor_context(
+    external_account_id: str | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50),
+    service: StrategyExperimentService = Depends(get_strategy_experiment_service),
+) -> StrategyAdvisorContext:
+    try:
+        return service.get_advisor_context(
+            external_account_id=external_account_id,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/proposals", response_model=list[StrategyProposal])
 def list_strategy_proposals(
     external_account_id: str | None = Query(default=None),
@@ -334,10 +363,16 @@ def create_strategy_proposal(
 @router.post("/proposals/{proposal_id}/approve", response_model=StrategyProposal)
 def approve_strategy_proposal(
     proposal_id: str,
+    request: StrategyProposalDecisionRequest | None = Body(default=None),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> StrategyProposal:
     try:
-        return service.approve_proposal(proposal_id)
+        decision = request or StrategyProposalDecisionRequest()
+        return service.approve_proposal(
+            proposal_id,
+            actor=decision.actor,
+            note=decision.note,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -347,10 +382,16 @@ def approve_strategy_proposal(
 @router.post("/proposals/{proposal_id}/reject", response_model=StrategyProposal)
 def reject_strategy_proposal(
     proposal_id: str,
+    request: StrategyProposalDecisionRequest | None = Body(default=None),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> StrategyProposal:
     try:
-        return service.reject_proposal(proposal_id)
+        decision = request or StrategyProposalDecisionRequest()
+        return service.reject_proposal(
+            proposal_id,
+            actor=decision.actor,
+            note=decision.note,
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

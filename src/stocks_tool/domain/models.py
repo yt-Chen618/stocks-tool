@@ -537,6 +537,41 @@ class StrategyExperimentSnapshot(BaseModel):
     reviews: list[StrategyReview] = Field(default_factory=list)
 
 
+class StrategyProposalDecisionRequest(BaseModel):
+    actor: str = Field(default="local_operator", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class StrategyAutomationControl(BaseModel):
+    strategy_id: str
+    enabled: bool
+    auto_propose_enabled: bool = False
+    auto_monitor_enabled: bool = False
+    auto_lifecycle_enabled: bool = False
+    proposal_interval_seconds: int | None = None
+    monitor_interval_seconds: int | None = None
+    lifecycle_interval_seconds: int | None = None
+
+
+class StrategyPermissionBoundary(BaseModel):
+    name: str
+    allowed: bool
+    detail: str
+
+
+class StrategyControlSnapshot(BaseModel):
+    external_account_id: str | None = None
+    execution_mode: ExecutionMode
+    live_trading_enabled: bool
+    scheduler_enabled: bool
+    approval_required_for_execution: bool = True
+    llm_direct_execution_allowed: bool = False
+    paper_execution_allowed: bool = True
+    live_execution_allowed: bool = False
+    automation_controls: list[StrategyAutomationControl] = Field(default_factory=list)
+    permission_boundaries: list[StrategyPermissionBoundary] = Field(default_factory=list)
+
+
 class CoveredCallLifecycleTask(BaseModel):
     proposal_id: str
     proposal_title: str
@@ -599,6 +634,15 @@ class CoveredCallActivitySnapshot(BaseModel):
     runs: list[StrategyRun] = Field(default_factory=list)
     signals: list[StrategySignal] = Field(default_factory=list)
     reviews: list[StrategyReview] = Field(default_factory=list)
+
+
+class StrategyAdvisorContext(BaseModel):
+    external_account_id: str | None = None
+    controls: StrategyControlSnapshot
+    experiment: StrategyExperimentSnapshot
+    covered_call_activity: CoveredCallActivitySnapshot
+    advisor_sources: list[str] = Field(default_factory=list)
+    hard_rules: list[StrategyPermissionBoundary] = Field(default_factory=list)
 
 
 class BrokerCapability(BaseModel):

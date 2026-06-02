@@ -2,10 +2,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_strategy_experiment_service
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
+from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     ExecutionMode,
     StrategyProposalStatus,
@@ -14,11 +16,16 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    CreateStrategyProposalRequest,
     CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
     CoveredCallMonitorSnapshot,
+    StrategyAdvisorContext,
     StrategyExperimentSnapshot,
+    StrategyAutomationControl,
+    StrategyControlSnapshot,
+    StrategyPermissionBoundary,
     StrategyProposal,
     StrategyReview,
     StrategyRun,
@@ -474,7 +481,343 @@ def test_approve_strategy_proposal_route_returns_approved_proposal() -> None:
 
     assert response.status_code == 200
     assert response.json()["status"] == "approved"
-    service.approve_proposal.assert_called_once_with("proposal-1")
+    service.approve_proposal.assert_called_once_with(
+        "proposal-1",
+        actor="local_operator",
+        note=None,
+    )
+
+
+def test_approve_strategy_proposal_route_accepts_audit_actor() -> None:
+    service = Mock()
+    service.approve_proposal.return_value = build_proposal(StrategyProposalStatus.APPROVED)
+
+    client = with_experiment_service(service)
+    try:
+        response = client.post(
+            "/strategies/proposals/proposal-1/approve",
+            json={"actor": "operator-a", "note": "paper test approval"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    service.approve_proposal.assert_called_once_with(
+        "proposal-1",
+        actor="operator-a",
+        note="paper test approval",
+    )
+
+
+def test_strategy_controls_route_returns_policy_snapshot() -> None:
+    service = Mock()
+    service.get_control_snapshot.return_value = StrategyControlSnapshot(
+        external_account_id="LBPT10087357",
+        execution_mode=ExecutionMode.PAPER,
+        live_trading_enabled=False,
+        scheduler_enabled=True,
+        automation_controls=[
+            StrategyAutomationControl(
+                strategy_id="covered_call_v1",
+                enabled=True,
+                auto_monitor_enabled=True,
+                auto_lifecycle_enabled=True,
+            )
+        ],
+        permission_boundaries=[
+            StrategyPermissionBoundary(
+                name="manual_approval_before_execution",
+                allowed=True,
+                detail="Opening and roll executions require approval.",
+            )
+        ],
+    )
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/controls",
+            params={"external_account_id": "LBPT10087357"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["automation_controls"][0]["strategy_id"] == "covered_call_v1"
+    assert body["automation_controls"][0]["auto_monitor_enabled"] is True
+    assert body["llm_direct_execution_allowed"] is False
+    service.get_control_snapshot.assert_called_once_with(
+        external_account_id="LBPT10087357",
+    )
+
+
+def test_strategy_advisor_context_route_returns_read_only_context() -> None:
+    service = Mock()
+    controls = StrategyControlSnapshot(
+        external_account_id="LBPT10087357",
+        execution_mode=ExecutionMode.PAPER,
+        live_trading_enabled=False,
+        scheduler_enabled=True,
+        permission_boundaries=[
+            StrategyPermissionBoundary(
+                name="llm_read_only_advisor",
+                allowed=False,
+                detail="Advisor output cannot execute directly.",
+            )
+        ],
+    )
+    service.get_advisor_context.return_value = StrategyAdvisorContext(
+        external_account_id="LBPT10087357",
+        controls=controls,
+        experiment=StrategyExperimentSnapshot(
+            external_account_id="LBPT10087357",
+            proposals=[build_proposal()],
+            runs=[build_run()],
+            signals=[build_signal()],
+            reviews=[build_review()],
+        ),
+        covered_call_activity=CoveredCallActivitySnapshot(
+            external_account_id="LBPT10087357",
+            summary=CoveredCallActivitySummary(external_account_id="LBPT10087357"),
+        ),
+        advisor_sources=["deepseek", "external_advisor", "llm", "llm_advisor", "openai"],
+        hard_rules=[
+            StrategyPermissionBoundary(
+                name="advisor_context_is_read_only",
+                allowed=False,
+                detail="Context cannot submit broker orders.",
+            )
+        ],
+    )
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/advisor-context",
+            params={"external_account_id": "LBPT10087357", "limit": "6"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["controls"]["llm_direct_execution_allowed"] is False
+    assert body["advisor_sources"][0] == "deepseek"
+    assert body["hard_rules"][0]["name"] == "advisor_context_is_read_only"
+    assert body["experiment"]["proposals"][0]["id"] == "proposal-1"
+    assert body["covered_call_activity"]["summary"]["external_account_id"] == "LBPT10087357"
+    service.get_advisor_context.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        limit=6,
+    )
+
+
+def test_strategy_experiment_service_records_approval_audit_signal() -> None:
+    proposal = build_proposal()
+    approved = build_proposal(StrategyProposalStatus.APPROVED)
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.get_proposal.return_value = proposal
+    experiments.update_proposal_status.return_value = approved
+    experiments.create_signal.side_effect = lambda request: StrategySignal(
+        id="signal-policy-audit",
+        strategy_id=request.strategy_id,
+        external_account_id=request.external_account_id,
+        mode=request.mode,
+        signal_type=request.signal_type,
+        symbol=request.symbol,
+        proposal_id=request.proposal_id,
+        summary=request.summary,
+        detail=request.detail,
+        source=request.source,
+        signal_payload=request.signal_payload,
+        emitted_at=NOW,
+        created_at=NOW,
+    )
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    result = service.approve_proposal(
+        "proposal-1",
+        actor="operator-a",
+        note="manual paper approval",
+    )
+
+    assert result.status == StrategyProposalStatus.APPROVED
+    signal_request = experiments.create_signal.call_args.args[0]
+    assert signal_request.source == "strategy_policy"
+    assert signal_request.signal_payload["audit_event"] == "proposal_decision"
+    assert signal_request.signal_payload["actor"] == "operator-a"
+    assert signal_request.signal_payload["previous_status"] == "pending"
+    assert signal_request.signal_payload["new_status"] == "approved"
+
+
+def test_strategy_experiment_service_blocks_advisor_proposal_without_manual_approval() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    with pytest.raises(ValueError, match="manual approval"):
+        service.create_proposal(
+            CreateStrategyProposalRequest(
+                strategy_id="covered_call_v1",
+                external_account_id="LBPT10087357",
+                mode=ExecutionMode.PAPER,
+                symbol="QQQ.US",
+                title="Advisor covered-call idea",
+                proposed_action="sell_covered_call",
+                rationale="LLM advisor suggested testing this candidate.",
+                approval_required=False,
+                source="deepseek",
+            )
+        )
+
+    experiments.create_proposal.assert_not_called()
+    experiments.create_signal.assert_not_called()
+
+
+def test_strategy_experiment_service_blocks_advisor_live_mode_proposal() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    with pytest.raises(ValueError, match="live mode"):
+        service.create_proposal(
+            CreateStrategyProposalRequest(
+                strategy_id="covered_call_v1",
+                external_account_id="LBPT10087357",
+                mode=ExecutionMode.LIVE,
+                symbol="QQQ.US",
+                title="Advisor live covered-call idea",
+                proposed_action="sell_covered_call",
+                rationale="LLM advisor suggested testing this candidate.",
+                approval_required=True,
+                source="deepseek",
+            )
+        )
+
+    experiments.create_proposal.assert_not_called()
+    experiments.create_signal.assert_not_called()
+
+
+def test_strategy_experiment_service_records_advisor_proposal_audit_signal() -> None:
+    proposal = StrategyProposal(
+        id="proposal-llm-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="QQQ.US",
+        title="Advisor covered-call idea",
+        proposed_action="sell_covered_call",
+        rationale="LLM advisor suggested testing this candidate.",
+        source="deepseek",
+        approval_required=True,
+        checks=["local_risk_snapshot"],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.create_proposal.return_value = proposal
+    experiments.create_signal.side_effect = lambda request: StrategySignal(
+        id="signal-advisor-audit",
+        strategy_id=request.strategy_id,
+        external_account_id=request.external_account_id,
+        mode=request.mode,
+        signal_type=request.signal_type,
+        symbol=request.symbol,
+        proposal_id=request.proposal_id,
+        summary=request.summary,
+        detail=request.detail,
+        source=request.source,
+        signal_payload=request.signal_payload,
+        emitted_at=NOW,
+        created_at=NOW,
+    )
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    result = service.create_proposal(
+        CreateStrategyProposalRequest(
+            strategy_id="covered_call_v1",
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            symbol="QQQ.US",
+            title="Advisor covered-call idea",
+            proposed_action="sell_covered_call",
+            rationale="LLM advisor suggested testing this candidate.",
+            source="deepseek",
+            checks=["local_risk_snapshot"],
+        )
+    )
+
+    assert result.id == "proposal-llm-1"
+    signal_request = experiments.create_signal.call_args.args[0]
+    assert signal_request.source == "strategy_policy"
+    assert signal_request.signal_payload["audit_event"] == "advisor_proposal_recorded"
+    assert signal_request.signal_payload["advisor_source"] == "deepseek"
+    assert signal_request.signal_payload["llm_direct_execution_allowed"] is False
+    assert signal_request.signal_payload["checks"] == ["local_risk_snapshot"]
+
+
+def test_strategy_experiment_service_builds_advisor_context() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.list_proposals.side_effect = [
+        [build_proposal()],
+        [build_covered_call_proposal(status=StrategyProposalStatus.CLOSED)],
+    ]
+    experiments.list_runs.side_effect = [[build_run()], []]
+    experiments.list_signals.side_effect = [[build_signal()], []]
+    experiments.list_reviews.side_effect = [[build_review()], []]
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    context = service.get_advisor_context(
+        external_account_id="LBPT10087357",
+        limit=6,
+    )
+
+    assert context.controls.llm_direct_execution_allowed is False
+    assert context.experiment.proposals[0].id == "proposal-1"
+    assert context.covered_call_activity.summary.total_proposals == 1
+    assert context.advisor_sources[0] == "deepseek"
+    assert context.hard_rules[0].name == "advisor_context_is_read_only"
+    experiments.list_proposals.assert_any_call(
+        external_account_id="LBPT10087357",
+        strategy_id=None,
+        status=None,
+        limit=6,
+    )
+    experiments.list_proposals.assert_any_call(
+        external_account_id="LBPT10087357",
+        strategy_id="covered_call_v1",
+        status=None,
+        limit=6,
+    )
 
 
 def test_create_strategy_run_signal_and_review_routes() -> None:

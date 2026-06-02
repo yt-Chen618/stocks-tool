@@ -2,6 +2,8 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock, call
 
+import pytest
+
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -596,6 +598,36 @@ def test_covered_call_execute_keeps_working_sell_order_approved() -> None:
     assert experiments.updated_status is None
     assert experiments.run_request.metrics_payload["sequence_status"] == "sell_submitted_waiting_fill"
     assert experiments.run_request.metrics_payload["sell_status"] == "submitted"
+
+
+def test_covered_call_execute_blocks_advisor_source_without_local_checks() -> None:
+    proposal = StrategyProposal(
+        id="proposal-llm",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Advisor-generated proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        source="deepseek",
+        candidate_payload=build_candidate_payload(),
+        checks=[],
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(PermissionError, match="advisor-sourced proposal"):
+        service.execute_approved_proposal(
+            "proposal-llm",
+            request=ExecuteCoveredCallProposalRequest(),
+        )
+
+    order_service.submit_order.assert_not_called()
 
 
 def test_covered_call_monitor_records_take_profit_guidance() -> None:

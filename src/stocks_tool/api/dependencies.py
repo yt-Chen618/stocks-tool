@@ -239,10 +239,12 @@ def get_journal_service(
 def get_strategy_experiment_service(
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    settings: Settings = Depends(get_settings),
 ) -> StrategyExperimentService:
     return StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,
+        settings=settings,
     )
 
 

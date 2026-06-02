@@ -75,6 +75,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
 - `POST /strategies/bull-put/runtime/{external_account_id}/review`
 - `GET /strategies/experiment`
+- `GET /strategies/controls`
+- `GET /strategies/advisor-context`
 - `GET /strategies/covered-call/preview`
 - `GET /strategies/covered-call/activity`
 - `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
@@ -148,6 +150,11 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - records strategy runs, signals, and reviews independently from the current bull put runtime table
   - dashboard renders the selected account's pending proposals, latest runs, signal feed, and review feed
   - approval/rejection is persisted, but approval still does not bypass any local strategy-specific readiness or risk checks
+  - `GET /strategies/controls` exposes the current paper/live locks, scheduler state, covered-call automation flags, and permission boundaries for future UI and LLM advisor layers
+  - `GET /strategies/advisor-context` packages controls, the strategy experiment snapshot, covered-call activity, recognized advisor sources, and hard rules into a read-only context for future DeepSeek/LLM prompts
+  - proposal approval/rejection accepts an optional audit actor/note body and writes a `strategy_policy` review signal with the previous/new proposal status
+  - LLM/advisor-sourced proposals such as `deepseek`, `llm`, `openai`, or `external_advisor` are treated as read-only advice until local deterministic checks and manual approval are present
+  - advisor-sourced proposals must keep `approval_required=true`, cannot be created in live mode, and record a `strategy_policy` audit signal when accepted into the ledger
 
 ### Covered call proposals
 
@@ -169,6 +176,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
   - `roll-continue` refreshes a pending buyback order and submits the sell-to-open leg once that buyback is filled
   - `close` submits a paper buy-to-close limit order for an executed sell or roll proposal and marks the proposal `closed` only when the close order is filled
+  - covered-call open / roll / close order entry now checks a shared execution policy before order submission: live mode remains environment-locked, opening and roll orders cannot bypass manual approval, and advisor-sourced proposals without local checks are rejected before any broker call
   - completed roll executions mark the source proposal `rolled` only after the new short call fill is confirmed, while the newly opened roll proposal remains `executed` and monitorable
   - `roll-continue` can refresh an existing roll sell order id so a pending roll-open order is not duplicated while waiting for fill
   - optional lifecycle reconciliation can refresh pending initial sell orders, pending close orders, pending roll buyback orders, and pending roll sell orders in the background; when an initial sell fills it marks the proposal `executed`, and when a roll buyback fills with no sell order yet it can submit the approved roll sell-to-open leg and store the new order id in a lifecycle run
@@ -472,13 +480,13 @@ Frontend files:
 - Added `tests/test_strategy_experiments_api.py` for the unified strategy experiment routes.
 - Added `tests/test_ui_dashboard.py` to check the dashboard HTML for order-ticket, holdings, bull put strategy sections, and the pre-open risk board.
 - Added `tests/test_reconciliation_services.py` for sync-state success/failure transitions.
-- Latest local verification run after the covered-call activity dashboard update:
+- Latest local verification run after the strategy controls / audit boundary / advisor-context update:
 
 ```powershell
 .venv\Scripts\python.exe -m pytest
 ```
 
-- Result: `122 passed`
+- Result: `149 passed`
 - Latest browser-regression run:
 
 ```powershell
@@ -578,6 +586,9 @@ Frontend files:
   - manual lifecycle reconcile at `2026-06-02T15:08Z` refreshed the pending roll legs, marked the source proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7` as `rolled`, and marked roll proposal `ea90299c-e66d-41d6-b9de-319dd8fa8fb9` as `executed`
   - latest monitor for the active roll proposal at `2026-06-02T15:09:46Z` returned `hold`, with underlying `744.800`, call mark `7.12`, estimated open P/L `-24.00`, premium capture `-3.49%`, and `28` DTE; `GET /strategies/covered-call/activity` now returns this as `latest_monitor`
   - local `.env` has covered-call auto-propose disabled while covered-call auto-monitor and auto-lifecycle are enabled; the local API was restarted and Settings loaded these flags as `False / True / True`
+  - paper close validation was completed at `2026-06-02T15:23:09Z`: `POST /strategies/covered-call/proposals/ea90299c-e66d-41d6-b9de-319dd8fa8fb9/close` submitted buy-to-close order `8267012b-5ec8-4d55-bde9-abb005759e98` / external order `1246484182880747520` for `QQQ260630C770000.US` at limit `8.50`; the order filled immediately and the roll proposal status is now `closed`
+  - after the close, `GET /strategies/covered-call/activity` reports `executed_positions=0`, `pending_rolls=0`, `close_runs=1`, and no pending lifecycle tasks
+  - implementation note: the code-level FastAPI app and a temporary `127.0.0.1:8001` instance exposed the new `/strategies/controls` route, but the long-running `127.0.0.1:8000` process still served an older OpenAPI route set during verification; a full process restart is needed for the user-facing 8000 instance to expose the new controls and advisor-context routes
 
 ## Known cleanup items
 
@@ -588,6 +599,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Continue monitoring executed covered-call roll proposal `ea90299c-e66d-41d6-b9de-319dd8fa8fb9`; the latest monitor action was `hold` on `QQQ260630C770000.US`.
-2. Keep auto-propose disabled unless intentionally creating new covered-call candidates; auto-lifecycle and auto-monitor are enabled locally for background refresh of the active paper roll.
-3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
+1. Fully replace the long-running `127.0.0.1:8000` process so it exposes the new `/strategies/controls` and `/strategies/advisor-context` routes; tests and the local app code already verify the routes are present.
+2. Keep auto-propose disabled unless intentionally creating new covered-call candidates; the previous active QQQ covered-call roll is now closed, so background covered-call monitor/lifecycle has no open proposal to manage.
+3. Continue with the next phase: add the DeepSeek/LLM adapter that reads `/strategies/advisor-context` and writes proposals/reviews into the existing ledger without direct execution authority.

@@ -59,6 +59,7 @@ from stocks_tool.ports.repository import (
 class CoveredCallStrategyService:
     strategy_id = "covered_call_v1"
     open_proposal_actions = {"sell_covered_call", "roll_covered_call"}
+    advisor_sources = {"deepseek", "llm", "llm_advisor", "openai", "external_advisor"}
 
     def __init__(
         self,
@@ -377,6 +378,16 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before execution.")
         if proposal.candidate_payload is None:
             raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+        self._assert_order_execution_policy(
+            proposal=proposal,
+            action="execute_covered_call",
+            required_checks={
+                "local_position_covered",
+                "liquidity_filter",
+                "manual_approval_required",
+            },
+            require_manual_approval=True,
+        )
 
         candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
         self._ensure_latest_position_still_covers(
@@ -493,6 +504,12 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' must be executed before close.")
         if proposal.candidate_payload is None:
             raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
+        self._assert_order_execution_policy(
+            proposal=proposal,
+            action="close_covered_call",
+            required_checks=set(),
+            require_manual_approval=False,
+        )
 
         candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
         limit_price = request.limit_price or self._current_call_mark(
@@ -740,6 +757,18 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before roll execution.")
         if proposal.candidate_payload is None:
             raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call roll payload.")
+        self._assert_order_execution_policy(
+            proposal=proposal,
+            action="execute_covered_call_roll",
+            required_checks={
+                "current_call_identified",
+                "local_position_covered",
+                "roll_out_candidate",
+                "liquidity_filter",
+                "manual_approval_required",
+            },
+            require_manual_approval=True,
+        )
 
         roll_from, roll_to = self._parse_roll_payload(proposal.candidate_payload, proposal_id=proposal_id)
         self._ensure_latest_position_still_covers(
@@ -879,6 +908,18 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' must stay approved while a roll buyback is pending.")
         if proposal.candidate_payload is None:
             raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call roll payload.")
+        self._assert_order_execution_policy(
+            proposal=proposal,
+            action="continue_covered_call_roll",
+            required_checks={
+                "current_call_identified",
+                "local_position_covered",
+                "roll_out_candidate",
+                "liquidity_filter",
+                "manual_approval_required",
+            },
+            require_manual_approval=True,
+        )
 
         roll_from, roll_to = self._parse_roll_payload(proposal.candidate_payload, proposal_id=proposal_id)
         buyback_order = self.order_service.refresh_order(request.buyback_order_id)
@@ -1465,6 +1506,29 @@ class CoveredCallStrategyService:
         account = self.broker_accounts.get_by_external_account_id(external_account_id)
         if account is None or account.broker != BrokerName.LONGBRIDGE:
             raise LookupError(f"No local Longbridge broker account was found for '{external_account_id}'.")
+
+    def _assert_order_execution_policy(
+        self,
+        *,
+        proposal: StrategyProposal,
+        action: str,
+        required_checks: set[str],
+        require_manual_approval: bool,
+    ) -> None:
+        if proposal.mode == ExecutionMode.LIVE and not self.settings.allow_live_trading:
+            raise PermissionError(
+                f"{action} is blocked because live execution is disabled by ALLOW_LIVE_TRADING."
+            )
+        if require_manual_approval and not proposal.approval_required:
+            raise PermissionError(f"{action} requires a proposal that cannot bypass manual approval.")
+        source = (proposal.source or "").strip().lower()
+        if source in self.advisor_sources:
+            missing_checks = sorted(required_checks.difference(set(proposal.checks)))
+            if missing_checks:
+                raise PermissionError(
+                    f"{action} is blocked for advisor-sourced proposal '{proposal.id}' until local checks are present: "
+                    + ", ".join(missing_checks)
+                )
 
     def _get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot:
         snapshot = self.account_snapshots.get_latest_account_snapshot(external_account_id)
