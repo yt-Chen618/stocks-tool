@@ -42,6 +42,7 @@ from stocks_tool.domain.models import (
     CreateStrategySignalRequest,
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
+    OptionChainEntry,
     OptionContractRef,
     Order,
     OptionMarketSnapshot,
@@ -137,7 +138,10 @@ class CoveredCallStrategyService:
             expiry_date=expiry_date,
             mode=mode,
         )
-        call_symbols = [entry.call_symbol for entry in chain if entry.standard and entry.call_symbol]
+        call_symbols = self._call_symbols_for_snapshot(
+            chain=chain,
+            underlying_price=underlying_quote.last_done,
+        )
         if not call_symbols:
             return CoveredCallPreviewResult(
                 external_account_id=external_account_id,
@@ -1610,7 +1614,10 @@ class CoveredCallStrategyService:
             expiry_date=expiry_date,
             mode=mode,
         )
-        call_symbols = [entry.call_symbol for entry in chain if entry.standard and entry.call_symbol]
+        call_symbols = self._call_symbols_for_snapshot(
+            chain=chain,
+            underlying_price=underlying_quote.last_done,
+        )
         if not call_symbols:
             return CoveredCallPreviewResult(
                 external_account_id=external_account_id,
@@ -1717,6 +1724,32 @@ class CoveredCallStrategyService:
             if self._passes_liquidity_filter(enriched):
                 return enriched
         return None
+
+    def _call_symbols_for_snapshot(
+        self,
+        *,
+        chain: list[OptionChainEntry],
+        underlying_price: Decimal,
+    ) -> list[str]:
+        strategy = self.settings.covered_call_strategy
+        min_strike = underlying_price * (Decimal("1") + strategy.min_otm_pct)
+        max_strike = underlying_price * (Decimal("1") + strategy.max_otm_pct)
+        candidates = [
+            entry
+            for entry in chain
+            if entry.standard
+            and entry.call_symbol
+            and min_strike <= entry.strike <= max_strike
+        ]
+        target_strike = underlying_price * (Decimal("1") + strategy.min_otm_pct)
+        ranked = sorted(
+            candidates,
+            key=lambda entry: (
+                abs(entry.strike - target_strike),
+                entry.strike,
+            ),
+        )
+        return [entry.call_symbol for entry in ranked[:80] if entry.call_symbol]
 
     def _build_candidate(
         self,

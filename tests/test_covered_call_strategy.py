@@ -29,6 +29,7 @@ from stocks_tool.domain.models import (
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
     MarketEvent,
+    OptionChainEntry,
     OptionMarketSnapshot,
     Order,
     PositionSnapshot,
@@ -229,7 +230,7 @@ def build_adapter() -> Mock:
     )
     adapter.list_option_expiry_dates.return_value = [date(2026, 6, 26)]
     adapter.list_option_chain.return_value = [
-        Mock(standard=True, call_symbol="UNH260626C105000.US")
+        OptionChainEntry(strike=Decimal("105"), call_symbol="UNH260626C105000.US")
     ]
     adapter.get_option_market_snapshots.return_value = [
         OptionMarketSnapshot(
@@ -348,6 +349,29 @@ def test_covered_call_preview_selects_liquid_otm_call() -> None:
     assert preview.risk is not None
     assert preview.risk.status == RiskStatus.PASS
     assert preview.risk.max_assignment_profit == Decimal("1620.00")
+
+
+def test_covered_call_preview_filters_chain_before_market_snapshot_request() -> None:
+    adapter = build_adapter()
+    adapter.list_option_chain.return_value = [
+        OptionChainEntry(strike=Decimal("95"), call_symbol="UNH260626C095000.US"),
+        OptionChainEntry(strike=Decimal("105"), call_symbol="UNH260626C105000.US"),
+        OptionChainEntry(strike=Decimal("130"), call_symbol="UNH260626C130000.US"),
+    ]
+    service = build_service(adapter=adapter)
+
+    preview = service.preview(
+        external_account_id="LBPT10087357",
+        symbol="UNH.US",
+        mode=ExecutionMode.PAPER,
+        as_of=NOW,
+    )
+
+    assert preview.eligible is True
+    adapter.get_option_market_snapshots.assert_called_with(
+        symbols=["UNH260626C105000.US"],
+        mode=ExecutionMode.PAPER,
+    )
 
 
 def test_covered_call_preview_blocks_without_covered_lot() -> None:
@@ -743,7 +767,7 @@ def test_covered_call_roll_proposal_records_buyback_and_next_call_candidate() ->
     adapter = build_adapter()
     adapter.list_option_expiry_dates.return_value = [date(2026, 6, 26), date(2026, 7, 10)]
     adapter.list_option_chain.return_value = [
-        Mock(standard=True, call_symbol="UNH260710C110000.US")
+        OptionChainEntry(strike=Decimal("110"), call_symbol="UNH260710C110000.US")
     ]
     adapter.get_option_market_snapshots.side_effect = [
         [

@@ -165,6 +165,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission; working sell orders keep the proposal `approved` until the order fills
   - `monitor` reloads the underlying and short-call quote for executed sell or roll proposals, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
   - `roll-propose` creates a manual-approval strategy proposal that combines the current buyback estimate with a later OTM covered-call candidate
+  - covered-call preview and roll-preview now filter the option chain to standard calls inside the configured OTM strike window before requesting Longbridge market snapshots, capped to a focused candidate subset, so long chains such as QQQ avoid the broker's per-minute option-security request limit
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
   - `roll-continue` refreshes a pending buyback order and submits the sell-to-open leg once that buyback is filled
   - `close` submits a paper buy-to-close limit order for an executed sell or roll proposal and marks the proposal `closed` only when the close order is filled
@@ -570,7 +571,13 @@ Frontend files:
   - a later manual lifecycle reconcile at `2026-06-02T14:37:04Z` refreshed the same pending sell order, saw it filled, marked proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7` `executed`, and cleared the pending `open` lifecycle task
   - local order list now shows order `14c4fb5f-06b3-48fd-8ac3-150ab35cdb1b` as `filled`; Longbridge remote status is `FILLED`, executed quantity `1`, executed price `6.7800`, remote updated time `2026-06-02T14:28:54Z`
   - first post-fill `POST /strategies/covered-call/proposals/35f8f82e-f877-4cd2-8cc4-0faeb80d58a7/monitor?record_signal=true` at `2026-06-02T14:37:48Z` returned `hold`, with underlying `743.680`, call mark `7.66`, estimated open P/L `-88.00`, premium capture `-12.98%`, and no take-profit / assignment-pressure / expiration-week trigger
-  - latest post-fill monitor at `2026-06-02T14:47:55Z` returned `hold`, with underlying `743.761`, call mark `7.67`, estimated open P/L `-89.00`, premium capture `-13.13%`, and no take-profit / assignment-pressure / expiration-week trigger; `GET /strategies/covered-call/activity` now returns this as `latest_monitor`
+  - monitor at `2026-06-02T14:57:08Z` still returned `hold`, with underlying `744.190`, call mark `7.87`, estimated open P/L `-109.00`, and premium capture `-16.08%`
+  - a first `roll-propose` attempt exposed a Longbridge rate limit from requesting the full QQQ call chain; covered-call preview/roll-preview now prefilter call symbols by the configured OTM strike window before market-snapshot requests
+  - retrying `POST /strategies/covered-call/proposals/35f8f82e-f877-4cd2-8cc4-0faeb80d58a7/roll-propose` at `2026-06-02T15:05Z` succeeded and created pending roll proposal `ea90299c-e66d-41d6-b9de-319dd8fa8fb9` from `QQQ260626C764000.US` to `QQQ260630C770000.US`
+  - the roll proposal was approved at `2026-06-02T15:07Z`; `roll-execute` submitted buyback order `d7451941-c519-4842-8db0-6a5d228ed21a` / external order `1246480242005004288`, which filled, then submitted sell-to-open order `314e0e97-4524-4eaa-aacf-2423ddb9d9f7` / external order `1246480254315282432` at limit `6.88`
+  - manual lifecycle reconcile at `2026-06-02T15:08Z` refreshed the pending roll legs, marked the source proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7` as `rolled`, and marked roll proposal `ea90299c-e66d-41d6-b9de-319dd8fa8fb9` as `executed`
+  - latest monitor for the active roll proposal at `2026-06-02T15:09:46Z` returned `hold`, with underlying `744.800`, call mark `7.12`, estimated open P/L `-24.00`, premium capture `-3.49%`, and `28` DTE; `GET /strategies/covered-call/activity` now returns this as `latest_monitor`
+  - local `.env` has covered-call auto-propose disabled while covered-call auto-monitor and auto-lifecycle are enabled; the local API was restarted and Settings loaded these flags as `False / True / True`
 
 ## Known cleanup items
 
@@ -581,6 +588,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Continue monitoring executed covered-call proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7`; the latest post-fill monitor action was `hold`.
-2. Use the covered-call activity lifecycle view for future close / roll tasks; stale working orders now include age, stale flag, diagnostic text, and suggested manual intervention before any cancel / replace action.
+1. Continue monitoring executed covered-call roll proposal `ea90299c-e66d-41d6-b9de-319dd8fa8fb9`; the latest monitor action was `hold` on `QQQ260630C770000.US`.
+2. Keep auto-propose disabled unless intentionally creating new covered-call candidates; auto-lifecycle and auto-monitor are enabled locally for background refresh of the active paper roll.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
