@@ -259,6 +259,29 @@ def get_covered_call_activity(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.post("/covered-call/lifecycle/{external_account_id}/reconcile")
+def reconcile_covered_call_lifecycle(
+    external_account_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+) -> dict[str, int]:
+    try:
+        return service.reconcile_pending_lifecycle(
+            external_account_id=external_account_id,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("/experiment", response_model=StrategyExperimentSnapshot)
 def get_strategy_experiment_snapshot(
     external_account_id: str | None = Query(default=None, description="Optional broker account id filter, e.g. LBPT10087357"),

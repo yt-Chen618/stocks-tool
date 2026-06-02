@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock, call
 
@@ -421,6 +421,39 @@ def test_covered_call_proposal_writes_strategy_experiment_records() -> None:
     ]
 
 
+def test_covered_call_proposal_skips_active_duplicate() -> None:
+    existing_proposal = StrategyProposal(
+        id="proposal-existing",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Existing active proposal.",
+        status=StrategyProposalStatus.PENDING,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(existing_proposal)
+    service = build_service(experiments=experiments)
+
+    result = service.create_proposal(
+        external_account_id="LBPT10087357",
+        symbol="UNH.US",
+        mode=ExecutionMode.PAPER,
+        as_of=NOW,
+    )
+
+    assert result.proposal is not None
+    assert result.proposal.id == "proposal-existing"
+    assert experiments.proposal_request is None
+    assert len(experiments.proposals) == 1
+    assert experiments.run_request.status == StrategyRunStatus.SKIPPED
+    assert "already exists" in experiments.run_request.reason
+    assert experiments.signal_request.signal_type == StrategySignalType.RISK_CHECK
+
+
 def test_covered_call_execute_requires_approved_proposal_and_submits_option_order() -> None:
     proposal = StrategyProposal(
         id="proposal-1",
@@ -492,6 +525,55 @@ def test_covered_call_execute_requires_approved_proposal_and_submits_option_orde
     assert experiments.updated_status == StrategyProposalStatus.EXECUTED
 
 
+def test_covered_call_execute_keeps_working_sell_order_approved() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    order_service = Mock()
+    order_service.submit_order.return_value = Order(
+        id="order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-order-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.SELL,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.20"),
+        submitted_at=NOW - timedelta(minutes=20),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.execute_approved_proposal(
+        "proposal-1",
+        request=ExecuteCoveredCallProposalRequest(),
+    )
+
+    assert result.proposal.status == StrategyProposalStatus.APPROVED
+    assert result.order.status == OrderStatus.SUBMITTED
+    assert experiments.updated_status is None
+    assert experiments.run_request.metrics_payload["sequence_status"] == "sell_submitted_waiting_fill"
+    assert experiments.run_request.metrics_payload["sell_status"] == "submitted"
+
+
 def test_covered_call_monitor_records_take_profit_guidance() -> None:
     proposal = StrategyProposal(
         id="proposal-1",
@@ -559,6 +641,7 @@ def test_covered_call_monitor_records_take_profit_guidance() -> None:
     assert result.premium_capture_pct == Decimal("54.17")
     assert result.signal is not None
     assert experiments.signal_request.signal_type == StrategySignalType.MONITOR
+    assert experiments.signal_request.signal_payload["estimated_open_pnl"] == "65.00"
 
 
 def test_covered_call_monitor_uses_roll_to_candidate_for_executed_roll() -> None:
@@ -1322,6 +1405,134 @@ def test_covered_call_lifecycle_reconcile_marks_filled_close_closed() -> None:
     assert result["closed_proposals"] == 1
     assert experiments.updated_status == StrategyProposalStatus.CLOSED
     order_service.refresh_order.assert_called_once_with("close-order-1")
+
+
+def test_covered_call_lifecycle_reconcile_marks_filled_sell_executed() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Approved covered call proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id="proposal-1",
+                run_type="proposal_execution",
+                order_id="sell-order-1",
+                metrics_payload={
+                    "order_id": "sell-order-1",
+                    "sequence_status": "sell_submitted_waiting_fill",
+                    "sell_status": "submitted",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    order_service.refresh_order.return_value = Order(
+        id="sell-order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-sell-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.SELL,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+        limit_price=Decimal("1.20"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.reconcile_pending_lifecycle(
+        external_account_id="LBPT10087357",
+        as_of=NOW,
+    )
+
+    assert result["sell_orders_refreshed"] == 1
+    assert result["sell_orders_executed"] == 1
+    assert experiments.updated_status == StrategyProposalStatus.EXECUTED
+    order_service.refresh_order.assert_called_once_with("sell-order-1")
+
+
+def test_covered_call_lifecycle_reconcile_records_working_sell_refresh() -> None:
+    proposal = StrategyProposal(
+        id="proposal-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Approved covered call proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id="proposal-1",
+                run_type="proposal_execution",
+                order_id="sell-order-1",
+                metrics_payload={
+                    "order_id": "sell-order-1",
+                    "sequence_status": "sell_submitted_waiting_fill",
+                    "sell_status": "submitted",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    order_service.refresh_order.return_value = Order(
+        id="sell-order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-sell-1",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.SELL,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.20"),
+        submitted_at=NOW - timedelta(minutes=20),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    result = service.reconcile_pending_lifecycle(
+        external_account_id="LBPT10087357",
+        as_of=NOW,
+    )
+
+    assert result["sell_orders_refreshed"] == 1
+    assert result["sell_orders_executed"] == 0
+    assert experiments.updated_status is None
+    assert experiments.run_request.run_type == "open_lifecycle_refresh"
+    assert experiments.run_request.order_id == "sell-order-1"
+    assert experiments.run_request.metrics_payload["sell_status"] == "submitted"
+    assert experiments.run_request.metrics_payload["order_submitted_at"] == (
+        NOW - timedelta(minutes=20)
+    ).isoformat()
 
 
 def test_covered_call_lifecycle_reconcile_submits_roll_sell_after_buyback_fills() -> None:

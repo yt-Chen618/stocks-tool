@@ -537,6 +537,35 @@ class StrategyExperimentSnapshot(BaseModel):
     reviews: list[StrategyReview] = Field(default_factory=list)
 
 
+class CoveredCallLifecycleTask(BaseModel):
+    proposal_id: str
+    proposal_title: str
+    symbol: str | None = None
+    task_type: str
+    proposal_status: StrategyProposalStatus
+    last_run_id: str | None = None
+    last_run_type: str | None = None
+    open_order_id: str | None = None
+    close_order_id: str | None = None
+    roll_buyback_order_id: str | None = None
+    roll_sell_order_id: str | None = None
+    open_status: str | None = None
+    close_status: str | None = None
+    buyback_status: str | None = None
+    sell_status: str | None = None
+    sequence_status: str | None = None
+    last_refresh_status: str | None = None
+    last_refresh_at: datetime | None = None
+    order_submitted_at: datetime | None = None
+    order_age_seconds: int | None = None
+    stale_after_seconds: int | None = None
+    is_stale: bool = False
+    diagnostic: str | None = None
+    suggested_action: str | None = None
+    summary: str | None = None
+    reason: str | None = None
+
+
 class CoveredCallActivitySummary(BaseModel):
     external_account_id: str | None = None
     total_proposals: int = 0
@@ -547,9 +576,25 @@ class CoveredCallActivitySummary(BaseModel):
     latest_activity_at: datetime | None = None
 
 
+class CoveredCallMonitorSnapshot(BaseModel):
+    proposal_id: str | None = None
+    symbol: str | None = None
+    action: str | None = None
+    detail: str | None = None
+    underlying_price: Decimal | None = None
+    call_mark: Decimal | None = None
+    estimated_open_pnl: Decimal | None = None
+    premium_capture_pct: Decimal | None = None
+    days_to_expiration: int | None = None
+    emitted_at: datetime | None = None
+    signal_id: str | None = None
+
+
 class CoveredCallActivitySnapshot(BaseModel):
     external_account_id: str | None = None
     summary: CoveredCallActivitySummary = Field(default_factory=CoveredCallActivitySummary)
+    lifecycle_tasks: list[CoveredCallLifecycleTask] = Field(default_factory=list)
+    latest_monitor: CoveredCallMonitorSnapshot | None = None
     proposals: list[StrategyProposal] = Field(default_factory=list)
     runs: list[StrategyRun] = Field(default_factory=list)
     signals: list[StrategySignal] = Field(default_factory=list)

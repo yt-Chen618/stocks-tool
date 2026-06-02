@@ -266,6 +266,61 @@ class CoveredCallStrategyService:
         if not preview.eligible or preview.candidate is None or preview.risk is None:
             return CoveredCallProposalResult(preview=preview, run=run, signal=signal)
 
+        existing_proposal = self._find_active_open_proposal(
+            external_account_id=external_account_id,
+            mode=mode,
+            symbol=preview.symbol,
+        )
+        if existing_proposal is not None:
+            duplicate_reason = (
+                f"Active covered call proposal {existing_proposal.id} already exists for {preview.symbol}."
+            )
+            duplicate_run = self.experiments.create_run(
+                CreateStrategyRunRequest(
+                    strategy_id=self.strategy_id,
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    run_type="proposal_preview",
+                    status=StrategyRunStatus.SKIPPED,
+                    symbol=preview.symbol,
+                    proposal_id=existing_proposal.id,
+                    started_at=preview.evaluated_at,
+                    completed_at=datetime.now(timezone.utc),
+                    summary="Covered call proposal scan skipped an active duplicate.",
+                    reason=duplicate_reason,
+                    metrics_payload={
+                        **preview.model_dump(mode="json"),
+                        "existing_proposal_id": existing_proposal.id,
+                    },
+                )
+            )
+            duplicate_signal = self.experiments.create_signal(
+                CreateStrategySignalRequest(
+                    strategy_id=self.strategy_id,
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    signal_type=StrategySignalType.RISK_CHECK,
+                    symbol=preview.symbol,
+                    run_id=duplicate_run.id,
+                    proposal_id=existing_proposal.id,
+                    strength=Decimal("0"),
+                    summary="Covered call proposal skipped because an active proposal already exists.",
+                    detail=duplicate_reason,
+                    source="covered_call_v1",
+                    signal_payload={
+                        "existing_proposal_id": existing_proposal.id,
+                        "symbol": preview.symbol,
+                    },
+                    emitted_at=preview.evaluated_at,
+                )
+            )
+            return CoveredCallProposalResult(
+                preview=preview,
+                proposal=existing_proposal,
+                run=duplicate_run,
+                signal=duplicate_signal,
+            )
+
         proposal = self.experiments.create_proposal(
             CreateStrategyProposalRequest(
                 strategy_id=self.strategy_id,
@@ -362,10 +417,20 @@ class CoveredCallStrategyService:
                 started_at=datetime.now(timezone.utc),
                 completed_at=datetime.now(timezone.utc),
                 summary=f"Submitted covered call sell order for {candidate.call_symbol}.",
+                reason=(
+                    None
+                    if self._order_filled(order)
+                    else "Sell-to-open order is working; proposal stays approved until the short call is filled."
+                ),
                 metrics_payload={
                     "proposal_id": proposal.id,
                     "order_id": order.id,
+                    "sequence_status": (
+                        "sell_filled" if self._order_filled(order) else "sell_submitted_waiting_fill"
+                    ),
+                    "sell_status": order.status.value,
                     "limit_price": str(limit_price),
+                    **self._order_timing_payload(order),
                     "candidate": candidate.model_dump(mode="json"),
                 },
             )
@@ -380,16 +445,29 @@ class CoveredCallStrategyService:
                 run_id=run.id,
                 proposal_id=proposal.id,
                 summary=f"Covered call order submitted for {candidate.call_symbol}.",
+                detail=(
+                    None
+                    if self._order_filled(order)
+                    else "Sell-to-open order is working; proposal stays approved until the short call is filled."
+                ),
                 source="covered_call_v1",
-                signal_payload={"order_id": order.id, "candidate": candidate.model_dump(mode="json")},
+                signal_payload={
+                    "order_id": order.id,
+                    "sequence_status": "sell_filled" if self._order_filled(order) else "sell_submitted_waiting_fill",
+                    "sell_status": order.status.value,
+                    **self._order_timing_payload(order),
+                    "candidate": candidate.model_dump(mode="json"),
+                },
             )
         )
-        executed_proposal = self.experiments.update_proposal_status(
-            proposal.id,
-            status=StrategyProposalStatus.EXECUTED,
-        )
+        result_proposal = proposal
+        if self._order_filled(order):
+            result_proposal = self.experiments.update_proposal_status(
+                proposal.id,
+                status=StrategyProposalStatus.EXECUTED,
+            )
         return CoveredCallExecutionResult(
-            proposal=executed_proposal,
+            proposal=result_proposal,
             order=order,
             run=run,
             signal=signal,
@@ -459,6 +537,7 @@ class CoveredCallStrategyService:
                     "proposal_id": proposal.id,
                     "order_id": order.id,
                     "limit_price": str(limit_price),
+                    **self._order_timing_payload(order),
                     "candidate": candidate.model_dump(mode="json"),
                 },
             )
@@ -474,7 +553,11 @@ class CoveredCallStrategyService:
                 proposal_id=proposal.id,
                 summary=f"Covered call close order submitted for {candidate.call_symbol}.",
                 source="covered_call_v1",
-                signal_payload={"order_id": order.id, "candidate": candidate.model_dump(mode="json")},
+                signal_payload={
+                    "order_id": order.id,
+                    **self._order_timing_payload(order),
+                    "candidate": candidate.model_dump(mode="json"),
+                },
             )
         )
         result_proposal = proposal
@@ -725,6 +808,10 @@ class CoveredCallStrategyService:
                     "sequence_status": sequence_status,
                     "buyback_order_id": buyback_order.id,
                     "sell_order_id": sell_order.id if sell_order is not None else None,
+                    "buyback_status": buyback_order.status.value,
+                    "sell_status": sell_order.status.value if sell_order is not None else None,
+                    **self._order_timing_payload(buyback_order, prefix="buyback_order"),
+                    **(self._order_timing_payload(sell_order, prefix="sell_order") if sell_order is not None else {}),
                     "buyback_limit_price": str(buyback_limit),
                     "sell_limit_price": str(sell_limit),
                     "roll_from": roll_from.model_dump(mode="json"),
@@ -857,6 +944,9 @@ class CoveredCallStrategyService:
                     "buyback_order_id": buyback_order.id,
                     "sell_order_id": sell_order.id if sell_order is not None else None,
                     "buyback_status": buyback_order.status.value,
+                    "sell_status": sell_order.status.value if sell_order is not None else None,
+                    **self._order_timing_payload(buyback_order, prefix="buyback_order"),
+                    **(self._order_timing_payload(sell_order, prefix="sell_order") if sell_order is not None else {}),
                     "roll_from": roll_from.model_dump(mode="json"),
                     "roll_to": roll_to.model_dump(mode="json"),
                 },
@@ -917,9 +1007,12 @@ class CoveredCallStrategyService:
             strategy_id=self.strategy_id,
             limit=limit,
         )
+        execution_runs = self._latest_runs_by_proposal(runs, {"proposal_execution", "open_lifecycle_refresh"})
         close_runs = self._latest_runs_by_proposal(runs, {"proposal_close"})
         roll_runs = self._latest_runs_by_proposal(runs, {"roll_execution", "roll_continuation"})
         result = {
+            "sell_orders_refreshed": 0,
+            "sell_orders_executed": 0,
             "close_orders_refreshed": 0,
             "closed_proposals": 0,
             "roll_buyback_orders_refreshed": 0,
@@ -927,6 +1020,44 @@ class CoveredCallStrategyService:
             "roll_sell_orders_submitted": 0,
             "rolls_executed": 0,
         }
+
+        for proposal in self.experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            status=StrategyProposalStatus.APPROVED,
+            limit=limit,
+        ):
+            if proposal.proposed_action != "sell_covered_call":
+                continue
+            execution_run = execution_runs.get(proposal.id)
+            if execution_run is None or not execution_run.order_id:
+                continue
+            candidate = self._current_short_call_candidate(proposal, proposal_id=proposal.id)
+            sell_order = self.order_service.refresh_order(execution_run.order_id)
+            self._validate_open_sell_order(
+                sell_order=sell_order,
+                proposal=proposal,
+                candidate=candidate,
+            )
+            result["sell_orders_refreshed"] += 1
+            self._record_open_lifecycle_run(
+                proposal=proposal,
+                sell_order=sell_order,
+                candidate=candidate,
+                evaluated_at=evaluated_at,
+            )
+            if self._order_filled(sell_order):
+                self.experiments.update_proposal_status(
+                    proposal.id,
+                    status=StrategyProposalStatus.EXECUTED,
+                )
+                self._record_lifecycle_signal(
+                    proposal=proposal,
+                    summary=f"Covered call sell filled for {candidate.call_symbol}.",
+                    detail=f"Sell order {sell_order.id} is filled.",
+                    emitted_at=evaluated_at,
+                )
+                result["sell_orders_executed"] += 1
 
         for proposal in self.experiments.list_proposals(
             external_account_id=external_account_id,
@@ -1109,6 +1240,9 @@ class CoveredCallStrategyService:
                         "proposal_id": proposal.id,
                         "underlying_price": str(underlying_quote.last_done),
                         "call_mark": str(call_mark) if call_mark is not None else None,
+                        "estimated_open_pnl": str(estimated_open_pnl)
+                        if estimated_open_pnl is not None
+                        else None,
                         "premium_capture_pct": str(premium_capture_pct)
                         if premium_capture_pct is not None
                         else None,
@@ -1145,6 +1279,36 @@ class CoveredCallStrategyService:
             return roll_to
         raise ValueError(f"Strategy proposal '{proposal_id}' is not an open covered call proposal.")
 
+    def _find_active_open_proposal(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        symbol: str | None,
+    ):
+        if symbol is None:
+            return None
+        active_statuses = {
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
+        }
+        proposals = self.experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            limit=100,
+        )
+        for proposal in proposals:
+            if proposal.mode != mode:
+                continue
+            if proposal.status not in active_statuses:
+                continue
+            if proposal.proposed_action not in self.open_proposal_actions:
+                continue
+            if proposal.symbol == symbol:
+                return proposal
+        return None
+
     def _mark_roll_source_rolled(self, proposal) -> None:
         if proposal.candidate_payload is None:
             return
@@ -1179,6 +1343,50 @@ class CoveredCallStrategyService:
                 detail=detail,
                 source="covered_call_v1",
                 emitted_at=emitted_at,
+            )
+        )
+
+    @staticmethod
+    def _order_timing_payload(order: Order, *, prefix: str = "order") -> dict[str, str | None]:
+        return {
+            f"{prefix}_submitted_at": order.submitted_at.isoformat() if order.submitted_at else None,
+            f"{prefix}_updated_at": order.updated_at.isoformat() if order.updated_at else None,
+        }
+
+    def _record_open_lifecycle_run(
+        self,
+        *,
+        proposal,
+        sell_order: Order,
+        candidate: CoveredCallCandidate,
+        evaluated_at: datetime,
+    ) -> None:
+        sequence_status = "sell_filled" if self._order_filled(sell_order) else "sell_submitted_waiting_fill"
+        reason = None if self._order_filled(sell_order) else (
+            "Sell-to-open order is working; proposal stays approved until the short call is filled."
+        )
+        self.experiments.create_run(
+            CreateStrategyRunRequest(
+                strategy_id=self.strategy_id,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                run_type="open_lifecycle_refresh",
+                status=StrategyRunStatus.EXECUTED,
+                symbol=proposal.symbol,
+                proposal_id=proposal.id,
+                order_id=sell_order.id,
+                started_at=evaluated_at,
+                completed_at=evaluated_at,
+                summary=f"Refreshed covered call sell order for {candidate.call_symbol}.",
+                reason=reason,
+                metrics_payload={
+                    "proposal_id": proposal.id,
+                    "order_id": sell_order.id,
+                    "sequence_status": sequence_status,
+                    "sell_status": sell_order.status.value,
+                    **self._order_timing_payload(sell_order),
+                    "candidate": candidate.model_dump(mode="json"),
+                },
             )
         )
 
@@ -1220,6 +1428,8 @@ class CoveredCallStrategyService:
                     "sell_order_id": sell_order.id,
                     "buyback_status": buyback_order.status.value,
                     "sell_status": sell_order.status.value,
+                    **self._order_timing_payload(buyback_order, prefix="buyback_order"),
+                    **self._order_timing_payload(sell_order, prefix="sell_order"),
                     "sell_limit_price": str(sell_limit),
                     "roll_from": roll_from.model_dump(mode="json"),
                     "roll_to": roll_to.model_dump(mode="json"),
@@ -1699,6 +1909,22 @@ class CoveredCallStrategyService:
             raise ValueError("Roll sell order does not match the new short call symbol.")
         if sell_order.side != OrderSide.SELL:
             raise ValueError("Roll sell order must be a sell-to-open order.")
+
+    def _validate_open_sell_order(
+        self,
+        *,
+        sell_order: Order,
+        proposal,
+        candidate: CoveredCallCandidate,
+    ) -> None:
+        if sell_order.external_account_id != proposal.external_account_id:
+            raise ValueError("Covered call sell order belongs to a different account.")
+        if sell_order.mode != proposal.mode:
+            raise ValueError("Covered call sell order mode does not match the proposal.")
+        if sell_order.symbol != candidate.call_symbol:
+            raise ValueError("Covered call sell order does not match the proposed short call symbol.")
+        if sell_order.side != OrderSide.SELL:
+            raise ValueError("Covered call sell order must be a sell-to-open order.")
 
     def _validate_close_order(
         self,

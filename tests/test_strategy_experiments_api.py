@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 
@@ -14,8 +14,10 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
+    CoveredCallMonitorSnapshot,
     StrategyExperimentSnapshot,
     StrategyProposal,
     StrategyReview,
@@ -95,7 +97,14 @@ def build_run() -> StrategyRun:
     )
 
 
-def build_covered_call_run(run_type: str = "proposal_close") -> StrategyRun:
+def build_covered_call_run(
+    run_type: str = "proposal_close",
+    *,
+    proposal_id: str | None = None,
+    order_id: str | None = None,
+    metrics_payload: dict | None = None,
+    created_at: datetime = NOW,
+) -> StrategyRun:
     return StrategyRun(
         id=f"run-{run_type}",
         strategy_id="covered_call_v1",
@@ -104,11 +113,14 @@ def build_covered_call_run(run_type: str = "proposal_close") -> StrategyRun:
         run_type=run_type,
         status=StrategyRunStatus.EXECUTED,
         symbol="UNH.US",
+        proposal_id=proposal_id,
+        order_id=order_id,
         summary="Covered-call action recorded.",
-        started_at=NOW,
-        completed_at=NOW,
-        created_at=NOW,
-        updated_at=NOW,
+        metrics_payload=metrics_payload,
+        started_at=created_at,
+        completed_at=created_at,
+        created_at=created_at,
+        updated_at=created_at,
     )
 
 
@@ -124,6 +136,30 @@ def build_signal() -> StrategySignal:
         summary="Candidate survived liquidity filters.",
         emitted_at=NOW,
         created_at=NOW,
+    )
+
+
+def build_covered_call_monitor_signal() -> StrategySignal:
+    return StrategySignal(
+        id="signal-monitor-1",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        signal_type=StrategySignalType.MONITOR,
+        symbol="UNH.US",
+        proposal_id="proposal-open-1",
+        summary="Covered call monitor action: hold.",
+        detail="No trigger is active.",
+        signal_payload={
+            "action": "hold",
+            "underlying_price": "100.25",
+            "call_mark": "0.55",
+            "estimated_open_pnl": "65.00",
+            "premium_capture_pct": "54.17",
+            "days_to_expiration": 28,
+        },
+        emitted_at=NOW + timedelta(minutes=30),
+        created_at=NOW + timedelta(minutes=30),
     )
 
 
@@ -188,6 +224,34 @@ def test_covered_call_activity_route_returns_dedicated_snapshot() -> None:
             close_runs=1,
             latest_activity_at=NOW,
         ),
+        latest_monitor=CoveredCallMonitorSnapshot(
+            proposal_id="proposal-cc-1",
+            symbol="UNH.US",
+            action="hold",
+            detail="No trigger is active.",
+            underlying_price=Decimal("100"),
+            call_mark=Decimal("0.55"),
+            estimated_open_pnl=Decimal("65.00"),
+            premium_capture_pct=Decimal("54.17"),
+            days_to_expiration=28,
+            emitted_at=NOW,
+            signal_id="signal-monitor-1",
+        ),
+        lifecycle_tasks=[
+            CoveredCallLifecycleTask(
+                proposal_id="proposal-cc-1",
+                proposal_title="Sell covered call on UNH.US",
+                symbol="UNH.US",
+                task_type="close",
+                proposal_status=StrategyProposalStatus.EXECUTED,
+                last_run_id="run-proposal_close",
+                last_run_type="proposal_close",
+                close_order_id="close-order-1",
+                close_status="submitted",
+                last_refresh_status="submitted",
+                last_refresh_at=NOW,
+            )
+        ],
         proposals=[
             build_covered_call_proposal(status=StrategyProposalStatus.EXECUTED),
             build_covered_call_proposal(
@@ -212,6 +276,10 @@ def test_covered_call_activity_route_returns_dedicated_snapshot() -> None:
     body = response.json()
     assert body["summary"]["executed_positions"] == 1
     assert body["summary"]["pending_rolls"] == 1
+    assert body["latest_monitor"]["action"] == "hold"
+    assert body["latest_monitor"]["estimated_open_pnl"] == "65.00"
+    assert body["lifecycle_tasks"][0]["task_type"] == "close"
+    assert body["lifecycle_tasks"][0]["close_order_id"] == "close-order-1"
     assert body["proposals"][1]["proposed_action"] == "roll_covered_call"
     service.get_covered_call_activity.assert_called_once_with(
         external_account_id="LBPT10087357",
@@ -269,6 +337,97 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
         status=None,
         limit=8,
     )
+
+
+def test_strategy_experiment_service_lists_covered_call_lifecycle_tasks() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.list_proposals.return_value = [
+        build_covered_call_proposal(
+            proposal_id="proposal-open-1",
+            status=StrategyProposalStatus.APPROVED,
+        ),
+        build_covered_call_proposal(
+            proposal_id="proposal-close-1",
+            status=StrategyProposalStatus.EXECUTED,
+        ),
+        build_covered_call_proposal(
+            proposal_id="proposal-roll-1",
+            action="roll_covered_call",
+            status=StrategyProposalStatus.APPROVED,
+        ),
+    ]
+    experiments.list_runs.return_value = [
+        build_covered_call_run(
+            "proposal_execution",
+            proposal_id="proposal-open-1",
+            order_id="sell-order-1",
+            metrics_payload={
+                "order_id": "sell-order-1",
+                "sequence_status": "sell_submitted_waiting_fill",
+                "sell_status": "submitted",
+                "order_submitted_at": NOW.isoformat(),
+            },
+            created_at=NOW + timedelta(minutes=20),
+        ),
+        build_covered_call_run(
+            "roll_continuation",
+            proposal_id="proposal-roll-1",
+            order_id="roll-open-order-1",
+            metrics_payload={
+                "sequence_status": "roll_sell_submitted_waiting_fill",
+                "buyback_order_id": "buyback-order-1",
+                "sell_order_id": "roll-open-order-1",
+                "buyback_status": "filled",
+                "sell_status": "submitted",
+            },
+            created_at=NOW + timedelta(minutes=5),
+        ),
+        build_covered_call_run(
+            "proposal_close",
+            proposal_id="proposal-close-1",
+            order_id="close-order-1",
+            metrics_payload={
+                "order_id": "close-order-1",
+                "close_status": "submitted",
+            },
+            created_at=NOW,
+        ),
+    ]
+    experiments.list_signals.return_value = [build_covered_call_monitor_signal()]
+    experiments.list_reviews.return_value = []
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+    )
+
+    activity = service.get_covered_call_activity(
+        external_account_id="LBPT10087357",
+        limit=8,
+    )
+
+    assert len(activity.lifecycle_tasks) == 3
+    open_task = activity.lifecycle_tasks[0]
+    roll_task = activity.lifecycle_tasks[1]
+    close_task = activity.lifecycle_tasks[2]
+    assert open_task.task_type == "open"
+    assert open_task.open_order_id == "sell-order-1"
+    assert open_task.last_refresh_status == "sell_submitted_waiting_fill"
+    assert open_task.order_age_seconds == 1200
+    assert open_task.is_stale is True
+    assert "cancel/re-enter" in open_task.suggested_action
+    assert roll_task.task_type == "roll"
+    assert roll_task.roll_buyback_order_id == "buyback-order-1"
+    assert roll_task.roll_sell_order_id == "roll-open-order-1"
+    assert roll_task.last_refresh_status == "roll_sell_submitted_waiting_fill"
+    assert close_task.task_type == "close"
+    assert close_task.close_order_id == "close-order-1"
+    assert close_task.last_refresh_status == "submitted"
+    assert activity.latest_monitor is not None
+    assert activity.latest_monitor.action == "hold"
+    assert activity.latest_monitor.call_mark == Decimal("0.55")
+    assert activity.latest_monitor.estimated_open_pnl == Decimal("65.00")
 
 
 def test_create_strategy_proposal_route_returns_created_proposal() -> None:

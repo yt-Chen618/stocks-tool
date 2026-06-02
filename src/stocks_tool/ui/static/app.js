@@ -3,10 +3,33 @@ const DEFAULT_LANGUAGE = "zh";
 const BROKER_REQUEST_TIMEOUT_MS = 25000;
 const PRE_OPEN_BOARD_TIMEOUT_MS = 35000;
 const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
+const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const TEXT_NODE_ORIGINALS = new WeakMap();
 const ATTRIBUTE_ORIGINALS = new WeakMap();
 const TRANSLATIONS = {
   zh: {
+    "No covered-call activity yet.": "暂无备兑看涨活动。",
+    "Open CC": "持仓备兑",
+    "Open covered-call proposals": "已成交备兑看涨提案",
+    "Lifecycle": "生命周期",
+    "Pending close / roll order tasks": "待处理平仓 / 移仓订单任务",
+    "Pending Lifecycle": "待处理生命周期",
+    "No pending close or roll lifecycle tasks.": "暂无待处理平仓或移仓生命周期任务。",
+    "No covered-call proposals recorded.": "暂无备兑看涨提案记录。",
+    "Refresh Lifecycle": "刷新生命周期",
+    "Lifecycle ready": "生命周期就绪",
+    "Covered-call lifecycle refresh failed.": "备兑看涨生命周期刷新失败。",
+    "Age": "挂单时长",
+    "Suggested": "建议",
+    "Stale working order": "疑似卡住的工作订单",
+    "Working order": "工作订单",
+    "Latest Monitor": "最新监控",
+    "No covered-call monitor snapshot yet.": "暂无备兑看涨监控快照。",
+    "Underlying": "标的",
+    "Call Mark": "Call 估值",
+    "Open P/L": "开仓盈亏",
+    "Premium Capture": "权利金捕获",
+    "DTE": "到期天数",
     "Paper Trading Desk": "纸账户交易台",
     "Stocks Tool Workbench": "Stocks Tool 工作台",
     "Paper": "纸交易",
@@ -690,6 +713,27 @@ function wireEvents() {
     });
   }
 
+  if (els.coveredCallActivityCard) {
+    els.coveredCallActivityCard.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-covered-call-action]");
+      if (!button) {
+        return;
+      }
+
+      const action = button.dataset.coveredCallAction;
+      if (action !== "reconcile-lifecycle") {
+        return;
+      }
+
+      button.disabled = true;
+      try {
+        await reconcileCoveredCallLifecycle();
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
   els.selectedOrderCard.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-selected-action]");
     if (!button) {
@@ -872,6 +916,8 @@ function translateText(text, dictionary) {
   }
 
   const dynamicRules = [
+    [/^Refreshing covered-call lifecycle for (.+)\.\.\.$/, "正在刷新 $1 的备兑看涨生命周期..."],
+    [/^Covered-call lifecycle refreshed: (.+)\.$/, "备兑看涨生命周期已刷新：$1。"],
     [/^Refreshing ([A-Z0-9.]+) quote\.\.\.$/, "正在刷新 $1 行情..."],
     [/^Quote refreshed successfully\.$/, "行情刷新成功。"],
     [/^Quote refreshed (.+)\.$/, "行情已于 $1 刷新。"],
@@ -1367,6 +1413,29 @@ async function runStrategyReview() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
+  }
+}
+
+async function reconcileCoveredCallLifecycle() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account first.", "warning");
+    return;
+  }
+
+  setStatus(`Refreshing covered-call lifecycle for ${state.selectedAccountId}...`, "warning");
+  try {
+    const result = await fetchJson(
+      `/strategies/covered-call/lifecycle/${encodeURIComponent(state.selectedAccountId)}/reconcile?limit=20`,
+      {
+        method: "POST",
+        timeoutMs: COVERED_CALL_LIFECYCLE_TIMEOUT_MS,
+      }
+    );
+    await loadAccountData();
+    setStatus(`Covered-call lifecycle refreshed: ${formatCoveredCallLifecycleResult(result)}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Covered-call lifecycle refresh failed.", "error");
   }
 }
 
@@ -2128,13 +2197,15 @@ function renderCoveredCallActivity() {
   if (!els.coveredCallActivityCard) {
     return;
   }
-  const activity = state.coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+  const activity = state.coveredCallActivity || { summary: {}, lifecycle_tasks: [], latest_monitor: null, proposals: [], runs: [], signals: [], reviews: [] };
   const summary = objectPayload(activity.summary);
+  const lifecycleTasks = Array.isArray(activity.lifecycle_tasks) ? activity.lifecycle_tasks : [];
+  const latestMonitor = activity.latest_monitor ? objectPayload(activity.latest_monitor) : null;
   const proposals = Array.isArray(activity.proposals) ? activity.proposals : [];
   const runs = Array.isArray(activity.runs) ? activity.runs : [];
   const signals = Array.isArray(activity.signals) ? activity.signals : [];
   const reviews = Array.isArray(activity.reviews) ? activity.reviews : [];
-  if (!proposals.length && !runs.length && !signals.length && !reviews.length) {
+  if (!lifecycleTasks.length && !proposals.length && !runs.length && !signals.length && !reviews.length) {
     els.coveredCallActivityCard.className = "strategy-note-body empty";
     els.coveredCallActivityCard.textContent = "No covered-call activity yet.";
     return;
@@ -2146,8 +2217,24 @@ function renderCoveredCallActivity() {
     ["Active", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s) tracked`],
     ["Open CC", formatActivityCount(summary.executed_positions), "Open covered-call proposals"],
     ["Rolls", formatActivityCount(summary.pending_rolls), "Pending or approved roll proposals"],
+    ["Lifecycle", formatActivityCount(lifecycleTasks.length), "Pending close / roll order tasks"],
     ["Closes", formatActivityCount(summary.close_runs), `Latest ${formatDateTime(summary.latest_activity_at)}`],
   ];
+  const lifecycleMarkup = `
+    <article class="strategy-journal-entry lifecycle-task-shell">
+      <div class="strategy-journal-head">
+        <strong>Pending Lifecycle</strong>
+        <span>${escapeHtml(`${lifecycleTasks.length} task${lifecycleTasks.length === 1 ? "" : "s"}`)}</span>
+      </div>
+      ${
+        lifecycleTasks.length
+          ? `<div class="lifecycle-task-list">
+              ${lifecycleTasks.slice(0, 4).map(renderCoveredCallLifecycleTask).join("")}
+            </div>`
+          : "<p>No pending close or roll lifecycle tasks.</p>"
+      }
+    </article>
+  `;
   const proposalMarkup = proposals.length
     ? proposals
         .slice(0, 3)
@@ -2178,11 +2265,78 @@ function renderCoveredCallActivity() {
 
   els.coveredCallActivityCard.className = "strategy-note-body";
   els.coveredCallActivityCard.innerHTML = `
+    <div class="covered-call-activity-toolbar">
+      <span>${escapeHtml(summary.latest_activity_at ? `Latest ${formatDateTime(summary.latest_activity_at)}` : "Lifecycle ready")}</span>
+      <button class="table-action primary" type="button" data-covered-call-action="reconcile-lifecycle">
+        Refresh Lifecycle
+      </button>
+    </div>
     <div class="proposal-detail-grid">
       ${summaryItems.map(renderStrategyProposalDetail).join("")}
     </div>
+    ${latestMonitor ? renderCoveredCallLatestMonitor(latestMonitor) : ""}
+    ${lifecycleMarkup}
     ${proposalMarkup}
     ${latestActivityMarkup}
+  `;
+}
+
+function renderCoveredCallLatestMonitor(monitor) {
+  const detailItems = [
+    ["Underlying", formatNumber(monitor.underlying_price), monitor.symbol || "--"],
+    ["Call Mark", formatCurrency(monitor.call_mark, "USD"), `DTE ${monitor.days_to_expiration ?? "--"}`],
+    ["Open P/L", formatSignedCurrency(monitor.estimated_open_pnl, "USD"), "Against original premium"],
+    ["Premium Capture", formatSignedPercentValue(monitor.premium_capture_pct), `Updated ${formatDateTime(monitor.emitted_at)}`],
+  ];
+  return `
+    <article class="strategy-journal-entry covered-call-monitor-shell">
+      <div class="strategy-journal-head">
+        <strong>Latest Monitor</strong>
+        <span class="pill ${strategyStatusClass(monitor.action)}">${escapeHtml(formatStrategyStatusLabel(monitor.action || "--"))}</span>
+      </div>
+      <div class="proposal-detail-grid">
+        ${detailItems.map(renderStrategyProposalDetail).join("")}
+      </div>
+      <p>${escapeHtml(monitor.detail || "No covered-call monitor snapshot yet.")}</p>
+    </article>
+  `;
+}
+
+function renderCoveredCallLifecycleTask(task) {
+  const orderParts = [
+    task.open_order_id ? `Open ${task.open_order_id}` : "",
+    task.close_order_id ? `Close ${task.close_order_id}` : "",
+    task.roll_buyback_order_id ? `Buyback ${task.roll_buyback_order_id}` : "",
+    task.roll_sell_order_id ? `Sell ${task.roll_sell_order_id}` : "",
+  ].filter(Boolean);
+  const statusParts = [
+    task.sequence_status ? `Sequence ${formatStrategyStatusLabel(task.sequence_status)}` : "",
+    task.open_status ? `Open ${formatStrategyStatusLabel(task.open_status)}` : "",
+    task.close_status ? `Close ${formatStrategyStatusLabel(task.close_status)}` : "",
+    task.buyback_status ? `Buyback ${formatStrategyStatusLabel(task.buyback_status)}` : "",
+    task.sell_status ? `Sell ${formatStrategyStatusLabel(task.sell_status)}` : "",
+  ].filter(Boolean);
+  const ageText = formatOrderAge(task.order_age_seconds);
+  const diagnosticText = formatCoveredCallTaskDiagnostic(task);
+  const suggestedAction = formatCoveredCallSuggestedAction(task);
+  const pillClass = task.is_stale ? "warning" : strategyStatusClass(task.proposal_status);
+  return `
+    <div class="lifecycle-task-item ${task.is_stale ? "is-stale" : ""}">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml([formatStrategyStatusLabel(task.task_type), task.symbol].filter(Boolean).join(" / "))}</strong>
+        <span class="pill ${pillClass}">${escapeHtml(formatStrategyStatusLabel(task.last_refresh_status || task.proposal_status))}</span>
+      </div>
+      <p>${escapeHtml(task.proposal_title || task.proposal_id)}</p>
+      <div class="lifecycle-task-grid">
+        ${renderStrategyProposalDetail(["Proposal", task.proposal_id || "--", formatStrategyStatusLabel(task.proposal_status)])}
+        ${renderStrategyProposalDetail(["Orders", orderParts.join(" / ") || "--", task.last_run_type || "--"])}
+        ${renderStrategyProposalDetail(["Status", statusParts.join(" / ") || formatStrategyStatusLabel(task.last_refresh_status || "--"), `Last ${formatDateTime(task.last_refresh_at)}`])}
+        ${renderStrategyProposalDetail(["Age", ageText || "--", task.is_stale ? "Stale working order" : "Working order"])}
+        ${suggestedAction ? renderStrategyProposalDetail(["Suggested", suggestedAction, ""]) : ""}
+      </div>
+      ${diagnosticText ? `<p class="lifecycle-task-diagnostic">${escapeHtml(diagnosticText)}</p>` : ""}
+      ${task.reason ? `<p>${escapeHtml(task.reason)}</p>` : ""}
+    </div>
   `;
 }
 
@@ -4451,6 +4605,56 @@ function formatStrategyProposalActionResult(action, result) {
     return `Covered call close order submitted: ${result?.order?.id || "created"}.`;
   }
   return "Strategy proposal action completed.";
+}
+
+function formatCoveredCallLifecycleResult(result) {
+  const payload = objectPayload(result);
+  const openRefreshed = Number(payload.sell_orders_refreshed || 0);
+  const closeRefreshed = Number(payload.close_orders_refreshed || 0);
+  const rollRefreshed = Number(payload.roll_buyback_orders_refreshed || 0) + Number(payload.roll_sell_orders_refreshed || 0);
+  const advanced =
+    Number(payload.sell_orders_executed || 0) +
+    Number(payload.closed_proposals || 0) +
+    Number(payload.roll_sell_orders_submitted || 0) +
+    Number(payload.rolls_executed || 0);
+  if (state.language === "zh") {
+    return `${openRefreshed} 个开仓刷新，${closeRefreshed} 个平仓刷新，${rollRefreshed} 个移仓刷新；${advanced} 个推进`;
+  }
+  return `${openRefreshed} open, ${closeRefreshed} close, ${rollRefreshed} roll refreshed; ${advanced} advanced`;
+}
+
+function formatOrderAge(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) {
+    return "";
+  }
+  const total = Math.max(0, Number(seconds));
+  if (total < 60) {
+    return `${Math.round(total)}s`;
+  }
+  const minutes = Math.floor(total / 60);
+  const remainder = Math.round(total % 60);
+  return remainder ? `${minutes}m ${remainder}s` : `${minutes}m`;
+}
+
+function formatCoveredCallTaskDiagnostic(task) {
+  const age = formatOrderAge(task.order_age_seconds);
+  if (!age) {
+    return task.diagnostic || "";
+  }
+  if (state.language === "zh") {
+    return task.is_stale ? `订单已挂 ${age} 仍未成交，疑似纸账户撮合或回报卡住。` : `订单已挂 ${age}。`;
+  }
+  return task.is_stale ? `Order has been working for ${age} without a fill.` : `Order has been working for ${age}.`;
+}
+
+function formatCoveredCallSuggestedAction(task) {
+  if (!task.is_stale) {
+    return "";
+  }
+  if (state.language === "zh") {
+    return "先刷新行情和订单；若仍可成交但不撮合，再明确批准后撤单重挂或改单。";
+  }
+  return task.suggested_action || "Refresh quote and order detail before any replace or cancel action.";
 }
 
 function formatSyncHeadline(lastSyncedAt, lastAttemptAt) {

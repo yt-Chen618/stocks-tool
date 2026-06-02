@@ -533,6 +533,20 @@ a {
   color: var(--text-soft);
 }
 
+.covered-call-activity-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.covered-call-activity-toolbar span {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .overlay-status-row {
   display: flex;
   align-items: flex-start;
@@ -638,6 +652,44 @@ a {
   color: var(--text);
   font-size: 13px;
   font-weight: 700;
+}
+
+.lifecycle-task-shell {
+  gap: 10px;
+}
+
+.covered-call-monitor-shell {
+  gap: 10px;
+}
+
+.lifecycle-task-list {
+  display: grid;
+  gap: 10px;
+}
+
+.lifecycle-task-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.lifecycle-task-item.is-stale {
+  border-color: rgba(148, 89, 16, 0.24);
+  background: rgba(255, 248, 229, 0.78);
+}
+
+.lifecycle-task-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lifecycle-task-diagnostic {
+  color: var(--warn-text);
+  font-weight: 650;
 }
 
 .proposal-chain-line {
@@ -1311,6 +1363,7 @@ a {
   .selected-order-meta,
   .execution-grid,
   .holding-stats,
+  .lifecycle-task-grid,
   .proposal-detail-grid {
     grid-template-columns: 1fr;
   }

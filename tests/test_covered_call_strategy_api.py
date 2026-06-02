@@ -510,3 +510,35 @@ def test_covered_call_close_route_submits_buyback_order() -> None:
     assert body["order"]["limit_price"] == "0.55"
     request = service.close_proposal.call_args.args[1]
     assert request.limit_price == Decimal("0.55")
+
+
+def test_covered_call_lifecycle_reconcile_route_returns_counts() -> None:
+    service = Mock()
+    service.reconcile_pending_lifecycle.return_value = {
+        "close_orders_refreshed": 0,
+        "closed_proposals": 0,
+        "sell_orders_refreshed": 1,
+        "sell_orders_executed": 0,
+        "roll_buyback_orders_refreshed": 0,
+        "roll_sell_orders_submitted": 0,
+        "roll_sell_orders_refreshed": 0,
+        "rolls_executed": 0,
+    }
+
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/lifecycle/LBPT10087357/reconcile",
+            params={"limit": "20"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sell_orders_refreshed"] == 1
+    assert body["sell_orders_executed"] == 0
+    service.reconcile_pending_lifecycle.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        limit=20,
+    )

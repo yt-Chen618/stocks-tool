@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-06-01
+Last updated: 2026-06-02
 
 ## Project
 
@@ -77,6 +77,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /strategies/experiment`
 - `GET /strategies/covered-call/preview`
 - `GET /strategies/covered-call/activity`
+- `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
 - `POST /strategies/covered-call/propose`
 - `POST /strategies/covered-call/proposals/{proposal_id}/execute`
 - `POST /strategies/covered-call/proposals/{proposal_id}/monitor`
@@ -160,8 +161,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - loads Longbridge quote, option expiries, option chain, and call market snapshots
   - selects a liquid out-of-the-money call using configured DTE, delta, OI, volume, bid, and bid/ask spread filters
   - computes premium income, assignment profit, zero-price max-loss framing, break-even, uncovered shares, and warning state
-  - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger
-  - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission
+  - `propose` writes a strategy run, signal, and pending strategy proposal into the shared experiment ledger, and skips creating duplicate active sell proposals for the same symbol
+  - `execute` submits a paper sell-call limit order only for an approved `covered_call_v1` proposal and rechecks the latest local share coverage before order submission; working sell orders keep the proposal `approved` until the order fills
   - `monitor` reloads the underlying and short-call quote for executed sell or roll proposals, estimates buyback debit / open PnL / premium capture, and returns hold / take-profit / assignment-pressure / expiration-week guidance
   - `roll-propose` creates a manual-approval strategy proposal that combines the current buyback estimate with a later OTM covered-call candidate
   - `roll-execute` executes an approved roll proposal by submitting the buy-to-close leg first, then submitting the sell-to-open leg only if the buyback order is already filled
@@ -169,8 +170,11 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - `close` submits a paper buy-to-close limit order for an executed sell or roll proposal and marks the proposal `closed` only when the close order is filled
   - completed roll executions mark the source proposal `rolled` only after the new short call fill is confirmed, while the newly opened roll proposal remains `executed` and monitorable
   - `roll-continue` can refresh an existing roll sell order id so a pending roll-open order is not duplicated while waiting for fill
-  - optional lifecycle reconciliation can refresh pending close orders, pending roll buyback orders, and pending roll sell orders in the background; when a roll buyback fills and no roll sell order exists yet, it can submit the approved roll sell-to-open leg and store the new order id in a lifecycle run
-  - `activity` aggregates covered-call proposal/run/signal/review history into a dedicated dashboard snapshot with active proposal, open covered-call, pending roll, close-run, and latest-activity counts
+  - optional lifecycle reconciliation can refresh pending initial sell orders, pending close orders, pending roll buyback orders, and pending roll sell orders in the background; when an initial sell fills it marks the proposal `executed`, and when a roll buyback fills with no sell order yet it can submit the approved roll sell-to-open leg and store the new order id in a lifecycle run
+  - `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile` exposes the same pending lifecycle refresh path for manual use against an existing account without approving proposals or creating new initial sell proposals
+  - `activity` aggregates covered-call proposal/run/signal/review history into a dedicated dashboard snapshot with active proposal, open covered-call, pending roll, close-run, pending lifecycle task, and latest-activity counts
+  - dashboard covered-call activity includes a manual lifecycle refresh button backed by `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
+  - covered-call activity also exposes `latest_monitor`, parsed from the latest monitor signal, so the dashboard can show monitor action, call mark, estimated open P/L, premium capture, DTE, and monitor timestamp without re-querying Longbridge
   - optional scheduler flags can scan for covered-call proposals, reconcile pending lifecycle orders, and monitor executed covered-call sell or roll proposals in the background, but they default to disabled and do not approve new proposals automatically
 
 ### Market event calendar
@@ -362,7 +366,7 @@ Current dashboard capabilities:
 - View holdings overview and current holdings cards
 - View bull put runtime status, controls, last skip reason, latest review, and recent strategy notes
 - View strategy experiment proposals, runs, signals, and reviews for the selected account
-- View dedicated covered-call activity/history with proposal counts, open covered-call count, pending roll count, close-run count, and latest proposal/run detail
+- View dedicated covered-call activity/history with proposal counts, open covered-call count, pending roll count, close-run count, pending close / roll lifecycle tasks, and latest proposal/run detail
 - Approve / reject strategy proposals and run covered-call proposal actions from the strategy experiment bench, with compact covered-call payload details, optional limit-price overrides, and roll-chain references
 - View upcoming market events used by strategy proposal risk warnings
 - View bull put spread summary cards, latest exit action, and last monitor timestamp
@@ -437,6 +441,9 @@ Frontend files:
 - Added dashboard strategy proposal controls for approval / rejection plus covered-call execute, monitor, close, roll-propose, roll-execute, and roll-continue actions.
 - Added richer covered-call proposal cards in the strategy experiment bench, including key candidate/risk payload fields, roll-from / roll-to summaries, roll-chain references, and optional limit-price prompts before covered-call execute / close / roll actions.
 - Added `GET /strategies/covered-call/activity` plus a dedicated dashboard covered-call activity/history card backed by the strategy experiment ledger.
+- Added covered-call pending lifecycle task visibility to the activity API and dashboard, including close order id, roll buyback order id, roll sell order id, sequence/status fields, and last refresh time sourced from strategy runs.
+- Added a duplicate guard for covered-call proposal scans so repeated `propose` calls return the existing active proposal and record a skipped run/signal instead of creating a second active sell proposal for the same symbol.
+- Added pending initial sell-order lifecycle handling for covered calls, so a submitted but unfilled sell-to-open order stays visible as an `open` lifecycle task and does not make the proposal monitorable until it fills.
 - Added `scripts/import_market_events.py` for CSV-based local event calendar imports.
 - Expanded the pre-open board with action guidance, gap-chase risk, opening checkpoints, and richer `QQQ / SPY` put liquidity metrics.
 - Expanded the pre-open board again with a deeper option-chain analysis layer covering front / next expiry ATM IV, put-skew, term-slope, spread-bucket summaries, and most-liquid strikes for `QQQ / SPY`.
@@ -549,6 +556,21 @@ Frontend files:
   - runtime responses now report whether an open spread is being monitored, whether the daily entry cap is reached, and what next strategy action is expected
   - latest monitor snapshots are persisted in spread `raw_payload.monitor` and rendered in the dashboard monitor table
   - Longbridge SDK timestamps are normalized from broker wall-clock time into UTC before local persistence
+- Latest covered-call paper proposal validation on `2026-06-02` after account sync:
+  - synced paper account `LBPT10087357` successfully at `2026-06-02T13:37:27Z`
+  - 100-share covered lots present for `CRCL.US`, `DRAM.US`, `EWY.US`, `PLTR.US`, `QQQ.US`, and `TSLA.US`; `UNH.US` still has only `10` shares
+  - previews found eligible covered-call candidates for `QQQ.US`, `TSLA.US`, and `PLTR.US`
+  - auto-symbol `POST /strategies/covered-call/propose` selected `QQQ.US` and created pending proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7` for `QQQ260626C764000.US`
+  - a repeated `propose` call returned the same proposal and recorded a skipped duplicate run; activity stayed at `total_proposals=1`
+  - the proposal was approved at `2026-06-02T13:50:01Z`
+  - paper execution submitted sell order `14c4fb5f-06b3-48fd-8ac3-150ab35cdb1b` / external order `1246461314306408448` for `1` `QQQ260626C764000.US` at limit `6.78`
+  - Longbridge order refresh showed remote status `NEW`, mapped locally to `submitted`, with `0` filled quantity; local proposal state was corrected back to `approved` and the order appears as an `open` lifecycle task until fill
+  - manual `POST /strategies/covered-call/lifecycle/LBPT10087357/reconcile?limit=20` succeeded at `2026-06-02T14:21:07Z`, refreshed `1` pending sell order, executed `0`, and recorded an `open_lifecycle_refresh` run with `sequence_status=sell_submitted_waiting_fill`
+  - direct order refresh at `2026-06-02T14:24:30Z` still showed remote status `NEW`, local `submitted`, executed quantity `0`, and limit `6.78`
+  - a later manual lifecycle reconcile at `2026-06-02T14:37:04Z` refreshed the same pending sell order, saw it filled, marked proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7` `executed`, and cleared the pending `open` lifecycle task
+  - local order list now shows order `14c4fb5f-06b3-48fd-8ac3-150ab35cdb1b` as `filled`; Longbridge remote status is `FILLED`, executed quantity `1`, executed price `6.7800`, remote updated time `2026-06-02T14:28:54Z`
+  - first post-fill `POST /strategies/covered-call/proposals/35f8f82e-f877-4cd2-8cc4-0faeb80d58a7/monitor?record_signal=true` at `2026-06-02T14:37:48Z` returned `hold`, with underlying `743.680`, call mark `7.66`, estimated open P/L `-88.00`, premium capture `-12.98%`, and no take-profit / assignment-pressure / expiration-week trigger
+  - latest post-fill monitor at `2026-06-02T14:47:55Z` returned `hold`, with underlying `743.761`, call mark `7.67`, estimated open P/L `-89.00`, premium capture `-13.13%`, and no take-profit / assignment-pressure / expiration-week trigger; `GET /strategies/covered-call/activity` now returns this as `latest_monitor`
 
 ## Known cleanup items
 
@@ -559,6 +581,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Exercise the opt-in covered-call scheduler with a paper account holding at least 100 covered shares, then verify it creates one candidate and monitors the resulting open proposal without duplicates.
-2. Add dashboard visibility for pending covered-call lifecycle tasks, including close order id, roll buyback order id, roll sell order id, and last refresh status.
+1. Continue monitoring executed covered-call proposal `35f8f82e-f877-4cd2-8cc4-0faeb80d58a7`; the latest post-fill monitor action was `hold`.
+2. Use the covered-call activity lifecycle view for future close / roll tasks; stale working orders now include age, stale flag, diagnostic text, and suggested manual intervention before any cancel / replace action.
 3. Add runtime controls, audit logs, and strategy activity views to any future authenticated user/session layer.
