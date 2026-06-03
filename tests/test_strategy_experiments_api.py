@@ -11,18 +11,21 @@ from stocks_tool.application.services.strategy_experiments import StrategyExperi
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     ExecutionMode,
+    StrategyAdvisorRunStatus,
     StrategyProposalStatus,
     StrategyReviewStatus,
     StrategyRunStatus,
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    CreateStrategyAdvisorRunRequest,
     CreateStrategyProposalRequest,
     CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
     CoveredCallMonitorSnapshot,
     StrategyAdvisorContext,
+    StrategyAdvisorRun,
     StrategyExperimentSnapshot,
     StrategyAutomationControl,
     StrategyControlSnapshot,
@@ -182,6 +185,34 @@ def build_review() -> StrategyReview:
         summary="Monitor one existing open spread.",
         recommendation="Do not add another correlated spread while QQQ is open.",
         reviewed_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def build_advisor_run(status: StrategyAdvisorRunStatus = StrategyAdvisorRunStatus.SUCCEEDED) -> StrategyAdvisorRun:
+    return StrategyAdvisorRun(
+        id="advisor-run-1",
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        mode=ExecutionMode.PAPER,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        status=status,
+        context_format="compact_v1",
+        context_limit=6,
+        prompt_tokens=100,
+        completion_tokens=20,
+        total_tokens=120,
+        cache_hit_tokens=40,
+        cache_miss_tokens=60,
+        proposal_count=0,
+        review_count=1,
+        response_id="chatcmpl-1",
+        finish_reason="stop",
+        started_at=NOW,
+        completed_at=NOW,
+        recorded_at=NOW if status == StrategyAdvisorRunStatus.RECORDED else None,
         created_at=NOW,
         updated_at=NOW,
     )
@@ -656,6 +687,7 @@ def test_strategy_advisor_context_route_returns_read_only_context() -> None:
 def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writing() -> None:
     service = Mock()
     service.get_advisor_context.return_value = build_advisor_context()
+    service.create_advisor_run.return_value = build_advisor_run()
     advisor_client = Mock()
     advisor_client.create_advisor_response.return_value = {
         "reviews": [
@@ -698,7 +730,11 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     body = response.json()
     assert body["recorded"] is False
     assert body["source"] == "deepseek"
+    assert body["advisor_run"]["id"] == "advisor-run-1"
+    assert body["advisor_run"]["context_format"] == "compact_v1"
+    assert body["advisor_run"]["prompt_tokens"] == 100
     assert body["response_payload"]["external_account_id"] == "LBPT10087357"
+    assert body["response_payload"]["advisor_run_id"] == "advisor-run-1"
     assert body["response_payload"]["reviews"][0]["summary"] == "Current covered-call lifecycle is flat."
     assert body["response_payload"]["raw_response"]["usage"]["prompt_cache_hit_tokens"] == 40
     service.get_advisor_context.assert_called_once_with(
@@ -709,6 +745,16 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
         context=service.get_advisor_context.return_value,
         model="v4 pro",
     )
+    run_request = service.create_advisor_run.call_args.args[0]
+    assert run_request.source == "deepseek"
+    assert run_request.provider == "deepseek"
+    assert run_request.model == "deepseek-v4-pro"
+    assert run_request.status == StrategyAdvisorRunStatus.SUCCEEDED
+    assert run_request.context_format == "compact_v1"
+    assert run_request.context_limit == 6
+    assert run_request.cache_hit_tokens == 40
+    assert run_request.cache_miss_tokens == 60
+    assert run_request.review_count == 1
 
 
 def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
@@ -729,6 +775,34 @@ def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
 
     assert response.status_code == 400
     assert "DEEPSEEK_API_KEY" in response.json()["detail"]
+    run_request = service.create_advisor_run.call_args.args[0]
+    assert run_request.status == StrategyAdvisorRunStatus.FAILED
+    assert run_request.error_message == "DEEPSEEK_API_KEY is not configured."
+
+
+def test_strategy_advisor_runs_route_lists_deepseek_history() -> None:
+    service = Mock()
+    service.list_advisor_runs.return_value = [build_advisor_run(StrategyAdvisorRunStatus.RECORDED)]
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/advisor/runs",
+            params={"external_account_id": "LBPT10087357", "source": "deepseek", "limit": "5"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["id"] == "advisor-run-1"
+    assert body[0]["status"] == "recorded"
+    assert body[0]["cache_hit_tokens"] == 40
+    service.list_advisor_runs.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
 
 
 def test_strategy_experiment_service_records_approval_audit_signal() -> None:
@@ -935,6 +1009,48 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
         strategy_id="covered_call_v1",
         status=None,
         limit=6,
+    )
+
+
+def test_strategy_experiment_service_records_and_lists_advisor_runs() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    advisor_run = build_advisor_run()
+    experiments.create_advisor_run.return_value = advisor_run
+    experiments.list_advisor_runs.return_value = [advisor_run]
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    created = service.create_advisor_run(
+        CreateStrategyAdvisorRunRequest(
+            external_account_id="LBPT10087357",
+            source="deepseek",
+            mode=ExecutionMode.PAPER,
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            status=StrategyAdvisorRunStatus.SUCCEEDED,
+            context_format="compact_v1",
+            context_limit=6,
+            prompt_tokens=100,
+        )
+    )
+    runs = service.list_advisor_runs(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+    assert created.id == "advisor-run-1"
+    assert runs == [advisor_run]
+    experiments.create_advisor_run.assert_called_once()
+    experiments.list_advisor_runs.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
     )
 
 

@@ -561,6 +561,42 @@ class StrategyReviewRecord(TimestampMixin, Base):
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 
 
+class StrategyAdvisorRunRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_advisor_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    provider: Mapped[str | None] = mapped_column(String(64), index=True)
+    model: Mapped[str | None] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    context_format: Mapped[str | None] = mapped_column(String(32), index=True)
+    context_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=10, server_default="10")
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_hit_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_miss_tokens: Mapped[int | None] = mapped_column(Integer)
+    proposal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    response_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    finish_reason: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    response_payload: Mapped[dict | None] = mapped_column(JSONB)
+    raw_response: Mapped[dict | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
 class JournalEntryRecord(TimestampMixin, Base):
     __tablename__ = "journal_entries"
 

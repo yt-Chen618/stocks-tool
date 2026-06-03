@@ -445,6 +445,7 @@ const state = {
   coveredCallActivity: { summary: {}, proposals: [], runs: [], signals: [], reviews: [] },
   advisorContext: null,
   advisorDraft: null,
+  advisorRuns: [],
   advisorStatus: {
     kind: "idle",
     detail: "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app.",
@@ -1163,6 +1164,7 @@ async function loadAccountData() {
     state.coveredCallActivity = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
     state.advisorContext = null;
     state.advisorDraft = null;
+    state.advisorRuns = [];
     state.advisorStatus = buildOverlayStatus(
       "idle",
       "Select a broker account before loading advisor context."
@@ -1203,6 +1205,7 @@ async function loadAccountData() {
       runtime,
       strategyExperiment,
       coveredCallActivity,
+      advisorRuns,
       marketEvents,
       executions,
       journals,
@@ -1217,6 +1220,7 @@ async function loadAccountData() {
         console.error(error);
         return { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
       }),
+      fetchJson(`/strategies/advisor/runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&source=deepseek&limit=5`).catch(() => []),
       fetchJson("/market-events?limit=8"),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
@@ -1227,6 +1231,7 @@ async function loadAccountData() {
     state.runtime = runtime;
     state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
     state.coveredCallActivity = coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+    state.advisorRuns = Array.isArray(advisorRuns) ? advisorRuns : [];
     state.marketEvents = Array.isArray(marketEvents) ? marketEvents : [];
     state.executions = executions;
     state.journals = journals;
@@ -1619,6 +1624,9 @@ async function runDeepSeekAdvisorDryRun() {
     });
     state.advisorContext = result.context || null;
     state.advisorDraft = result;
+    if (result.advisor_run) {
+      upsertAdvisorRun(result.advisor_run);
+    }
     const payload = objectPayload(result.response_payload);
     const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
     const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
@@ -1649,10 +1657,13 @@ async function recordAdvisorResponse() {
   state.advisorStatus = buildOverlayStatus("loading", "Recording advisor output to the local strategy ledger...");
   renderAdvisorPanel();
   try {
-    await fetchJson("/strategies/advisor/responses", {
+    const result = await fetchJson("/strategies/advisor/responses", {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    if (result.advisor_run) {
+      upsertAdvisorRun(result.advisor_run);
+    }
     state.advisorDraft = null;
     state.advisorStatus = buildOverlayStatus(
       "live",
@@ -1667,6 +1678,16 @@ async function recordAdvisorResponse() {
     renderAdvisorPanel();
     setStatus(error.message || "Advisor output recording failed.", "error");
   }
+}
+
+function upsertAdvisorRun(run) {
+  if (!run?.id) {
+    return;
+  }
+  state.advisorRuns = [
+    run,
+    ...state.advisorRuns.filter((candidate) => candidate.id !== run.id),
+  ].slice(0, 5);
 }
 
 async function reconcileCoveredCallLifecycle() {
@@ -2732,8 +2753,9 @@ function renderAdvisorPanel() {
   const payload = objectPayload(result?.response_payload);
   const proposals = Array.isArray(payload.proposals) ? payload.proposals : [];
   const reviews = Array.isArray(payload.reviews) ? payload.reviews : [];
+  const advisorRuns = Array.isArray(state.advisorRuns) ? state.advisorRuns : [];
 
-  if (!context && !result) {
+  if (!context && !result && !advisorRuns.length) {
     els.advisorOutputCard.className = "strategy-note-body empty";
     els.advisorOutputCard.innerHTML = `
       <div class="overlay-status-row">
@@ -2762,6 +2784,7 @@ function renderAdvisorPanel() {
     ${renderAdvisorUsage(payload.raw_response)}
     ${renderAdvisorDraftList("Proposals", proposals, renderAdvisorProposalDraft)}
     ${renderAdvisorDraftList("Reviews", reviews, renderAdvisorReviewDraft)}
+    ${renderAdvisorRunHistory(advisorRuns)}
   `;
 }
 
@@ -2850,6 +2873,62 @@ function renderAdvisorDraftList(title, items, renderItem) {
       </div>
     </article>
   `;
+}
+
+function renderAdvisorRunHistory(runs) {
+  if (!runs.length) {
+    return `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>Advisor Run History</strong>
+          <span class="pill neutral">0</span>
+        </div>
+        <p>No DeepSeek advisor runs recorded yet.</p>
+      </article>
+    `;
+  }
+  return `
+    <article class="strategy-journal-entry">
+      <div class="strategy-journal-head">
+        <strong>Advisor Run History</strong>
+        <span class="pill neutral">${escapeHtml(String(runs.length))}</span>
+      </div>
+      <div class="advisor-draft-list">
+        ${runs.slice(0, 5).map(renderAdvisorRunItem).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderAdvisorRunItem(run) {
+  const tokenLine = [
+    `${displayValue(run.prompt_tokens)} prompt`,
+    `${displayValue(run.completion_tokens)} completion`,
+    `${displayValue(run.cache_hit_tokens)} cache hit`,
+    `${displayValue(run.cache_miss_tokens)} cache miss`,
+  ].join(" / ");
+  const outputLine = `${displayValue(run.proposal_count)} proposal(s), ${displayValue(run.review_count)} review(s)`;
+  return `
+    <div class="advisor-draft-item">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(run.model || run.provider || "deepseek")}</strong>
+        <span class="pill ${advisorRunStatusClass(run.status)}">${escapeHtml(formatStrategyStatusLabel(run.status || "succeeded"))}</span>
+      </div>
+      <p>${escapeHtml([tokenLine, outputLine].filter(Boolean).join(" | "))}</p>
+      <span>${escapeHtml([run.context_format, formatDateTime(run.completed_at || run.created_at), run.response_id].filter(Boolean).join(" / "))}</span>
+      ${run.error_message ? `<span>${escapeHtml(run.error_message)}</span>` : ""}
+    </div>
+  `;
+}
+
+function advisorRunStatusClass(status) {
+  if (status === "recorded" || status === "succeeded") {
+    return "success";
+  }
+  if (status === "failed") {
+    return "error";
+  }
+  return "neutral";
 }
 
 function renderAdvisorProposalDraft(proposal) {

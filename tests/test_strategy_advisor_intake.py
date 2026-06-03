@@ -11,6 +11,7 @@ from stocks_tool.application.services.strategy_experiments import StrategyExperi
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     ExecutionMode,
+    StrategyAdvisorRunStatus,
     StrategyProposalStatus,
     StrategyReviewStatus,
     StrategySignalType,
@@ -23,6 +24,7 @@ from stocks_tool.domain.models import (
     StrategyAdvisorProposalDraft,
     StrategyAdvisorResponseResult,
     StrategyAdvisorReviewDraft,
+    StrategyAdvisorRun,
     StrategyControlSnapshot,
     StrategyExperimentSnapshot,
     StrategyPermissionBoundary,
@@ -126,6 +128,18 @@ def test_strategy_advisor_intake_records_response_as_read_only_ledger_entries() 
 
     experiments.create_proposal.side_effect = create_proposal
     experiments.create_review.side_effect = create_review
+    experiments.mark_advisor_run_recorded.return_value = StrategyAdvisorRun(
+        id="advisor-run-1",
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        mode=ExecutionMode.PAPER,
+        provider="deepseek",
+        model="deepseek-v4-pro",
+        status=StrategyAdvisorRunStatus.RECORDED,
+        created_at=NOW,
+        updated_at=NOW,
+        recorded_at=NOW,
+    )
     experiments.create_signal.side_effect = lambda request: StrategySignal(
         id="signal-advisor-policy",
         strategy_id=request.strategy_id,
@@ -149,6 +163,7 @@ def test_strategy_advisor_intake_records_response_as_read_only_ledger_entries() 
         RecordStrategyAdvisorResponseRequest(
             external_account_id="LBPT10087357",
             source="DeepSeek",
+            advisor_run_id="advisor-run-1",
             proposals=[
                 StrategyAdvisorProposalDraft(
                     strategy_id="covered_call_v1",
@@ -176,21 +191,31 @@ def test_strategy_advisor_intake_records_response_as_read_only_ledger_entries() 
     assert result.source == "deepseek"
     assert result.mode == ExecutionMode.PAPER
     assert result.context.controls.llm_direct_execution_allowed is False
+    assert result.advisor_run is not None
+    assert result.advisor_run.id == "advisor-run-1"
     proposal_request = experiments.create_proposal.call_args.args[0]
     assert proposal_request.mode == ExecutionMode.PAPER
     assert proposal_request.approval_required is True
     assert proposal_request.source == "deepseek"
+    assert proposal_request.source_run_id == "advisor-run-1"
     assert "manual_approval_required" in proposal_request.checks
     assert "local_deterministic_checks_required" in proposal_request.checks
     assert "local_position_covered" not in proposal_request.checks
     assert proposal_request.candidate_payload["llm_direct_execution_allowed"] is False
     assert proposal_request.candidate_payload["advisor_raw_response"]["response_id"] == "resp-1"
+    assert proposal_request.candidate_payload["advisor_run_id"] == "advisor-run-1"
     review_request = experiments.create_review.call_args.args[0]
     assert review_request.mode == ExecutionMode.PAPER
     assert review_request.metrics_payload["advisor_source"] == "deepseek"
+    assert review_request.metrics_payload["advisor_run_id"] == "advisor-run-1"
     assert review_request.metrics_payload["llm_direct_execution_allowed"] is False
     signal_request = experiments.create_signal.call_args.args[0]
     assert signal_request.signal_payload["llm_direct_execution_allowed"] is False
+    experiments.mark_advisor_run_recorded.assert_called_once()
+    mark_args = experiments.mark_advisor_run_recorded.call_args
+    assert mark_args.args[0] == "advisor-run-1"
+    assert mark_args.kwargs["proposal_count"] == 1
+    assert mark_args.kwargs["review_count"] == 1
 
 
 def test_strategy_advisor_intake_rejects_live_mode_before_writing() -> None:

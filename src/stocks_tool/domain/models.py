@@ -23,6 +23,7 @@ from stocks_tool.domain.enums import (
     ReconciliationStatus,
     RiskStatus,
     SpreadStatus,
+    StrategyAdvisorRunStatus,
     StrategyProposalStatus,
     StrategyReviewStatus,
     StrategyRunStatus,
@@ -675,11 +676,69 @@ class StrategyAdvisorReviewDraft(BaseModel):
     reviewed_at: datetime | None = None
 
 
+class CreateStrategyAdvisorRunRequest(BaseModel):
+    external_account_id: str = Field(min_length=1, max_length=64)
+    source: str = Field(default="deepseek", min_length=1, max_length=64)
+    mode: ExecutionMode = ExecutionMode.PAPER
+    provider: str | None = Field(default=None, max_length=64)
+    model: str | None = Field(default=None, max_length=120)
+    status: StrategyAdvisorRunStatus = StrategyAdvisorRunStatus.SUCCEEDED
+    context_format: str | None = Field(default=None, max_length=32)
+    context_limit: int = Field(default=10, ge=1, le=50)
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    reasoning_tokens: int | None = Field(default=None, ge=0)
+    cache_hit_tokens: int | None = Field(default=None, ge=0)
+    cache_miss_tokens: int | None = Field(default=None, ge=0)
+    proposal_count: int = Field(default=0, ge=0)
+    review_count: int = Field(default=0, ge=0)
+    response_id: str | None = Field(default=None, max_length=128)
+    finish_reason: str | None = Field(default=None, max_length=64)
+    error_message: str | None = None
+    response_payload: dict | None = None
+    raw_response: dict | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    recorded_at: datetime | None = None
+
+
+class StrategyAdvisorRun(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    external_account_id: str
+    source: str
+    mode: ExecutionMode
+    provider: str | None = None
+    model: str | None = None
+    status: StrategyAdvisorRunStatus
+    context_format: str | None = None
+    context_limit: int = 10
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cache_hit_tokens: int | None = None
+    cache_miss_tokens: int | None = None
+    proposal_count: int = 0
+    review_count: int = 0
+    response_id: str | None = None
+    finish_reason: str | None = None
+    error_message: str | None = None
+    response_payload: dict | None = None
+    raw_response: dict | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    recorded_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class RecordStrategyAdvisorResponseRequest(BaseModel):
     external_account_id: str
     source: str = Field(default="deepseek", min_length=1, max_length=64)
     mode: ExecutionMode = ExecutionMode.PAPER
     context_limit: int = Field(default=10, ge=1, le=50)
+    advisor_run_id: str | None = Field(default=None, max_length=36)
     proposals: list[StrategyAdvisorProposalDraft] = Field(default_factory=list)
     reviews: list[StrategyAdvisorReviewDraft] = Field(default_factory=list)
     raw_response: dict | None = None
@@ -698,6 +757,7 @@ class DeepSeekAdvisorDryRunResult(BaseModel):
     recorded: bool = False
     context: StrategyAdvisorContext
     response_payload: RecordStrategyAdvisorResponseRequest
+    advisor_run: StrategyAdvisorRun | None = None
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -708,6 +768,7 @@ class StrategyAdvisorResponseResult(BaseModel):
     context: StrategyAdvisorContext
     proposals: list[StrategyProposal] = Field(default_factory=list)
     reviews: list[StrategyReview] = Field(default_factory=list)
+    advisor_run: StrategyAdvisorRun | None = None
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

@@ -14,10 +14,6 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorClient
-from stocks_tool.core.config import Settings
-from stocks_tool.domain.models import StrategyAdvisorContext
-
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_ACCOUNT_ID = "LBPT10087357"
 
@@ -95,21 +91,20 @@ def build_intake_payload(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def build_deepseek_intake_payload(
+def run_deepseek_dry_run(
     args: argparse.Namespace,
-    context: dict[str, Any],
+    client: httpx.Client,
 ) -> dict[str, Any]:
-    advisor_context = StrategyAdvisorContext.model_validate(context)
-    client = DeepSeekAdvisorClient(settings=Settings())
-    payload = client.create_advisor_response(
-        context=advisor_context,
-        model=args.deepseek_model,
+    return require_json(
+        client.post(
+            "/strategies/advisor/deepseek/dry-run",
+            json={
+                "external_account_id": args.account_id,
+                "context_limit": args.context_limit,
+                "model": args.deepseek_model,
+            },
+        )
     )
-    payload["external_account_id"] = args.account_id
-    payload["source"] = args.source
-    payload["mode"] = "paper"
-    payload["context_limit"] = args.context_limit
-    return payload
 
 
 def summarize_context(context: dict[str, Any]) -> str:
@@ -153,8 +148,10 @@ def main() -> None:
                 raise AdvisorIntakeError("Use either --call-deepseek or --response-json, not both.")
             if args.record and not args.call_deepseek and args.response_json is None:
                 raise AdvisorIntakeError("--record requires --call-deepseek or --response-json.")
+            dry_run_result = None
             if args.call_deepseek:
-                intake_payload = build_deepseek_intake_payload(args, context)
+                dry_run_result = run_deepseek_dry_run(args, client)
+                intake_payload = dry_run_result.get("response_payload")
             else:
                 intake_payload = build_intake_payload(args) if args.response_json is not None else None
             intake_result = None
@@ -184,7 +181,7 @@ def main() -> None:
                         },
                         "recorded": intake_result is not None,
                         "intake_result": intake_result,
-                        "dry_run_payload": intake_payload if intake_result is None else None,
+                        "dry_run_payload": dry_run_result or (intake_payload if intake_result is None else None),
                     },
                 ),
                 json_output=str(args.json_output) if args.json_output else None,

@@ -24,9 +24,11 @@ from stocks_tool.domain.models import (
     Execution,
     CreateWatchlistRequest,
     CreateBrokerAccountRequest,
+    CreateStrategyAdvisorRunRequest,
     JournalEntry,
     MarketEvent,
     Order,
+    StrategyAdvisorRun,
     StrategyProposal,
     StrategyReview,
     StrategyRun,
@@ -350,4 +352,30 @@ class StrategyExperimentRepository(ABC):
         strategy_id: str | None = None,
         limit: int = 20,
     ) -> list[StrategyReview]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def create_advisor_run(self, request: CreateStrategyAdvisorRunRequest) -> StrategyAdvisorRun:
+        raise NotImplementedError
+
+    @abstractmethod
+    def mark_advisor_run_recorded(
+        self,
+        advisor_run_id: str,
+        *,
+        recorded_at: datetime,
+        proposal_count: int,
+        review_count: int,
+        response_payload: dict | None = None,
+    ) -> StrategyAdvisorRun:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_advisor_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        source: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategyAdvisorRun]:
         raise NotImplementedError

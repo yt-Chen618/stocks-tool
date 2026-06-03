@@ -53,6 +53,17 @@ class StrategyAdvisorIntakeService:
             self._record_review(request=request, source=source, context=context, draft=draft)
             for draft in request.reviews
         ]
+        response_payload = request.model_dump(mode="json", exclude_none=True)
+        advisor_run = (
+            self.strategy_experiments.mark_advisor_run_recorded(
+                request.advisor_run_id,
+                proposal_count=len(proposals),
+                review_count=len(reviews),
+                response_payload=response_payload,
+            )
+            if request.advisor_run_id
+            else None
+        )
         return StrategyAdvisorResponseResult(
             external_account_id=request.external_account_id,
             source=source,
@@ -60,6 +71,7 @@ class StrategyAdvisorIntakeService:
             context=context,
             proposals=proposals,
             reviews=reviews,
+            advisor_run=advisor_run,
             recorded_at=datetime.now(timezone.utc),
         )
 
@@ -87,17 +99,20 @@ class StrategyAdvisorIntakeService:
                 approval_required=True,
                 expires_at=draft.expires_at,
                 source=source,
+                source_run_id=request.advisor_run_id,
                 candidate_payload=self._with_advisor_metadata(
                     draft.candidate_payload,
                     source=source,
                     context=context,
                     raw_response=request.raw_response,
+                    advisor_run_id=request.advisor_run_id,
                 ),
                 risk_payload=self._with_advisor_metadata(
                     draft.risk_payload,
                     source=source,
                     context=context,
                     raw_response=None,
+                    advisor_run_id=request.advisor_run_id,
                 ),
                 checks=self._merge_checks(draft.checks),
             )
@@ -129,6 +144,7 @@ class StrategyAdvisorIntakeService:
                     source=source,
                     context=context,
                     raw_response=request.raw_response,
+                    advisor_run_id=request.advisor_run_id,
                 ),
                 reviewed_at=draft.reviewed_at,
             )
@@ -150,9 +166,12 @@ class StrategyAdvisorIntakeService:
         source: str,
         context: StrategyAdvisorContext,
         raw_response: dict | None,
+        advisor_run_id: str | None,
     ) -> dict:
         enriched = dict(payload or {})
         enriched.setdefault("advisor_source", source)
+        if advisor_run_id is not None:
+            enriched.setdefault("advisor_run_id", advisor_run_id)
         enriched.setdefault("llm_direct_execution_allowed", False)
         enriched.setdefault("advisor_hard_rules", [rule.name for rule in context.hard_rules])
         if raw_response is not None:

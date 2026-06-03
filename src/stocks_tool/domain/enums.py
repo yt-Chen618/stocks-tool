@@ -58,6 +58,12 @@ class StrategyReviewStatus(str, Enum):
     BLOCKED = "blocked"
 
 
+class StrategyAdvisorRunStatus(str, Enum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    RECORDED = "recorded"
+
+
 class MarketEventType(str, Enum):
     EARNINGS = "earnings"
     DIVIDEND = "dividend"

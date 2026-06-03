@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import (
     BrokerAccountRecord,
+    StrategyAdvisorRunRecord,
     StrategyProposalRecord,
     StrategyReviewRecord,
     StrategyRunRecord,
@@ -12,16 +13,19 @@ from stocks_tool.db.models import (
 )
 from stocks_tool.domain.enums import (
     StrategyProposalStatus,
+    StrategyAdvisorRunStatus,
     StrategyReviewStatus,
     StrategyRunStatus,
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
     CreateStrategyProposalRequest,
+    CreateStrategyAdvisorRunRequest,
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
     StrategyProposal,
+    StrategyAdvisorRun,
     StrategyReview,
     StrategyRun,
     StrategySignal,
@@ -238,6 +242,80 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyReviewRecord.strategy_id == strategy_id)
         return [self._to_review(record) for record in self.session.execute(query).scalars().all()]
 
+    def create_advisor_run(self, request: CreateStrategyAdvisorRunRequest) -> StrategyAdvisorRun:
+        advisor_run = StrategyAdvisorRun(
+            external_account_id=request.external_account_id.strip(),
+            source=request.source.strip().lower(),
+            mode=request.mode,
+            provider=request.provider.strip().lower() if request.provider else None,
+            model=request.model.strip() if request.model else None,
+            status=request.status,
+            context_format=request.context_format.strip() if request.context_format else None,
+            context_limit=request.context_limit,
+            prompt_tokens=request.prompt_tokens,
+            completion_tokens=request.completion_tokens,
+            total_tokens=request.total_tokens,
+            reasoning_tokens=request.reasoning_tokens,
+            cache_hit_tokens=request.cache_hit_tokens,
+            cache_miss_tokens=request.cache_miss_tokens,
+            proposal_count=request.proposal_count,
+            review_count=request.review_count,
+            response_id=request.response_id,
+            finish_reason=request.finish_reason,
+            error_message=request.error_message.strip() if request.error_message else None,
+            response_payload=request.response_payload,
+            raw_response=request.raw_response,
+            started_at=request.started_at,
+            completed_at=request.completed_at,
+            recorded_at=request.recorded_at,
+        )
+        record = StrategyAdvisorRunRecord(id=advisor_run.id)
+        self.session.add(record)
+        self._apply_advisor_run(record, advisor_run)
+        self.session.commit()
+        self.session.refresh(record)
+        return self._to_advisor_run(record)
+
+    def mark_advisor_run_recorded(
+        self,
+        advisor_run_id: str,
+        *,
+        recorded_at: datetime,
+        proposal_count: int,
+        review_count: int,
+        response_payload: dict | None = None,
+    ) -> StrategyAdvisorRun:
+        record = self.session.get(StrategyAdvisorRunRecord, advisor_run_id)
+        if record is None:
+            raise LookupError(f"Advisor run '{advisor_run_id}' was not found.")
+        record.status = StrategyAdvisorRunStatus.RECORDED.value
+        record.recorded_at = recorded_at
+        record.proposal_count = proposal_count
+        record.review_count = review_count
+        if response_payload is not None:
+            record.response_payload = response_payload
+        self.session.commit()
+        self.session.refresh(record)
+        return self._to_advisor_run(record)
+
+    def list_advisor_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        source: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategyAdvisorRun]:
+        query = (
+            select(StrategyAdvisorRunRecord)
+            .order_by(StrategyAdvisorRunRecord.created_at.desc())
+            .limit(limit)
+        )
+        if external_account_id is not None:
+            query = query.where(StrategyAdvisorRunRecord.external_account_id == external_account_id)
+        if source is not None:
+            query = query.where(StrategyAdvisorRunRecord.source == source.strip().lower())
+        return [self._to_advisor_run(record) for record in self.session.execute(query).scalars().all()]
+
     def _resolve_broker_account_id(self, external_account_id: str) -> str | None:
         broker_account = self.session.execute(
             select(BrokerAccountRecord).where(
@@ -322,6 +400,33 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         record.journal_entry_id = review.journal_entry_id
         record.metrics_payload = review.metrics_payload
         record.reviewed_at = review.reviewed_at
+
+    def _apply_advisor_run(self, record: StrategyAdvisorRunRecord, advisor_run: StrategyAdvisorRun) -> None:
+        record.broker_account_id = self._resolve_broker_account_id(advisor_run.external_account_id)
+        record.external_account_id = advisor_run.external_account_id
+        record.execution_mode = advisor_run.mode.value
+        record.source = advisor_run.source
+        record.provider = advisor_run.provider
+        record.model = advisor_run.model
+        record.status = advisor_run.status.value
+        record.context_format = advisor_run.context_format
+        record.context_limit = advisor_run.context_limit
+        record.prompt_tokens = advisor_run.prompt_tokens
+        record.completion_tokens = advisor_run.completion_tokens
+        record.total_tokens = advisor_run.total_tokens
+        record.reasoning_tokens = advisor_run.reasoning_tokens
+        record.cache_hit_tokens = advisor_run.cache_hit_tokens
+        record.cache_miss_tokens = advisor_run.cache_miss_tokens
+        record.proposal_count = advisor_run.proposal_count
+        record.review_count = advisor_run.review_count
+        record.response_id = advisor_run.response_id
+        record.finish_reason = advisor_run.finish_reason
+        record.error_message = advisor_run.error_message
+        record.response_payload = advisor_run.response_payload
+        record.raw_response = advisor_run.raw_response
+        record.started_at = advisor_run.started_at
+        record.completed_at = advisor_run.completed_at
+        record.recorded_at = advisor_run.recorded_at
 
     @staticmethod
     def _to_proposal(record: StrategyProposalRecord) -> StrategyProposal:
@@ -422,6 +527,40 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
                 "journal_entry_id": record.journal_entry_id,
                 "metrics_payload": record.metrics_payload,
                 "reviewed_at": record.reviewed_at,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            }
+        )
+
+    @staticmethod
+    def _to_advisor_run(record: StrategyAdvisorRunRecord) -> StrategyAdvisorRun:
+        return StrategyAdvisorRun.model_validate(
+            {
+                "id": record.id,
+                "external_account_id": record.external_account_id,
+                "source": record.source,
+                "mode": record.execution_mode,
+                "provider": record.provider,
+                "model": record.model,
+                "status": record.status,
+                "context_format": record.context_format,
+                "context_limit": record.context_limit,
+                "prompt_tokens": record.prompt_tokens,
+                "completion_tokens": record.completion_tokens,
+                "total_tokens": record.total_tokens,
+                "reasoning_tokens": record.reasoning_tokens,
+                "cache_hit_tokens": record.cache_hit_tokens,
+                "cache_miss_tokens": record.cache_miss_tokens,
+                "proposal_count": record.proposal_count,
+                "review_count": record.review_count,
+                "response_id": record.response_id,
+                "finish_reason": record.finish_reason,
+                "error_message": record.error_message,
+                "response_payload": record.response_payload,
+                "raw_response": record.raw_response,
+                "started_at": record.started_at,
+                "completed_at": record.completed_at,
+                "recorded_at": record.recorded_at,
                 "created_at": record.created_at,
                 "updated_at": record.updated_at,
             }

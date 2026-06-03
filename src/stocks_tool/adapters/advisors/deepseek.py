@@ -19,6 +19,7 @@ class DeepSeekAdvisorError(RuntimeError):
 
 
 class DeepSeekAdvisorClient:
+    context_format = "compact_v1"
     model_aliases = {
         "v4 pro": "deepseek-v4-pro",
         "v4-pro": "deepseek-v4-pro",
@@ -150,7 +151,7 @@ class DeepSeekAdvisorClient:
         )
         return cls._drop_empty(
             {
-                "context_format": "compact_v1",
+                "context_format": cls.context_format,
                 "external_account_id": context.external_account_id,
                 "advisor_sources": context.advisor_sources,
                 "hard_rules": [cls._model_fields(rule, ["name", "allowed", "detail"]) for rule in context.hard_rules],

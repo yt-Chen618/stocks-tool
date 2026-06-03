@@ -2,17 +2,23 @@ from datetime import datetime, timezone
 
 from decimal import Decimal, InvalidOperation
 
-from stocks_tool.domain.enums import ExecutionMode, StrategyProposalStatus, StrategySignalType
+from stocks_tool.domain.enums import (
+    ExecutionMode,
+    StrategyProposalStatus,
+    StrategySignalType,
+)
 from stocks_tool.domain.models import (
     CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
     CoveredCallMonitorSnapshot,
+    CreateStrategyAdvisorRunRequest,
     CreateStrategyProposalRequest,
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
     StrategyAdvisorContext,
+    StrategyAdvisorRun,
     StrategyAutomationControl,
     StrategyControlSnapshot,
     StrategyExperimentSnapshot,
@@ -321,6 +327,47 @@ class StrategyExperimentService:
         return self.experiments.list_reviews(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
+            limit=limit,
+        )
+
+    def create_advisor_run(self, request: CreateStrategyAdvisorRunRequest) -> StrategyAdvisorRun:
+        self._ensure_account(request.external_account_id)
+        if request.mode != ExecutionMode.PAPER:
+            raise ValueError("Advisor runs can only be recorded in paper mode.")
+        if request.source.strip().lower() not in self.advisor_sources:
+            raise ValueError(f"Advisor source '{request.source}' is not recognized.")
+        return self.experiments.create_advisor_run(request)
+
+    def mark_advisor_run_recorded(
+        self,
+        advisor_run_id: str,
+        *,
+        proposal_count: int,
+        review_count: int,
+        response_payload: dict | None = None,
+    ) -> StrategyAdvisorRun:
+        return self.experiments.mark_advisor_run_recorded(
+            advisor_run_id,
+            recorded_at=datetime.now(timezone.utc),
+            proposal_count=proposal_count,
+            review_count=review_count,
+            response_payload=response_payload,
+        )
+
+    def list_advisor_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        source: str | None = None,
+        limit: int = 20,
+    ) -> list[StrategyAdvisorRun]:
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        if source is not None and source.strip().lower() not in self.advisor_sources:
+            raise ValueError(f"Advisor source '{source}' is not recognized.")
+        return self.experiments.list_advisor_runs(
+            external_account_id=external_account_id,
+            source=source.strip().lower() if source else None,
             limit=limit,
         )
 
