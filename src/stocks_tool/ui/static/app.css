@@ -521,6 +521,10 @@ a {
   gap: 14px;
 }
 
+.advisor-note-card {
+  grid-column: span 2;
+}
+
 .strategy-note-body {
   display: grid;
   gap: 12px;
@@ -674,6 +678,27 @@ a {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.56);
+}
+
+.advisor-draft-list {
+  display: grid;
+  gap: 10px;
+}
+
+.advisor-draft-item {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.advisor-draft-item > span,
+.advisor-usage .strategy-journal-head span {
+  color: var(--text-soft);
+  font-size: 12px;
 }
 
 .lifecycle-task-item.is-stale {
@@ -1321,6 +1346,10 @@ a {
 
   .strategy-notes-grid {
     grid-template-columns: 1fr;
+  }
+
+  .advisor-note-card {
+    grid-column: span 1;
   }
 
   .mini-metric-strip {

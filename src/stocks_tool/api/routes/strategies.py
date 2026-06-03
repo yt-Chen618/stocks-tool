@@ -2,18 +2,22 @@ from datetime import datetime
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
+from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorClient, DeepSeekAdvisorError
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
     LongbridgeDependencyError,
     LongbridgeIntegrationError,
 )
 from stocks_tool.api.dependencies import (
+    get_deepseek_advisor_client,
     get_bull_put_strategy_service,
     get_covered_call_strategy_service,
+    get_strategy_advisor_intake_service,
     get_strategy_experiment_service,
 )
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
+from stocks_tool.application.services.strategy_advisor_intake import StrategyAdvisorIntakeService
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.domain.enums import ExecutionMode, SpreadStatus, StrategyProposalStatus
 from stocks_tool.domain.models import (
@@ -24,10 +28,13 @@ from stocks_tool.domain.models import (
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
+    DeepSeekAdvisorDryRunResult,
     PreOpenDownsideAssessment,
     PreOpenAssessmentRun,
     PreOpenAssessmentCaptureResult,
     PreOpenAssessmentReviewResult,
+    RecordStrategyAdvisorResponseRequest,
+    RunDeepSeekAdvisorRequest,
     BullPutStrategyReviewResult,
     BullPutStrategyReadinessResult,
     BullPutStrategyRuntimeState,
@@ -47,6 +54,7 @@ from stocks_tool.domain.models import (
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
     StrategyAdvisorContext,
+    StrategyAdvisorResponseResult,
     StrategyControlSnapshot,
     StrategyExperimentSnapshot,
     StrategyProposalDecisionRequest,
@@ -326,6 +334,57 @@ def get_strategy_advisor_context(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/advisor/deepseek/dry-run", response_model=DeepSeekAdvisorDryRunResult)
+def run_deepseek_advisor_dry_run(
+    request: RunDeepSeekAdvisorRequest,
+    service: StrategyExperimentService = Depends(get_strategy_experiment_service),
+    advisor_client: DeepSeekAdvisorClient = Depends(get_deepseek_advisor_client),
+) -> DeepSeekAdvisorDryRunResult:
+    try:
+        context = service.get_advisor_context(
+            external_account_id=request.external_account_id,
+            limit=request.context_limit,
+        )
+        response_payload = advisor_client.create_advisor_response(
+            context=context,
+            model=request.model,
+        )
+        recordable_payload = RecordStrategyAdvisorResponseRequest.model_validate(
+            {
+                "external_account_id": request.external_account_id,
+                "source": "deepseek",
+                "mode": ExecutionMode.PAPER,
+                "context_limit": request.context_limit,
+                **response_payload,
+            }
+        )
+        return DeepSeekAdvisorDryRunResult(
+            external_account_id=request.external_account_id,
+            context=context,
+            response_payload=recordable_payload,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except DeepSeekAdvisorError as exc:
+        status_code = 400 if "configured" in str(exc).lower() else 502
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/advisor/responses", response_model=StrategyAdvisorResponseResult, status_code=201)
+def record_strategy_advisor_response(
+    request: RecordStrategyAdvisorResponseRequest,
+    service: StrategyAdvisorIntakeService = Depends(get_strategy_advisor_intake_service),
+) -> StrategyAdvisorResponseResult:
+    try:
+        return service.record_response(request)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/proposals", response_model=list[StrategyProposal])

@@ -4,6 +4,7 @@ const BROKER_REQUEST_TIMEOUT_MS = 25000;
 const PRE_OPEN_BOARD_TIMEOUT_MS = 35000;
 const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
+const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
 const TEXT_NODE_ORIGINALS = new WeakMap();
 const ATTRIBUTE_ORIGINALS = new WeakMap();
 const TRANSLATIONS = {
@@ -441,6 +442,13 @@ const state = {
   runtime: null,
   strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
   coveredCallActivity: { summary: {}, proposals: [], runs: [], signals: [], reviews: [] },
+  advisorContext: null,
+  advisorDraft: null,
+  advisorStatus: {
+    kind: "idle",
+    detail: "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app.",
+    reason: "",
+  },
   marketEvents: [],
   executions: [],
   journals: [],
@@ -500,6 +508,10 @@ function bindElements() {
   els.strategyRunsCard = document.getElementById("strategy-runs-card");
   els.strategySignalsCard = document.getElementById("strategy-signals-card");
   els.strategyReviewsCard = document.getElementById("strategy-reviews-card");
+  els.loadAdvisorContext = document.getElementById("load-advisor-context");
+  els.runDeepSeekAdvisor = document.getElementById("run-deepseek-advisor");
+  els.recordAdvisorResponse = document.getElementById("record-advisor-response");
+  els.advisorOutputCard = document.getElementById("advisor-output-card");
   els.marketEventsCard = document.getElementById("market-events-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
@@ -564,6 +576,7 @@ function wireEvents() {
 
   els.accountSelect.addEventListener("change", async (event) => {
     state.selectedAccountId = event.target.value;
+    resetAdvisorState();
     await loadAccountData();
   });
 
@@ -641,6 +654,24 @@ function wireEvents() {
   els.runStrategyReview.addEventListener("click", async () => {
     await runStrategyReview();
   });
+
+  if (els.loadAdvisorContext) {
+    els.loadAdvisorContext.addEventListener("click", async () => {
+      await loadAdvisorContext();
+    });
+  }
+
+  if (els.runDeepSeekAdvisor) {
+    els.runDeepSeekAdvisor.addEventListener("click", async () => {
+      await runDeepSeekAdvisorDryRun();
+    });
+  }
+
+  if (els.recordAdvisorResponse) {
+    els.recordAdvisorResponse.addEventListener("click", async () => {
+      await recordAdvisorResponse();
+    });
+  }
 
   els.orderType.addEventListener("change", () => {
     syncTicketOrderFields();
@@ -1028,6 +1059,12 @@ async function loadAccountData() {
     state.runtime = null;
     state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
     state.coveredCallActivity = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+    state.advisorContext = null;
+    state.advisorDraft = null;
+    state.advisorStatus = buildOverlayStatus(
+      "idle",
+      "Select a broker account before loading advisor context."
+    );
     state.marketEvents = [];
     state.executions = [];
     state.journals = [];
@@ -1044,6 +1081,7 @@ async function loadAccountData() {
     renderStrategyRuntime();
     renderCoveredCallActivity();
     renderStrategyExperiment();
+    renderAdvisorPanel();
     renderMarketEvents();
     renderSpreads();
     renderOrders();
@@ -1106,6 +1144,7 @@ async function loadAccountData() {
     renderStrategyRuntime();
     renderCoveredCallActivity();
     renderStrategyExperiment();
+    renderAdvisorPanel();
     renderMarketEvents();
     renderSpreads();
     renderOrders();
@@ -1413,6 +1452,118 @@ async function runStrategyReview() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
+  }
+}
+
+function resetAdvisorState(
+  detail = "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app."
+) {
+  state.advisorContext = null;
+  state.advisorDraft = null;
+  state.advisorStatus = buildOverlayStatus("idle", detail);
+  renderAdvisorPanel();
+}
+
+async function loadAdvisorContext() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before loading advisor context.", "warning");
+    resetAdvisorState("Select a broker account before loading advisor context.");
+    return;
+  }
+
+  state.advisorStatus = buildOverlayStatus("loading", `Loading advisor context for ${state.selectedAccountId}...`);
+  renderAdvisorPanel();
+  try {
+    state.advisorContext = await fetchJson(
+      `/strategies/advisor-context?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=10`
+    );
+    state.advisorDraft = null;
+    const summary = objectPayload(state.advisorContext.covered_call_activity?.summary);
+    state.advisorStatus = buildOverlayStatus(
+      "live",
+      `Advisor context loaded for ${state.selectedAccountId}.`,
+      `${formatActivityCount(summary.active_proposals)} active covered-call proposal(s), ${formatActivityCount(summary.executed_positions)} open covered-call position(s).`
+    );
+    renderAdvisorPanel();
+    setStatus(`Advisor context loaded for ${state.selectedAccountId}.`, "success");
+  } catch (error) {
+    console.error(error);
+    state.advisorStatus = buildOverlayStatus("error", error.message || "Advisor context load failed.");
+    renderAdvisorPanel();
+    setStatus(error.message || "Advisor context load failed.", "error");
+  }
+}
+
+async function runDeepSeekAdvisorDryRun() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before running DeepSeek advisor.", "warning");
+    return;
+  }
+
+  state.advisorStatus = buildOverlayStatus(
+    "loading",
+    `Running DeepSeek advisor dry-run for ${state.selectedAccountId}...`,
+    "This sends the selected account advisor context to DeepSeek."
+  );
+  renderAdvisorPanel();
+  try {
+    const result = await fetchJson("/strategies/advisor/deepseek/dry-run", {
+      method: "POST",
+      body: JSON.stringify({
+        external_account_id: state.selectedAccountId,
+        context_limit: 10,
+      }),
+      timeoutMs: ADVISOR_REQUEST_TIMEOUT_MS,
+    });
+    state.advisorContext = result.context || null;
+    state.advisorDraft = result;
+    const payload = objectPayload(result.response_payload);
+    const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
+    const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
+    state.advisorStatus = buildOverlayStatus(
+      "live",
+      `DeepSeek generated ${proposalCount} proposal(s) and ${reviewCount} review(s).`,
+      "Dry-run only; use Record Output to write local ledger entries."
+    );
+    renderAdvisorPanel();
+    setStatus(`DeepSeek dry-run generated ${proposalCount} proposal(s) and ${reviewCount} review(s).`, "success");
+  } catch (error) {
+    console.error(error);
+    state.advisorStatus = buildOverlayStatus("error", error.message || "DeepSeek advisor dry-run failed.");
+    renderAdvisorPanel();
+    setStatus(error.message || "DeepSeek advisor dry-run failed.", "error");
+  }
+}
+
+async function recordAdvisorResponse() {
+  const payload = objectPayload(state.advisorDraft?.response_payload);
+  const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
+  const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
+  if (!proposalCount && !reviewCount) {
+    setStatus("No DeepSeek advisor output is ready to record.", "warning");
+    return;
+  }
+
+  state.advisorStatus = buildOverlayStatus("loading", "Recording advisor output to the local strategy ledger...");
+  renderAdvisorPanel();
+  try {
+    await fetchJson("/strategies/advisor/responses", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.advisorDraft = null;
+    state.advisorStatus = buildOverlayStatus(
+      "live",
+      `Recorded ${proposalCount} advisor proposal(s) and ${reviewCount} review(s).`,
+      "Broker orders were not submitted."
+    );
+    await loadAccountData();
+    setStatus(`Recorded advisor output: ${proposalCount} proposal(s), ${reviewCount} review(s).`, "success");
+  } catch (error) {
+    console.error(error);
+    state.advisorStatus = buildOverlayStatus("error", error.message || "Advisor output recording failed.");
+    renderAdvisorPanel();
+    setStatus(error.message || "Advisor output recording failed.", "error");
   }
 }
 
@@ -2466,6 +2617,164 @@ function renderStrategyExperimentList({ element, items, emptyText, renderItem })
   }
   element.className = "strategy-note-body";
   element.innerHTML = items.slice(0, 4).map(renderItem).join("");
+}
+
+function renderAdvisorPanel() {
+  if (!els.advisorOutputCard) {
+    return;
+  }
+  updateAdvisorButtons();
+  const overlay = state.advisorStatus || buildOverlayStatus("idle", "Advisor context is available on demand.");
+  const context = state.advisorContext;
+  const result = state.advisorDraft || null;
+  const payload = objectPayload(result?.response_payload);
+  const proposals = Array.isArray(payload.proposals) ? payload.proposals : [];
+  const reviews = Array.isArray(payload.reviews) ? payload.reviews : [];
+
+  if (!context && !result) {
+    els.advisorOutputCard.className = "strategy-note-body empty";
+    els.advisorOutputCard.innerHTML = `
+      <div class="overlay-status-row">
+        <div class="overlay-status-copy">
+          <strong>DeepSeek Advisor</strong>
+          <span>${escapeHtml(overlay.detail)}</span>
+        </div>
+        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
+      </div>
+      ${renderOverlayReason(overlay)}
+    `;
+    return;
+  }
+
+  els.advisorOutputCard.className = "strategy-note-body";
+  els.advisorOutputCard.innerHTML = `
+    <div class="overlay-status-row">
+      <div class="overlay-status-copy">
+        <strong>DeepSeek Advisor</strong>
+        <span>${escapeHtml(overlay.detail || "Advisor output ready.")}</span>
+      </div>
+      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
+    </div>
+    ${renderOverlayReason(overlay)}
+    ${renderAdvisorContextSummary(context)}
+    ${renderAdvisorUsage(payload.raw_response)}
+    ${renderAdvisorDraftList("Proposals", proposals, renderAdvisorProposalDraft)}
+    ${renderAdvisorDraftList("Reviews", reviews, renderAdvisorReviewDraft)}
+  `;
+}
+
+function updateAdvisorButtons() {
+  const busy = state.advisorStatus?.kind === "loading";
+  const payload = objectPayload(state.advisorDraft?.response_payload);
+  const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
+  const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
+  if (els.loadAdvisorContext) {
+    els.loadAdvisorContext.disabled = busy || !state.selectedAccountId;
+  }
+  if (els.runDeepSeekAdvisor) {
+    els.runDeepSeekAdvisor.disabled = busy || !state.selectedAccountId;
+  }
+  if (els.recordAdvisorResponse) {
+    els.recordAdvisorResponse.disabled = busy || proposalCount + reviewCount === 0;
+  }
+}
+
+function renderAdvisorContextSummary(context) {
+  if (!context) {
+    return "";
+  }
+  const activity = context.covered_call_activity || {};
+  const summary = objectPayload(activity.summary);
+  const hardRules = Array.isArray(context.hard_rules) ? context.hard_rules : [];
+  const items = [
+    ["Account", context.external_account_id || "--", context.controls?.execution_mode || "paper"],
+    ["Active CC", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s)`],
+    ["Open CC", formatActivityCount(summary.executed_positions), `${formatActivityCount(summary.pending_rolls)} pending roll(s)`],
+    ["Rules", String(hardRules.length), hardRules[0]?.name || "advisor_context_is_read_only"],
+  ];
+  return `
+    <div class="proposal-detail-grid">
+      ${items.map(renderStrategyProposalDetail).join("")}
+    </div>
+  `;
+}
+
+function renderAdvisorUsage(rawResponse) {
+  const raw = objectPayload(rawResponse);
+  const usage = objectPayload(raw.usage);
+  if (!Object.keys(usage).length) {
+    return "";
+  }
+  const details = objectPayload(usage.prompt_tokens_details);
+  const items = [
+    ["Prompt", displayValue(usage.prompt_tokens), `Model ${raw.model || "--"}`],
+    ["Completion", displayValue(usage.completion_tokens), `Reasoning ${displayValue(objectPayload(usage.completion_tokens_details).reasoning_tokens)}`],
+    ["Cache Hit", displayValue(pickProposalValue(usage.prompt_cache_hit_tokens, details.cached_tokens)), "Reused prompt tokens"],
+    ["Cache Miss", displayValue(usage.prompt_cache_miss_tokens), "New prompt tokens billed as input"],
+  ];
+  return `
+    <article class="strategy-journal-entry advisor-usage">
+      <div class="strategy-journal-head">
+        <strong>Usage</strong>
+        <span>${escapeHtml(raw.response_id || raw.finish_reason || "--")}</span>
+      </div>
+      <div class="proposal-detail-grid">
+        ${items.map(renderStrategyProposalDetail).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderAdvisorDraftList(title, items, renderItem) {
+  if (!items.length) {
+    return `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>${escapeHtml(title)}</strong>
+          <span class="pill neutral">0</span>
+        </div>
+        <p>No ${title.toLowerCase()} generated.</p>
+      </article>
+    `;
+  }
+  return `
+    <article class="strategy-journal-entry">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(title)}</strong>
+        <span class="pill neutral">${escapeHtml(String(items.length))}</span>
+      </div>
+      <div class="advisor-draft-list">
+        ${items.slice(0, 4).map(renderItem).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderAdvisorProposalDraft(proposal) {
+  const checks = Array.isArray(proposal.checks) ? proposal.checks : [];
+  return `
+    <div class="advisor-draft-item">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(proposal.title || "Advisor proposal")}</strong>
+        <span class="pill warning">${escapeHtml(formatStrategyStatusLabel(proposal.proposed_action || "proposal"))}</span>
+      </div>
+      <p>${escapeHtml(proposal.rationale || proposal.thesis || "No rationale supplied.")}</p>
+      <span>${escapeHtml([proposal.strategy_id, proposal.symbol, checks.slice(0, 2).join(", ")].filter(Boolean).join(" / "))}</span>
+    </div>
+  `;
+}
+
+function renderAdvisorReviewDraft(review) {
+  return `
+    <div class="advisor-draft-item">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(review.review_type || "advisor")}</strong>
+        <span class="pill ${strategyStatusClass(review.status)}">${escapeHtml(formatStrategyStatusLabel(review.status || "observed"))}</span>
+      </div>
+      <p>${escapeHtml(review.recommendation || review.summary || "No recommendation supplied.")}</p>
+      <span>${escapeHtml([review.strategy_id, formatDateTime(review.reviewed_at)].filter(Boolean).join(" / "))}</span>
+    </div>
+  `;
 }
 
 function renderStrategyProposalDetails(proposal, proposals = []) {

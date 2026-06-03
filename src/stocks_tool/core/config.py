@@ -195,6 +195,12 @@ class Settings(BaseSettings):
     market_event_provider_timeout_seconds: int = Field(default=20, ge=1)
     fmp_api_key: str = ""
     fmp_base_url: str = "https://financialmodelingprep.com"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_seconds: int = Field(default=120, ge=1)
+    deepseek_max_tokens: int = Field(default=4096, ge=256)
+    deepseek_temperature: Decimal = Field(default=Decimal("0.2"), ge=0, le=2)
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
     longbridge_access_token: str = ""

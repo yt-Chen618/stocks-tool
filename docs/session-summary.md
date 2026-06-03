@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-06-02
+Last updated: 2026-06-03
 
 ## Project
 
@@ -77,6 +77,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /strategies/experiment`
 - `GET /strategies/controls`
 - `GET /strategies/advisor-context`
+- `POST /strategies/advisor/deepseek/dry-run`
+- `POST /strategies/advisor/responses`
 - `GET /strategies/covered-call/preview`
 - `GET /strategies/covered-call/activity`
 - `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
@@ -155,6 +157,14 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - proposal approval/rejection accepts an optional audit actor/note body and writes a `strategy_policy` review signal with the previous/new proposal status
   - LLM/advisor-sourced proposals such as `deepseek`, `llm`, `openai`, or `external_advisor` are treated as read-only advice until local deterministic checks and manual approval are present
   - advisor-sourced proposals must keep `approval_required=true`, cannot be created in live mode, and record a `strategy_policy` audit signal when accepted into the ledger
+  - `POST /strategies/advisor/responses` records external advisor output as paper-only proposals or reviews after loading the local advisor context; it normalizes recognized sources such as `deepseek`, forces proposal `approval_required=true`, adds read-only/manual-approval checks, and does not touch any broker order path
+  - `POST /strategies/advisor/deepseek/dry-run` loads the same local advisor context, calls the configured DeepSeek client, and returns a recordable payload with `recorded=false` so the dashboard can preview the result before writing ledger rows
+  - the DeepSeek advisor prompt now prioritizes `covered_call_activity.summary`, `covered_call_activity.lifecycle_tasks`, proposal statuses, and later close/lifecycle runs over older monitor signals, so closed or rolled covered-call history is not mistaken for an active position
+  - the DeepSeek advisor client now sends a compact `compact_v1` context that preserves controls, hard rules, covered-call summary/current state, lifecycle tasks, latest monitor, recent proposal/run/signal/review summaries, and selected option/risk fields while omitting bulky `candidate_payload`, `risk_payload`, `raw_payload`, broker snapshots, and full option-chain details
+  - the compact context also exposes covered-call `auto_propose_enabled` and `new_entry_scheduler_active`; when auto-propose is disabled, the prompt tells DeepSeek not to recommend waiting for scheduler-generated covered-call entry signals
+  - DeepSeek advisor output is lightly normalized before intake validation: placeholder optional text such as `None`, `N/A`, or `no recommendation` is removed from recommendations, and placeholder required summaries are replaced with a concrete no-action summary so the dashboard does not render `None`
+  - the dashboard Strategy Experiment Bench now includes explicit Load Context, Run DeepSeek, and Record Output controls; Run DeepSeek is the only dashboard path that sends advisor context to DeepSeek, while Record Output only writes local proposals/reviews
+  - `scripts\run_regression.py advisor-intake --call-deepseek` can use `.env` DeepSeek settings to generate a structured advisor response through the same intake boundary; it remains read-only unless `--record` is explicitly supplied
 
 ### Covered call proposals
 
@@ -487,6 +497,61 @@ Frontend files:
 ```
 
 - Result: `149 passed`
+- Latest handoff consolidation verification on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+- Result: `149 passed in 3.42s`
+- Latest advisor-intake implementation verification on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+- Result: `153 passed in 2.99s`
+- Latest DeepSeek provider-client verification on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+- Result: `158 passed in 3.63s`
+- Added mock-transport tests for DeepSeek request construction, `v4 pro` model alias normalization, missing `DEEPSEEK_API_KEY`, HTTP error handling, and invalid JSON handling.
+- Latest DeepSeek advisor dry-run/dashboard verification on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_deepseek_advisor.py tests\test_strategy_experiments_api.py tests\test_ui_dashboard.py -q
+```
+
+- Result: `23 passed in 0.34s`
+- Added route coverage for `POST /strategies/advisor/deepseek/dry-run`, prompt assertions for lifecycle/status priority rules, and dashboard HTML coverage for the DeepSeek dry-run controls.
+- Full local verification after the DeepSeek dry-run dashboard update on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+node --check src\stocks_tool\ui\static\app.js
+```
+
+- Result: `161 passed in 3.38s`; JavaScript syntax check passed.
+- Local `127.0.0.1:8000` smoke checks confirmed `/openapi.json` includes `/strategies/advisor/deepseek/dry-run`, `/` includes the DeepSeek dry-run controls, and a headless Playwright check could click `Load Context` without external DeepSeek calls or frontend console/page errors.
+- Latest DeepSeek compact-context verification on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_deepseek_advisor.py -q
+```
+
+- Result: `7 passed in 0.10s`; the broader advisor target set `tests\test_deepseek_advisor.py tests\test_strategy_experiments_api.py tests\test_strategy_advisor_intake.py` also passed with `28 passed in 0.28s`, and full regression passed with `162 passed in 3.37s` after the scheduler-guidance and placeholder-normalization refinements.
+- Local offline size comparison against the running `LBPT10087357` advisor context showed full prompt JSON `67,955` characters vs compact prompt JSON `21,165` characters, a `68.9%` character reduction before tokenization. No external DeepSeek request was made for this measurement.
+- Latest advisor-intake local API dry run on `2026-06-03`:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py advisor-intake
+```
+
+- Result from the running local `127.0.0.1:8000` instance: `passed`; the script loaded `/strategies/advisor-context` for `LBPT10087357`, confirmed `deepseek` is a recognized advisor source, confirmed the read-only hard rules, saw the recorded advisor review, and did not record any ledger rows because `--record` was not supplied.
+- A real `advisor-intake --call-deepseek` dry run was not completed in this environment because it requires explicit approval to send the local advisor context to DeepSeek over the network; no workaround was attempted and no ledger rows were recorded.
 - Latest browser-regression run:
 
 ```powershell
@@ -590,6 +655,17 @@ Frontend files:
   - after the close, `GET /strategies/covered-call/activity` reports `executed_positions=0`, `pending_rolls=0`, `close_runs=1`, and no pending lifecycle tasks
   - implementation note: the code-level FastAPI app and a temporary `127.0.0.1:8001` instance exposed the new `/strategies/controls` route, but the long-running `127.0.0.1:8000` process still served an older OpenAPI route set during verification; a full process restart is needed for the user-facing 8000 instance to expose the new controls and advisor-context routes
 
+## Current phase consolidation
+
+- Working tree was clean on `main` during the `2026-06-03` handoff check.
+- Current code and tests include the strategy controls, advisor-context, covered-call activity, and covered-call lifecycle routes.
+- The active product boundary is still paper-first: advisor/LLM inputs may write proposals or reviews into the ledger through `POST /strategies/advisor/responses`, but must not execute orders directly.
+- The `advisor-intake` regression workflow can fetch advisor context from the local API, optionally call DeepSeek through `.env` settings, and optionally record a provided or generated advisor response JSON only when `--record` is explicitly supplied.
+- The dashboard can now load advisor context, run a DeepSeek dry-run through `POST /strategies/advisor/deepseek/dry-run`, preview token usage/cache hit/miss plus generated proposals/reviews, and explicitly record the output through `POST /strategies/advisor/responses`.
+- Real DeepSeek calls export local advisor context to an external provider and should be run only after explicit approval for that data sharing.
+- The covered-call paper validation cycle is closed with no active covered-call proposal, pending roll, or pending lifecycle task reported by the activity endpoint.
+- The local `127.0.0.1:8000` instance now exposes the DeepSeek dry-run route and dashboard controls; reload the browser tab if a stale asset is still visible.
+
 ## Known cleanup items
 
 - Watchlists contain duplicate and test residue data from manual API exercises.
@@ -599,6 +675,6 @@ Frontend files:
 
 ## Recommended next steps
 
-1. Fully replace the long-running `127.0.0.1:8000` process so it exposes the new `/strategies/controls` and `/strategies/advisor-context` routes; tests and the local app code already verify the routes are present.
-2. Keep auto-propose disabled unless intentionally creating new covered-call candidates; the previous active QQQ covered-call roll is now closed, so background covered-call monitor/lifecycle has no open proposal to manage.
-3. Continue with the next phase: add the DeepSeek/LLM adapter that reads `/strategies/advisor-context` and writes proposals/reviews into the existing ledger without direct execution authority.
+1. Keep covered-call auto-propose disabled unless intentionally creating new candidates; leave auto-monitor / auto-lifecycle enabled only when there is an open or pending covered-call proposal to supervise.
+2. Reload the dashboard, then run an explicitly approved DeepSeek dry run from the dashboard or with `advisor-intake --call-deepseek` to validate the compact-context prompt against the user's `.env` API key and `deepseek-v4-pro` model setting.
+3. Review the dry-run output before recording; record only proposals/reviews through `POST /strategies/advisor/responses`, and keep broker order execution on deterministic local covered-call/bull-put flows.

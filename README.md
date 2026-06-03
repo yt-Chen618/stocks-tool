@@ -127,6 +127,8 @@ Then open:
 - `GET /strategies/experiment`
 - `GET /strategies/controls`
 - `GET /strategies/advisor-context`
+- `POST /strategies/advisor/deepseek/dry-run`
+- `POST /strategies/advisor/responses`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -192,6 +194,9 @@ The bull put spread workflow is currently paper-only:
 - bull put performance visibility: previews include `timing_ms`, and locked execute can reuse the cached candidate while refreshing only the two selected option legs before submission
 - bull put runtime state: runtime responses include computed fields such as `holding_open_position`, `daily_entry_cap_reached`, `next_action`, active/open spread counts, and `next_monitor_after`
 - strategy experiment ledger: `/strategies/experiment` aggregates strategy proposals, runs, signals, and reviews; `/strategies/controls` exposes paper/live locks, scheduler state, covered-call automation flags, and execution permission boundaries; `/strategies/advisor-context` packages the same local controls, ledger snapshot, covered-call activity, advisor sources, and hard rules for read-only LLM advisor input; direct list/create routes are available so future strategies and LLM advisors can record plans before execution
+- advisor response intake: `POST /strategies/advisor/responses` records external advisor output as paper-only proposals or reviews after loading the local advisor context; it normalizes recognized sources such as `deepseek`, forces proposal `approval_required=true`, adds read-only/manual-approval checks, and does not touch any broker order path
+- DeepSeek advisor dry-run: `POST /strategies/advisor/deepseek/dry-run` loads local advisor context, sends it to DeepSeek through the configured client, and returns a recordable payload with `recorded=false`; the dashboard exposes Load Context, Run DeepSeek, and Record Output controls in the Strategy Experiment Bench
+- DeepSeek advisor client: `scripts\run_regression.py advisor-intake --call-deepseek` uses `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, and `DEEPSEEK_MODEL` from `.env` to ask DeepSeek for a structured advisor response; it sends a compact `compact_v1` advisor context that preserves current lifecycle/status facts while omitting bulky candidate, risk, raw, and broker snapshot payloads; it stays read-only unless `--record` is also supplied, and sending context to DeepSeek should be treated as explicit external data sharing
 - strategy audit and permission boundaries: proposal approval/rejection can include an audit actor and note, recorded as `strategy_policy` signals; LLM/advisor-sourced proposals are read-only advice until local deterministic checks and manual approval are present; advisor-sourced proposals must keep `approval_required=true`, cannot be created in live mode, and are audited when recorded; covered-call order entry enforces the policy before any broker call
 - market events: `/market-events` stores local earnings, dividend, FOMC, CPI, jobs, and other risk events for strategy filters; `/market-events/import` ingests CSV-shaped batches with duplicate suppression; `/market-events/import/provider` can import normalized FMP earnings and U.S. macro events through the same dedupe path
 - covered call proposals: `GET /strategies/covered-call/preview` scans the latest local stock/ETF position snapshot for a covered lot and a liquid OTM call, including upcoming event warnings from `/market-events`; `POST /strategies/covered-call/propose` persists the candidate into the strategy experiment ledger for manual approval and skips duplicate active proposals for the same symbol; `POST /strategies/covered-call/proposals/{proposal_id}/execute` submits a paper covered-call sell order only after that proposal is approved, leaving the proposal approved while the sell order works and marking it executed only after fill; `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile` manually refreshes and advances existing pending covered-call open / close / roll orders; `POST /strategies/covered-call/proposals/{proposal_id}/monitor` gives read-only take-profit / assignment-pressure / expiration-week guidance for executed sell or roll proposals; `POST /strategies/covered-call/proposals/{proposal_id}/roll-propose` records a manual-approval roll proposal with current buyback estimate and next OTM call candidate; `POST /strategies/covered-call/proposals/{proposal_id}/roll-execute` executes an approved roll proposal by submitting buy-to-close first and only submitting sell-to-open when the buyback is already filled; `POST /strategies/covered-call/proposals/{proposal_id}/roll-continue` refreshes a pending buyback order and can refresh an existing sell-to-open order id to avoid duplicate roll-open orders; `POST /strategies/covered-call/proposals/{proposal_id}/close` submits a paper buy-to-close limit order for an executed sell or roll proposal; filled close orders mark proposals `closed`, and rolls mark the source proposal `rolled` only after the new short call fill is confirmed; optional background flags can auto-scan proposals, monitor executed covered-call proposals, and reconcile pending covered-call open / close / roll orders without approving new proposals
@@ -213,12 +218,13 @@ The bull put spread workflow is currently paper-only:
 
 ## Regression scripts
 
-The repo includes six regression workflows plus a single entrypoint:
+The repo includes regression workflows behind a single entrypoint:
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
+.venv\Scripts\python.exe scripts\run_regression.py advisor-intake
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 .venv\Scripts\python.exe scripts\run_regression.py real-paper
 .venv\Scripts\python.exe scripts\run_regression.py real-preopen-board
@@ -230,6 +236,7 @@ Available workflows:
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
 - `bull-put-readiness`: runs the read-only bull put opening readiness check against an already running local API session; it defaults to `QQQ.US` so the check avoids scanning the full universe before the open
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
+- `advisor-intake`: fetches `/strategies/advisor-context` from an already running local API session, can call DeepSeek with `--call-deepseek`, and can record a provided or generated advisor response into `/strategies/advisor/responses` only when `--record` is explicitly supplied
 - `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 - `real-preopen-board`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, clicks `Load Live Macro`, and verifies the response is live fast-path data for the expected U.S. session date instead of a stored fallback
@@ -252,6 +259,8 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper --json-output artifacts/bull-put-paper-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness --symbol QQQ.US --json-output artifacts/bull-put-readiness.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-dry-run.json
+.venv\Scripts\python.exe scripts\run_regression.py advisor-intake --json-output artifacts/advisor-intake-context.json
+.venv\Scripts\python.exe scripts\run_regression.py advisor-intake --call-deepseek --json-output artifacts/deepseek-advisor-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py real-preopen-board --expected-session-date 2026-05-29 --json-output artifacts/real-preopen-board-regression.json
@@ -289,8 +298,19 @@ MARKET_EVENT_PROVIDER_LOOKAHEAD_DAYS=30
 FMP_API_KEY=...
 ```
 
+DeepSeek advisor calls are optional and disabled unless you run the advisor-intake script with `--call-deepseek` or click the dashboard DeepSeek dry-run control.
+
+```text
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_TIMEOUT_SECONDS=120
+DEEPSEEK_MAX_TOKENS=4096
+DEEPSEEK_TEMPERATURE=0.2
+```
+
 ## Next milestones
 
-1. Replace the long-running `127.0.0.1:8000` process so it serves the latest route set including `GET /strategies/controls` and `GET /strategies/advisor-context`; the current code and test client already expose them.
-2. Keep auto-propose disabled unless intentionally creating new covered-call candidates; the previous `QQQ260630C770000.US` paper covered-call roll has been bought back and closed.
-3. Add the DeepSeek / LLM adapter that reads `/strategies/advisor-context` and writes proposals or reviews into the existing ledger without direct order-execution authority.
+1. Keep covered-call auto-propose disabled unless intentionally creating new covered-call candidates; the previous `QQQ260630C770000.US` paper covered-call roll has been bought back and closed.
+2. Reload the dashboard so the versioned static assets pick up the DeepSeek controls; restart the local API/dashboard process only if `/strategies/advisor/deepseek/dry-run` is missing from OpenAPI.
+3. Run an explicitly approved DeepSeek dry run from either the dashboard or `advisor-intake --call-deepseek` after confirming that sending advisor context to DeepSeek is acceptable, then compare prompt tokens against the previous 23k-token full-context run.

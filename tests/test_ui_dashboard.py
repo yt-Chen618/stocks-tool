@@ -38,6 +38,10 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Strategy Runs" in response.text
     assert "Signal Feed" in response.text
     assert "Review Feed" in response.text
+    assert "DeepSeek Dry Run" in response.text
+    assert "Load Context" in response.text
+    assert "Run DeepSeek" in response.text
+    assert "Record Output" in response.text
     assert "Upcoming Events" in response.text
     assert "Entry Status" in response.text
     assert "Next Action" in response.text

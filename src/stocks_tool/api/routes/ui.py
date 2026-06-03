@@ -378,6 +378,20 @@ def render_dashboard() -> HTMLResponse:
                                 No strategy reviews recorded yet.
                               </div>
                             </article>
+                            <article class="strategy-note-card advisor-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Advisor</span>
+                                <h3>DeepSeek Dry Run</h3>
+                              </div>
+                              <div class="inline-actions">
+                                <button id="load-advisor-context" class="table-action" type="button">Load Context</button>
+                                <button id="run-deepseek-advisor" class="table-action primary" type="button">Run DeepSeek</button>
+                                <button id="record-advisor-response" class="table-action" type="button" disabled>Record Output</button>
+                              </div>
+                              <div id="advisor-output-card" class="strategy-note-body empty">
+                                Advisor context is available on demand. DeepSeek dry-run sends the selected account context outside the local app.
+                              </div>
+                            </article>
                           </div>
                         </section>
 

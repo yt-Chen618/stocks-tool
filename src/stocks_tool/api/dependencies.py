@@ -3,6 +3,7 @@ from functools import lru_cache
 from fastapi import Depends
 from sqlalchemy.orm import Session
 
+from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorClient
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
@@ -22,6 +23,9 @@ from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.strategy_advisor_intake import (
+    StrategyAdvisorIntakeService,
+)
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.core.config import Settings, get_settings
 from stocks_tool.db.session import get_db_session
@@ -246,6 +250,18 @@ def get_strategy_experiment_service(
         broker_accounts=broker_accounts,
         settings=settings,
     )
+
+
+def get_strategy_advisor_intake_service(
+    strategy_experiments: StrategyExperimentService = Depends(get_strategy_experiment_service),
+) -> StrategyAdvisorIntakeService:
+    return StrategyAdvisorIntakeService(strategy_experiments=strategy_experiments)
+
+
+def get_deepseek_advisor_client(
+    settings: Settings = Depends(get_settings),
+) -> DeepSeekAdvisorClient:
+    return DeepSeekAdvisorClient(settings=settings)
 
 
 def get_covered_call_strategy_service(

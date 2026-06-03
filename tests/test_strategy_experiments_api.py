@@ -5,7 +5,8 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
-from stocks_tool.api.dependencies import get_strategy_experiment_service
+from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorError
+from stocks_tool.api.dependencies import get_deepseek_advisor_client, get_strategy_experiment_service
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -183,6 +184,45 @@ def build_review() -> StrategyReview:
         reviewed_at=NOW,
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def build_advisor_context() -> StrategyAdvisorContext:
+    controls = StrategyControlSnapshot(
+        external_account_id="LBPT10087357",
+        execution_mode=ExecutionMode.PAPER,
+        live_trading_enabled=False,
+        scheduler_enabled=True,
+        permission_boundaries=[
+            StrategyPermissionBoundary(
+                name="llm_read_only_advisor",
+                allowed=False,
+                detail="Advisor output cannot execute directly.",
+            )
+        ],
+    )
+    return StrategyAdvisorContext(
+        external_account_id="LBPT10087357",
+        controls=controls,
+        experiment=StrategyExperimentSnapshot(
+            external_account_id="LBPT10087357",
+            proposals=[build_proposal()],
+            runs=[build_run()],
+            signals=[build_signal()],
+            reviews=[build_review()],
+        ),
+        covered_call_activity=CoveredCallActivitySnapshot(
+            external_account_id="LBPT10087357",
+            summary=CoveredCallActivitySummary(external_account_id="LBPT10087357"),
+        ),
+        advisor_sources=["deepseek", "external_advisor", "llm", "llm_advisor", "openai"],
+        hard_rules=[
+            StrategyPermissionBoundary(
+                name="advisor_context_is_read_only",
+                allowed=False,
+                detail="Context cannot submit broker orders.",
+            )
+        ],
     )
 
 
@@ -611,6 +651,84 @@ def test_strategy_advisor_context_route_returns_read_only_context() -> None:
         external_account_id="LBPT10087357",
         limit=6,
     )
+
+
+def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writing() -> None:
+    service = Mock()
+    service.get_advisor_context.return_value = build_advisor_context()
+    advisor_client = Mock()
+    advisor_client.create_advisor_response.return_value = {
+        "reviews": [
+            {
+                "strategy_id": "covered_call_v1",
+                "review_type": "advisor",
+                "status": "observed",
+                "summary": "Current covered-call lifecycle is flat.",
+                "recommendation": "No broker action is needed.",
+            }
+        ],
+        "raw_response": {
+            "provider": "deepseek",
+            "model": "deepseek-v4-pro",
+            "response_id": "chatcmpl-1",
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 40,
+                "prompt_cache_miss_tokens": 60,
+            },
+        },
+    }
+    app.dependency_overrides[get_strategy_experiment_service] = lambda: service
+    app.dependency_overrides[get_deepseek_advisor_client] = lambda: advisor_client
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/strategies/advisor/deepseek/dry-run",
+            json={
+                "external_account_id": "LBPT10087357",
+                "context_limit": 6,
+                "model": "v4 pro",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["recorded"] is False
+    assert body["source"] == "deepseek"
+    assert body["response_payload"]["external_account_id"] == "LBPT10087357"
+    assert body["response_payload"]["reviews"][0]["summary"] == "Current covered-call lifecycle is flat."
+    assert body["response_payload"]["raw_response"]["usage"]["prompt_cache_hit_tokens"] == 40
+    service.get_advisor_context.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        limit=6,
+    )
+    advisor_client.create_advisor_response.assert_called_once_with(
+        context=service.get_advisor_context.return_value,
+        model="v4 pro",
+    )
+
+
+def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
+    service = Mock()
+    service.get_advisor_context.return_value = build_advisor_context()
+    advisor_client = Mock()
+    advisor_client.create_advisor_response.side_effect = DeepSeekAdvisorError("DEEPSEEK_API_KEY is not configured.")
+    app.dependency_overrides[get_strategy_experiment_service] = lambda: service
+    app.dependency_overrides[get_deepseek_advisor_client] = lambda: advisor_client
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/strategies/advisor/deepseek/dry-run",
+            json={"external_account_id": "LBPT10087357"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 400
+    assert "DEEPSEEK_API_KEY" in response.json()["detail"]
 
 
 def test_strategy_experiment_service_records_approval_audit_signal() -> None:

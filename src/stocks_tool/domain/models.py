@@ -645,6 +645,72 @@ class StrategyAdvisorContext(BaseModel):
     hard_rules: list[StrategyPermissionBoundary] = Field(default_factory=list)
 
 
+class StrategyAdvisorProposalDraft(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    symbol: str | None = Field(default=None, max_length=32)
+    title: str = Field(min_length=1, max_length=160)
+    proposed_action: str = Field(min_length=1, max_length=64)
+    thesis: str | None = None
+    rationale: str = Field(min_length=1)
+    confidence: Decimal | None = Field(default=None, ge=0, le=1)
+    expected_max_loss: Decimal | None = Field(default=None, ge=0)
+    expected_max_profit: Decimal | None = None
+    expires_at: datetime | None = None
+    candidate_payload: dict | None = None
+    risk_payload: dict | None = None
+    checks: list[str] = Field(default_factory=list)
+
+
+class StrategyAdvisorReviewDraft(BaseModel):
+    strategy_id: str = Field(min_length=1, max_length=64)
+    review_type: str = Field(default="advisor", min_length=1, max_length=64)
+    status: StrategyReviewStatus = StrategyReviewStatus.OBSERVED
+    summary: str = Field(min_length=1)
+    recommendation: str | None = None
+    parameter_name: str | None = Field(default=None, max_length=64)
+    current_value: str | None = Field(default=None, max_length=120)
+    suggested_value: str | None = Field(default=None, max_length=120)
+    proposal_id: str | None = Field(default=None, max_length=36)
+    metrics_payload: dict | None = None
+    reviewed_at: datetime | None = None
+
+
+class RecordStrategyAdvisorResponseRequest(BaseModel):
+    external_account_id: str
+    source: str = Field(default="deepseek", min_length=1, max_length=64)
+    mode: ExecutionMode = ExecutionMode.PAPER
+    context_limit: int = Field(default=10, ge=1, le=50)
+    proposals: list[StrategyAdvisorProposalDraft] = Field(default_factory=list)
+    reviews: list[StrategyAdvisorReviewDraft] = Field(default_factory=list)
+    raw_response: dict | None = None
+
+
+class RunDeepSeekAdvisorRequest(BaseModel):
+    external_account_id: str = Field(min_length=1, max_length=64)
+    context_limit: int = Field(default=10, ge=1, le=50)
+    model: str | None = Field(default=None, min_length=1, max_length=120)
+
+
+class DeepSeekAdvisorDryRunResult(BaseModel):
+    external_account_id: str
+    source: str = "deepseek"
+    mode: ExecutionMode = ExecutionMode.PAPER
+    recorded: bool = False
+    context: StrategyAdvisorContext
+    response_payload: RecordStrategyAdvisorResponseRequest
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StrategyAdvisorResponseResult(BaseModel):
+    external_account_id: str
+    source: str
+    mode: ExecutionMode
+    context: StrategyAdvisorContext
+    proposals: list[StrategyProposal] = Field(default_factory=list)
+    reviews: list[StrategyReview] = Field(default_factory=list)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class BrokerCapability(BaseModel):
     name: str
     supported: bool
