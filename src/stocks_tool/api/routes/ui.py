@@ -50,8 +50,15 @@ def render_dashboard() -> HTMLResponse:
                     </div>
                   </header>
 
+                  <nav class="workspace-nav" aria-label="Workbench sections">
+                    <a href="#account-section">Account</a>
+                    <a href="#strategy-section">Strategy</a>
+                    <a href="#portfolio-section">Portfolio</a>
+                    <a href="#execution-section">Execution</a>
+                  </nav>
+
                   <main class="workspace">
-                    <section class="band account-band">
+                    <section id="account-section" class="band account-band">
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Account</span>
@@ -148,7 +155,7 @@ def render_dashboard() -> HTMLResponse:
                       <div id="status-banner" class="status-banner">Ready</div>
                     </section>
 
-                    <section class="band strategy-band">
+                    <section id="strategy-section" class="band strategy-band">
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Strategy</span>
@@ -538,7 +545,7 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
-                    <section class="band portfolio-band">
+                    <section id="portfolio-section" class="band portfolio-band">
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Portfolio</span>
@@ -583,7 +590,7 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
-                    <section class="band execution-band">
+                    <section id="execution-section" class="band execution-band">
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Execution</span>

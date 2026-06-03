@@ -5,6 +5,7 @@ const PRE_OPEN_BOARD_TIMEOUT_MS = 35000;
 const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
+const COLLAPSED_MODULES_STORAGE_KEY = "stocks-tool-collapsed-modules";
 const TEXT_NODE_ORIGINALS = new WeakMap();
 const ATTRIBUTE_ORIGINALS = new WeakMap();
 const TRANSLATIONS = {
@@ -471,6 +472,7 @@ let languageFrame = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
+  enhanceCollapsibleModules();
   wireEvents();
   startLanguageObserver();
   updateLanguageControls();
@@ -796,6 +798,106 @@ function wireEvents() {
     event.preventDefault();
     await submitJournalEntry();
   });
+}
+
+function enhanceCollapsibleModules() {
+  const modules = Array.from(document.querySelectorAll(".band, .panel"));
+  const collapsedModules = readCollapsedModules();
+
+  modules.forEach((module, index) => {
+    const header = module.querySelector(":scope > .band-header, :scope > .panel-header");
+    if (!header || header.querySelector("[data-module-collapse-toggle]")) {
+      return;
+    }
+
+    const key = module.id || buildCollapsibleModuleKey(module, header, index);
+    module.dataset.collapseKey = key;
+    header.classList.add("collapsible-header");
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "module-collapse-toggle";
+    toggle.dataset.moduleCollapseToggle = "true";
+    toggle.innerHTML = `
+      <span class="collapse-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" focusable="false">
+          <path d="m6 9 6 6 6-6"></path>
+        </svg>
+      </span>
+    `;
+    header.appendChild(toggle);
+
+    setModuleCollapsed(module, toggle, Boolean(collapsedModules[key]));
+
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleModuleCollapsed(module, toggle, collapsedModules);
+    });
+
+    header.addEventListener("click", (event) => {
+      if (event.defaultPrevented || isModuleCollapseInteractiveTarget(event.target)) {
+        return;
+      }
+      toggleModuleCollapsed(module, toggle, collapsedModules);
+    });
+  });
+}
+
+function buildCollapsibleModuleKey(module, header, index) {
+  const title = header.querySelector("h2")?.textContent?.trim() || "module";
+  const kind = module.classList.contains("band") ? "band" : "panel";
+  return `${kind}:${index}:${title}`;
+}
+
+function readCollapsedModules() {
+  try {
+    const stored = window.localStorage.getItem(COLLAPSED_MODULES_STORAGE_KEY);
+    const parsed = stored ? JSON.parse(stored) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCollapsedModules(collapsedModules) {
+  try {
+    window.localStorage.setItem(COLLAPSED_MODULES_STORAGE_KEY, JSON.stringify(collapsedModules));
+  } catch {
+    // Ignore storage failures; collapse state still works for this page load.
+  }
+}
+
+function toggleModuleCollapsed(module, toggle, collapsedModules) {
+  const nextCollapsed = !module.classList.contains("is-collapsed");
+  setModuleCollapsed(module, toggle, nextCollapsed);
+
+  const key = module.dataset.collapseKey;
+  if (key) {
+    if (nextCollapsed) {
+      collapsedModules[key] = true;
+    } else {
+      delete collapsedModules[key];
+    }
+    writeCollapsedModules(collapsedModules);
+  }
+}
+
+function setModuleCollapsed(module, toggle, collapsed) {
+  module.classList.toggle("is-collapsed", collapsed);
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  toggle.setAttribute("aria-label", collapsed ? "Expand module" : "Collapse module");
+  toggle.title = collapsed ? "Expand module" : "Collapse module";
+}
+
+function isModuleCollapseInteractiveTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  return Boolean(
+    target.closest(
+      "a, button, input, select, textarea, label, summary, [role='button'], [data-module-collapse-toggle], .panel-actions"
+    )
+  );
 }
 
 function readStoredLanguage() {
