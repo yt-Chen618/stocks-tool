@@ -24,8 +24,13 @@ from stocks_tool.domain.models import (
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
     CoveredCallMonitorSnapshot,
+    StrategyAdvisorAuditSnapshot,
+    StrategyAdvisorRunAudit,
+    StrategyAdvisorRunComparison,
+    StrategyAdvisorRunImpact,
     StrategyAdvisorContext,
     StrategyAdvisorRun,
+    StrategyAdvisorRunAuditCheck,
     StrategyExperimentSnapshot,
     StrategyAutomationControl,
     StrategyControlSnapshot,
@@ -210,6 +215,19 @@ def build_advisor_run(status: StrategyAdvisorRunStatus = StrategyAdvisorRunStatu
         review_count=1,
         response_id="chatcmpl-1",
         finish_reason="stop",
+        response_payload={
+            "external_account_id": "LBPT10087357",
+            "source": "deepseek",
+            "mode": "paper",
+            "reviews": [
+                {
+                    "strategy_id": "covered_call_v1",
+                    "review_type": "advisor",
+                    "status": "observed",
+                    "summary": "Current covered-call lifecycle is flat.",
+                }
+            ],
+        },
         started_at=NOW,
         completed_at=NOW,
         recorded_at=NOW if status == StrategyAdvisorRunStatus.RECORDED else None,
@@ -713,6 +731,12 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     }
     app.dependency_overrides[get_strategy_experiment_service] = lambda: service
     app.dependency_overrides[get_deepseek_advisor_client] = lambda: advisor_client
+    updated_run = build_advisor_run()
+    updated_run.response_payload = {
+        **(updated_run.response_payload or {}),
+        "advisor_run_id": "advisor-run-1",
+    }
+    service.update_advisor_run_response_payload.return_value = updated_run
     client = TestClient(app)
     try:
         response = client.post(
@@ -733,6 +757,7 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     assert body["advisor_run"]["id"] == "advisor-run-1"
     assert body["advisor_run"]["context_format"] == "compact_v1"
     assert body["advisor_run"]["prompt_tokens"] == 100
+    assert body["advisor_run"]["response_payload"]["advisor_run_id"] == "advisor-run-1"
     assert body["response_payload"]["external_account_id"] == "LBPT10087357"
     assert body["response_payload"]["advisor_run_id"] == "advisor-run-1"
     assert body["response_payload"]["reviews"][0]["summary"] == "Current covered-call lifecycle is flat."
@@ -755,6 +780,10 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     assert run_request.cache_hit_tokens == 40
     assert run_request.cache_miss_tokens == 60
     assert run_request.review_count == 1
+    service.update_advisor_run_response_payload.assert_called_once()
+    update_args = service.update_advisor_run_response_payload.call_args
+    assert update_args.args[0] == "advisor-run-1"
+    assert update_args.kwargs["response_payload"]["advisor_run_id"] == "advisor-run-1"
 
 
 def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
@@ -799,6 +828,71 @@ def test_strategy_advisor_runs_route_lists_deepseek_history() -> None:
     assert body[0]["status"] == "recorded"
     assert body[0]["cache_hit_tokens"] == 40
     service.list_advisor_runs.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+
+def test_strategy_advisor_audit_route_returns_traceable_summary() -> None:
+    service = Mock()
+    run = build_advisor_run(StrategyAdvisorRunStatus.RECORDED)
+    service.get_advisor_audit_snapshot.return_value = StrategyAdvisorAuditSnapshot(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        runs=[
+            StrategyAdvisorRunAudit(
+                advisor_run=run,
+                record_state="recorded",
+                response_payload={**(run.response_payload or {}), "advisor_run_id": run.id},
+                raw_response=run.raw_response,
+                token_usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "cache_hit_tokens": 40,
+                    "cache_miss_tokens": 60,
+                },
+                comparison=StrategyAdvisorRunComparison(
+                    previous_run_id="advisor-run-older",
+                    total_tokens_delta=-30,
+                    cache_hit_tokens_delta=10,
+                ),
+                downstream_impact=StrategyAdvisorRunImpact(
+                    advisor_run_id=run.id,
+                    proposal_ids=["proposal-advisor-1"],
+                    review_ids=["review-advisor-1"],
+                    proposal_status_counts={"pending": 1},
+                    review_status_counts={"observed": 1},
+                ),
+                checks=[
+                    StrategyAdvisorRunAuditCheck(
+                        name="paper_mode_only",
+                        status="pass",
+                        detail="Advisor run is recorded in paper mode.",
+                    )
+                ],
+            )
+        ],
+    )
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/advisor/audit",
+            params={"external_account_id": "LBPT10087357", "source": "deepseek", "limit": "5"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["runs"][0]["record_state"] == "recorded"
+    assert body["runs"][0]["response_payload"]["advisor_run_id"] == "advisor-run-1"
+    assert body["runs"][0]["token_usage"]["cache_hit_tokens"] == 40
+    assert body["runs"][0]["comparison"]["previous_run_id"] == "advisor-run-older"
+    assert body["runs"][0]["downstream_impact"]["proposal_ids"] == ["proposal-advisor-1"]
+    service.get_advisor_audit_snapshot.assert_called_once_with(
         external_account_id="LBPT10087357",
         source="deepseek",
         limit=5,
@@ -1047,6 +1141,98 @@ def test_strategy_experiment_service_records_and_lists_advisor_runs() -> None:
     assert created.id == "advisor-run-1"
     assert runs == [advisor_run]
     experiments.create_advisor_run.assert_called_once()
+    experiments.list_advisor_runs.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+
+def test_strategy_experiment_service_builds_advisor_audit_snapshot() -> None:
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    latest_run = build_advisor_run(StrategyAdvisorRunStatus.RECORDED).model_copy(
+        update={
+            "proposal_count": 1,
+            "response_payload": {
+                **(build_advisor_run(StrategyAdvisorRunStatus.RECORDED).response_payload or {}),
+                "proposals": [
+                    {
+                        "strategy_id": "covered_call_v1",
+                        "title": "Advisor covered-call idea",
+                        "proposed_action": "sell_covered_call",
+                    }
+                ],
+            },
+        }
+    )
+    older_run = build_advisor_run(StrategyAdvisorRunStatus.SUCCEEDED).model_copy(
+        update={
+            "id": "advisor-run-older",
+            "total_tokens": 150,
+            "cache_hit_tokens": 30,
+            "cache_miss_tokens": 120,
+            "proposal_count": 0,
+            "review_count": 0,
+        }
+    )
+    linked_proposal = build_covered_call_proposal(
+        proposal_id="proposal-advisor-1",
+        status=StrategyProposalStatus.PENDING,
+    ).model_copy(
+        update={
+            "source": "deepseek",
+            "source_run_id": latest_run.id,
+            "approval_required": True,
+            "candidate_payload": {
+                "advisor_run_id": latest_run.id,
+                "llm_direct_execution_allowed": False,
+            },
+        }
+    )
+    linked_review = build_review().model_copy(
+        update={
+            "id": "review-advisor-1",
+            "strategy_id": "covered_call_v1",
+            "status": StrategyReviewStatus.OBSERVED,
+            "metrics_payload": {
+                "advisor_run_id": latest_run.id,
+                "llm_direct_execution_allowed": False,
+            },
+        }
+    )
+    experiments.list_advisor_runs.return_value = [latest_run, older_run]
+    experiments.list_proposals.return_value = [linked_proposal]
+    experiments.list_reviews.return_value = [linked_review]
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    audit = service.get_advisor_audit_snapshot(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+    assert audit.runs[0].record_state == "recorded"
+    assert audit.runs[0].response_payload["advisor_run_id"] == "advisor-run-1"
+    assert audit.runs[0].token_usage["total_tokens"] == 120
+    assert audit.runs[0].comparison is not None
+    assert audit.runs[0].comparison.previous_run_id == "advisor-run-older"
+    assert audit.runs[0].comparison.total_tokens_delta == -30
+    assert audit.runs[0].comparison.cache_hit_tokens_delta == 10
+    assert audit.runs[0].downstream_impact.proposal_ids == ["proposal-advisor-1"]
+    assert audit.runs[0].downstream_impact.review_ids == ["review-advisor-1"]
+    assert audit.runs[0].downstream_impact.proposal_status_counts == {"pending": 1}
+    assert {check.name: check.status for check in audit.runs[0].checks}[
+        "record_counts_match_downstream"
+    ] == "pass"
+    assert {check.name: check.status for check in audit.runs[0].checks}[
+        "advisor_metadata_blocks_direct_execution"
+    ] == "pass"
     experiments.list_advisor_runs.assert_called_once_with(
         external_account_id="LBPT10087357",
         source="deepseek",

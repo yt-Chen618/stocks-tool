@@ -525,6 +525,10 @@ a {
   grid-column: span 2;
 }
 
+.lottery-note-card {
+  grid-column: 1 / -1;
+}
+
 .strategy-note-body {
   display: grid;
   gap: 12px;
@@ -1896,6 +1900,10 @@ textarea:focus-visible {
   border-color: rgba(15, 128, 107, 0.2);
 }
 
+.lottery-note-card {
+  grid-column: 1 / -1;
+}
+
 .strategy-note-body {
   line-height: 1.55;
 }
@@ -2061,6 +2069,10 @@ textarea:focus-visible {
   .strategy-note-card:nth-child(2),
   .advisor-note-card {
     grid-column: span 1;
+  }
+
+  .lottery-note-card {
+    grid-column: 1 / -1;
   }
 
   .controls-grid,

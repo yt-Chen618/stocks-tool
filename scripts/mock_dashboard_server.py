@@ -689,6 +689,20 @@ class MockDashboardState:
             "created_at": "2026-05-21T02:14:54Z",
             "updated_at": "2026-05-21T02:14:54Z",
         }
+        self.zero_dte_lottery_runtime = {
+            "strategy_id": "zero_dte_lottery_v1",
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "enabled": True,
+            "auto_execute_enabled": False,
+            "scan_interval_seconds": 900,
+            "scan_window_start": "10:00 ET",
+            "scan_window_end": "14:30 ET",
+            "max_premium_per_trade": "150.00",
+            "contracts_per_trade": 1,
+            "max_trades_per_day": 1,
+            "symbols": ["QQQ.US"],
+        }
 
     def _build_order(
         self,
@@ -1103,6 +1117,187 @@ class MockDashboardState:
         self.runtime["updated_at"] = now
         return self._runtime_with_computed_fields()
 
+    def get_zero_dte_lottery_runtime(self, external_account_id: str) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        return deepcopy(self.zero_dte_lottery_runtime)
+
+    def update_zero_dte_lottery_runtime(self, external_account_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        if "auto_execute_enabled" in payload:
+            self.zero_dte_lottery_runtime["auto_execute_enabled"] = bool(payload["auto_execute_enabled"])
+        return deepcopy(self.zero_dte_lottery_runtime)
+
+    def zero_dte_lottery_preview(
+        self,
+        *,
+        external_account_id: str,
+        symbol: str = "QQQ.US",
+        direction: str = "auto",
+    ) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        normalized_symbol = symbol.upper()
+        selected_direction = "call" if direction == "auto" else direction
+        evaluated_at = iso_now()
+        return {
+            "strategy_id": "zero_dte_lottery_v1",
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "evaluated_at": evaluated_at,
+            "eligible": True,
+            "reasons": [],
+            "warnings": [],
+            "symbol": normalized_symbol,
+            "direction": selected_direction,
+            "selected_expiration_date": "2026-06-05",
+            "days_to_expiration": 0,
+            "max_premium_per_trade": "150.00",
+            "underlying_price": "735.0000",
+            "underlying_change_pct": "0.55",
+            "candidate": {
+                "underlying_symbol": normalized_symbol,
+                "direction": selected_direction,
+                "expiration_date": "2026-06-05",
+                "days_to_expiration": 0,
+                "contracts": 1,
+                "option_symbol": "QQQ260605C736000.US" if selected_direction == "call" else "QQQ260605P734000.US",
+                "strike": "736.0000" if selected_direction == "call" else "734.0000",
+                "option_bid": "1.4000",
+                "option_ask": "1.4500",
+                "option_mid": "1.4300",
+                "premium_at_ask": "145.00",
+                "max_loss": "145.00",
+                "underlying_price": "735.0000",
+                "delta": "0.2200",
+                "open_interest": 400,
+                "volume": 25,
+                "quote_timestamp": evaluated_at,
+            },
+        }
+
+    def run_zero_dte_lottery_scan(
+        self,
+        *,
+        external_account_id: str,
+        symbol: str = "QQQ.US",
+        direction: str = "auto",
+        force: bool = False,
+    ) -> dict[str, Any]:
+        if external_account_id != self.account_id:
+            raise KeyError(external_account_id)
+        scanned_at = iso_now()
+        if not force and not self.zero_dte_lottery_runtime["auto_execute_enabled"]:
+            return {
+                "strategy_id": "zero_dte_lottery_v1",
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "scanned_at": scanned_at,
+                "executed": False,
+                "preview": None,
+                "execution": None,
+                "run": None,
+                "signal": None,
+                "reason": "Zero-DTE lottery auto-execution is disabled by configuration.",
+            }
+        preview = self.zero_dte_lottery_preview(
+            external_account_id=external_account_id,
+            symbol=symbol,
+            direction=direction,
+        )
+        candidate = preview["candidate"]
+        self._order_counter += 1
+        order = self._build_order(
+            local_order_id=f"mock-order-{self._order_counter}",
+            external_order_id=f"mock-external-{self._order_counter}",
+            quantity=1,
+            limit_price=1.45,
+            status_value="submitted",
+            submitted_at=scanned_at,
+            updated_at=scanned_at,
+            remark="zero_dte_lottery_v1:manual-scan" if force else "zero_dte_lottery_v1:auto-scan",
+        )
+        order["symbol"] = candidate["option_symbol"]
+        order["asset_type"] = "option"
+        order["side"] = "buy"
+        order["option_contract"] = {
+            "underlying_symbol": candidate["underlying_symbol"],
+            "expiration_date": candidate["expiration_date"],
+            "strike": candidate["strike"],
+            "right": candidate["direction"],
+        }
+        order["raw_payload"]["remote_order"]["symbol"] = order["symbol"]
+        order["raw_payload"]["submission_request"].update(
+            {
+                "symbol": order["symbol"],
+                "asset_type": "option",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "limit",
+                "mode": "paper",
+                "limit_price": "1.45",
+                "remark": order["raw_payload"]["submission_request"]["remark"],
+            }
+        )
+        self.orders.insert(0, order)
+        run = {
+            "id": f"mock-run-zero-dte-{self._order_counter}",
+            "strategy_id": "zero_dte_lottery_v1",
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "run_type": "auto_scan",
+            "status": "executed",
+            "symbol": preview["symbol"],
+            "proposal_id": None,
+            "trade_plan_id": None,
+            "order_id": order["id"],
+            "spread_id": None,
+            "started_at": scanned_at,
+            "completed_at": scanned_at,
+            "summary": f"Zero-DTE lottery paper order submitted for {order['symbol']}.",
+            "reason": None,
+            "metrics_payload": deepcopy(preview),
+            "raw_payload": None,
+            "created_at": scanned_at,
+            "updated_at": scanned_at,
+        }
+        signal = {
+            "id": f"mock-signal-zero-dte-{self._order_counter}",
+            "strategy_id": "zero_dte_lottery_v1",
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "signal_type": "execution",
+            "symbol": preview["symbol"],
+            "run_id": run["id"],
+            "proposal_id": None,
+            "strength": "0.200000",
+            "summary": f"Zero-DTE lottery paper order submitted for {order['symbol']}.",
+            "detail": None,
+            "source": "zero_dte_lottery_v1",
+            "signal_payload": deepcopy(preview),
+            "emitted_at": scanned_at,
+            "created_at": scanned_at,
+        }
+        self.strategy_runs.insert(0, run)
+        self.strategy_signals.insert(0, signal)
+        return {
+            "strategy_id": "zero_dte_lottery_v1",
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "scanned_at": scanned_at,
+            "executed": True,
+            "preview": preview,
+            "execution": {
+                "preview": preview,
+                "order": deepcopy(order),
+                "submitted_at": scanned_at,
+            },
+            "run": deepcopy(run),
+            "signal": deepcopy(signal),
+            "reason": None,
+        }
+
     def run_entry_scan(self, external_account_id: str, *, force: bool) -> dict[str, Any]:
         if external_account_id != self.account_id:
             raise KeyError(external_account_id)
@@ -1399,6 +1594,77 @@ def create_app() -> FastAPI:
             external_account_id=external_account_id,
             limit=limit,
         )
+
+    @app.get("/strategies/zero-dte-lottery/runtime")
+    def zero_dte_lottery_runtime(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        _ = mode
+        try:
+            return state.get_zero_dte_lottery_runtime(external_account_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zero-DTE lottery runtime for '{external_account_id}' was not found.",
+            ) from error
+
+    @app.post("/strategies/zero-dte-lottery/runtime/{external_account_id}")
+    def update_zero_dte_lottery_runtime(
+        external_account_id: str,
+        payload: dict[str, Any],
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        _ = mode
+        try:
+            return state.update_zero_dte_lottery_runtime(external_account_id, payload)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zero-DTE lottery runtime for '{external_account_id}' was not found.",
+            ) from error
+
+    @app.get("/strategies/zero-dte-lottery/preview")
+    def zero_dte_lottery_preview(
+        external_account_id: str = Query(...),
+        symbol: str = Query(default="QQQ.US"),
+        direction: str = Query(default="auto"),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        _ = mode
+        try:
+            return state.zero_dte_lottery_preview(
+                external_account_id=external_account_id,
+                symbol=symbol,
+                direction=direction,
+            )
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zero-DTE lottery runtime for '{external_account_id}' was not found.",
+            ) from error
+
+    @app.post("/strategies/zero-dte-lottery/runtime/{external_account_id}/scan")
+    def scan_zero_dte_lottery(
+        external_account_id: str,
+        symbol: str = Query(default="QQQ.US"),
+        direction: str = Query(default="auto"),
+        mode: str = Query(default="paper"),
+        force: bool = Query(default=False),
+    ) -> dict[str, Any]:
+        _ = mode
+        try:
+            return state.run_zero_dte_lottery_scan(
+                external_account_id=external_account_id,
+                symbol=symbol,
+                direction=direction,
+                force=force,
+            )
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zero-DTE lottery runtime for '{external_account_id}' was not found.",
+            ) from error
 
     @app.get("/strategies/proposals")
     def strategy_proposals(

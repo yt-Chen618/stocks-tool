@@ -549,9 +549,11 @@ class StrategyAutomationControl(BaseModel):
     auto_propose_enabled: bool = False
     auto_monitor_enabled: bool = False
     auto_lifecycle_enabled: bool = False
+    auto_execute_enabled: bool = False
     proposal_interval_seconds: int | None = None
     monitor_interval_seconds: int | None = None
     lifecycle_interval_seconds: int | None = None
+    scan_interval_seconds: int | None = None
 
 
 class StrategyPermissionBoundary(BaseModel):
@@ -731,6 +733,48 @@ class StrategyAdvisorRun(BaseModel):
     recorded_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class StrategyAdvisorRunComparison(BaseModel):
+    previous_run_id: str | None = None
+    total_tokens_delta: int | None = None
+    cache_hit_tokens_delta: int | None = None
+    cache_miss_tokens_delta: int | None = None
+    proposal_count_delta: int | None = None
+    review_count_delta: int | None = None
+
+
+class StrategyAdvisorRunImpact(BaseModel):
+    advisor_run_id: str
+    proposal_ids: list[str] = Field(default_factory=list)
+    review_ids: list[str] = Field(default_factory=list)
+    proposal_status_counts: dict[str, int] = Field(default_factory=dict)
+    review_status_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class StrategyAdvisorRunAuditCheck(BaseModel):
+    name: str
+    status: str
+    detail: str
+    blocking: bool = False
+
+
+class StrategyAdvisorRunAudit(BaseModel):
+    advisor_run: StrategyAdvisorRun
+    record_state: str
+    response_payload: dict | None = None
+    raw_response: dict | None = None
+    token_usage: dict[str, int | None] = Field(default_factory=dict)
+    comparison: StrategyAdvisorRunComparison | None = None
+    downstream_impact: StrategyAdvisorRunImpact
+    checks: list[StrategyAdvisorRunAuditCheck] = Field(default_factory=list)
+
+
+class StrategyAdvisorAuditSnapshot(BaseModel):
+    external_account_id: str | None = None
+    source: str | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    runs: list[StrategyAdvisorRunAudit] = Field(default_factory=list)
 
 
 class RecordStrategyAdvisorResponseRequest(BaseModel):
@@ -974,6 +1018,93 @@ class CoveredCallPreviewResult(BaseModel):
     days_to_expiration: int | None = None
     candidate: CoveredCallCandidate | None = None
     risk: CoveredCallRiskSummary | None = None
+
+
+class ZeroDteLotteryCandidate(BaseModel):
+    underlying_symbol: str
+    direction: OptionRight
+    expiration_date: date
+    days_to_expiration: int
+    contracts: int
+    option_symbol: str
+    strike: Decimal
+    option_bid: Decimal
+    option_ask: Decimal
+    option_mid: Decimal
+    premium_at_ask: Decimal
+    max_loss: Decimal
+    underlying_price: Decimal
+    delta: Decimal | None = None
+    open_interest: int | None = None
+    volume: int = 0
+    quote_timestamp: datetime
+
+
+class ZeroDteLotteryPreviewResult(BaseModel):
+    strategy_id: str = "zero_dte_lottery_v1"
+    external_account_id: str
+    mode: ExecutionMode
+    evaluated_at: datetime
+    eligible: bool
+    reasons: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    symbol: str
+    direction: OptionRight | None = None
+    selected_expiration_date: date | None = None
+    days_to_expiration: int | None = None
+    max_premium_per_trade: Decimal
+    underlying_price: Decimal | None = None
+    underlying_change_pct: Decimal | None = None
+    candidate: ZeroDteLotteryCandidate | None = None
+
+
+class ExecuteZeroDteLotteryRequest(BaseModel):
+    external_account_id: str
+    symbol: str | None = None
+    direction: str = "auto"
+    mode: ExecutionMode = ExecutionMode.PAPER
+    limit_price: Decimal | None = Field(default=None, gt=0)
+    as_of: datetime | None = None
+    confirm_paper_order: bool = False
+    remark: str | None = Field(default=None, max_length=64)
+
+
+class ZeroDteLotteryExecutionResult(BaseModel):
+    preview: ZeroDteLotteryPreviewResult
+    order: Order
+    submitted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ZeroDteLotteryScanResult(BaseModel):
+    strategy_id: str = "zero_dte_lottery_v1"
+    external_account_id: str
+    mode: ExecutionMode
+    scanned_at: datetime
+    executed: bool = False
+    preview: ZeroDteLotteryPreviewResult | None = None
+    execution: ZeroDteLotteryExecutionResult | None = None
+    run: StrategyRun | None = None
+    signal: StrategySignal | None = None
+    reason: str | None = None
+
+
+class ZeroDteLotteryRuntimeState(BaseModel):
+    strategy_id: str = "zero_dte_lottery_v1"
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    enabled: bool
+    auto_execute_enabled: bool
+    scan_interval_seconds: int
+    scan_window_start: str
+    scan_window_end: str
+    max_premium_per_trade: Decimal
+    contracts_per_trade: int
+    max_trades_per_day: int
+    symbols: list[str] = Field(default_factory=list)
+
+
+class UpdateZeroDteLotteryRuntimeRequest(BaseModel):
+    auto_execute_enabled: bool | None = None
 
 
 class CoveredCallProposalResult(BaseModel):

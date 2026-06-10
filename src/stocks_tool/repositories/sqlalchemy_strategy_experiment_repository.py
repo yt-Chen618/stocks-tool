@@ -276,6 +276,20 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         self.session.refresh(record)
         return self._to_advisor_run(record)
 
+    def update_advisor_run_response_payload(
+        self,
+        advisor_run_id: str,
+        *,
+        response_payload: dict,
+    ) -> StrategyAdvisorRun:
+        record = self.session.get(StrategyAdvisorRunRecord, advisor_run_id)
+        if record is None:
+            raise LookupError(f"Advisor run '{advisor_run_id}' was not found.")
+        record.response_payload = response_payload
+        self.session.commit()
+        self.session.refresh(record)
+        return self._to_advisor_run(record)
+
     def mark_advisor_run_recorded(
         self,
         advisor_run_id: str,

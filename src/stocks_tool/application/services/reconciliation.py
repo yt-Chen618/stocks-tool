@@ -24,6 +24,9 @@ from stocks_tool.application.services.market_event_provider_ingestion import (
 )
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.risk import RiskService
+from stocks_tool.application.services.zero_dte_lottery_strategy import (
+    ZeroDteLotteryStrategyService,
+)
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderStatus, SpreadStatus, StrategyProposalStatus
 from stocks_tool.domain.models import ImportMarketEventsFromProviderRequest
@@ -99,6 +102,7 @@ class ReconciliationCoordinator:
         self._last_covered_call_proposal_scan_at: dict[str, datetime] = {}
         self._last_covered_call_monitor_at: dict[str, datetime] = {}
         self._last_covered_call_lifecycle_at: dict[str, datetime] = {}
+        self._last_zero_dte_lottery_scan_at: dict[str, datetime] = {}
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -151,6 +155,13 @@ class ReconciliationCoordinator:
                 longbridge_adapter=self.longbridge_adapter,
                 order_service=order_service,
                 market_events=market_events,
+            )
+            zero_dte_lottery_service = ZeroDteLotteryStrategyService(
+                settings=self.settings,
+                broker_accounts=broker_accounts,
+                longbridge_adapter=self.longbridge_adapter,
+                order_service=order_service,
+                experiments=experiments,
             )
 
             now = datetime.now(timezone.utc)
@@ -256,6 +267,22 @@ class ReconciliationCoordinator:
                                 now=now,
                             ),
                         )
+
+                if (
+                    self.settings.zero_dte_lottery_strategy.enabled
+                    and self.settings.zero_dte_lottery_strategy.auto_execute_enabled
+                ):
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="zero-dte-lottery-scan",
+                        task_label="zero-DTE lottery scan",
+                        now=now,
+                        callback=lambda: self._run_zero_dte_lottery_scan(
+                            external_account_id=broker_account.external_account_id,
+                            zero_dte_lottery_service=zero_dte_lottery_service,
+                            now=now,
+                        ),
+                    )
 
                 account_due = self._is_due(
                     broker_account.account_last_sync_attempt_at,
@@ -435,6 +462,27 @@ class ReconciliationCoordinator:
             as_of=now,
         )
         self._last_covered_call_proposal_scan_at[external_account_id] = now
+
+    def _run_zero_dte_lottery_scan(
+        self,
+        *,
+        external_account_id: str,
+        zero_dte_lottery_service: ZeroDteLotteryStrategyService,
+        now: datetime,
+    ) -> None:
+        last_scanned_at = self._last_zero_dte_lottery_scan_at.get(external_account_id)
+        if not self._is_due(
+            last_scanned_at,
+            self.settings.zero_dte_lottery_strategy.scan_interval_seconds,
+            now,
+        ):
+            return
+        zero_dte_lottery_service.run_scan(
+            external_account_id=external_account_id,
+            mode=ExecutionMode.PAPER,
+            as_of=now,
+        )
+        self._last_zero_dte_lottery_scan_at[external_account_id] = now
 
     def _monitor_covered_call_proposals(
         self,

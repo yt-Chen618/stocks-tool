@@ -18,7 +18,12 @@ from stocks_tool.domain.models import (
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
     StrategyAdvisorContext,
+    StrategyAdvisorAuditSnapshot,
     StrategyAdvisorRun,
+    StrategyAdvisorRunAudit,
+    StrategyAdvisorRunAuditCheck,
+    StrategyAdvisorRunComparison,
+    StrategyAdvisorRunImpact,
     StrategyAutomationControl,
     StrategyControlSnapshot,
     StrategyExperimentSnapshot,
@@ -181,6 +186,7 @@ class StrategyExperimentService:
         if self.settings is None:
             raise RuntimeError("Strategy controls require settings to be available.")
         covered_call = self.settings.covered_call_strategy
+        zero_dte_lottery = self.settings.zero_dte_lottery_strategy
         return StrategyControlSnapshot(
             external_account_id=external_account_id,
             execution_mode=self.settings.execution_mode,
@@ -197,6 +203,12 @@ class StrategyExperimentService:
                     proposal_interval_seconds=covered_call.proposal_interval_seconds,
                     monitor_interval_seconds=covered_call.monitor_interval_seconds,
                     lifecycle_interval_seconds=covered_call.lifecycle_interval_seconds,
+                ),
+                StrategyAutomationControl(
+                    strategy_id="zero_dte_lottery_v1",
+                    enabled=zero_dte_lottery.enabled,
+                    auto_execute_enabled=zero_dte_lottery.auto_execute_enabled,
+                    scan_interval_seconds=zero_dte_lottery.scan_interval_seconds,
                 )
             ],
             permission_boundaries=[
@@ -338,6 +350,17 @@ class StrategyExperimentService:
             raise ValueError(f"Advisor source '{request.source}' is not recognized.")
         return self.experiments.create_advisor_run(request)
 
+    def update_advisor_run_response_payload(
+        self,
+        advisor_run_id: str,
+        *,
+        response_payload: dict,
+    ) -> StrategyAdvisorRun:
+        return self.experiments.update_advisor_run_response_payload(
+            advisor_run_id,
+            response_payload=response_payload,
+        )
+
     def mark_advisor_run_recorded(
         self,
         advisor_run_id: str,
@@ -370,6 +393,240 @@ class StrategyExperimentService:
             source=source.strip().lower() if source else None,
             limit=limit,
         )
+
+    def get_advisor_audit_snapshot(
+        self,
+        *,
+        external_account_id: str | None = None,
+        source: str | None = "deepseek",
+        limit: int = 10,
+    ) -> StrategyAdvisorAuditSnapshot:
+        runs = self.list_advisor_runs(
+            external_account_id=external_account_id,
+            source=source,
+            limit=limit,
+        )
+        proposals = self.list_proposals(
+            external_account_id=external_account_id,
+            limit=100,
+        )
+        reviews = self.list_reviews(
+            external_account_id=external_account_id,
+            limit=100,
+        )
+        return StrategyAdvisorAuditSnapshot(
+            external_account_id=external_account_id,
+            source=source,
+            runs=[
+                self._advisor_run_audit(
+                    run,
+                    previous_run=runs[index + 1] if index + 1 < len(runs) else None,
+                    proposals=proposals,
+                    reviews=reviews,
+                )
+                for index, run in enumerate(runs)
+            ],
+        )
+
+    @staticmethod
+    def _advisor_run_audit(
+        run: StrategyAdvisorRun,
+        *,
+        previous_run: StrategyAdvisorRun | None,
+        proposals: list[StrategyProposal],
+        reviews: list[StrategyReview],
+    ) -> StrategyAdvisorRunAudit:
+        downstream_proposals = [
+            proposal for proposal in proposals if proposal.source_run_id == run.id
+        ]
+        downstream_reviews = [
+            review
+            for review in reviews
+            if isinstance(review.metrics_payload, dict)
+            and review.metrics_payload.get("advisor_run_id") == run.id
+        ]
+        return StrategyAdvisorRunAudit(
+            advisor_run=run,
+            record_state=StrategyExperimentService._advisor_run_record_state(run),
+            response_payload=StrategyExperimentService._recordable_response_payload(run),
+            raw_response=run.raw_response,
+            token_usage={
+                "prompt_tokens": run.prompt_tokens,
+                "completion_tokens": run.completion_tokens,
+                "total_tokens": run.total_tokens,
+                "reasoning_tokens": run.reasoning_tokens,
+                "cache_hit_tokens": run.cache_hit_tokens,
+                "cache_miss_tokens": run.cache_miss_tokens,
+            },
+            comparison=StrategyExperimentService._advisor_run_comparison(run, previous_run),
+            downstream_impact=StrategyAdvisorRunImpact(
+                advisor_run_id=run.id,
+                proposal_ids=[proposal.id for proposal in downstream_proposals],
+                review_ids=[review.id for review in downstream_reviews],
+                proposal_status_counts=StrategyExperimentService._status_counts(downstream_proposals),
+                review_status_counts=StrategyExperimentService._status_counts(downstream_reviews),
+            ),
+            checks=StrategyExperimentService._advisor_run_audit_checks(
+                run,
+                downstream_proposals=downstream_proposals,
+                downstream_reviews=downstream_reviews,
+            ),
+        )
+
+    @staticmethod
+    def _recordable_response_payload(run: StrategyAdvisorRun) -> dict | None:
+        if run.response_payload is None:
+            return None
+        payload = dict(run.response_payload)
+        payload.setdefault("advisor_run_id", run.id)
+        return payload
+
+    @staticmethod
+    def _advisor_run_record_state(run: StrategyAdvisorRun) -> str:
+        if run.status.value == "recorded" or run.recorded_at is not None:
+            return "recorded"
+        if run.status.value == "failed":
+            return "failed"
+        return "dry_run_only"
+
+    @staticmethod
+    def _advisor_run_comparison(
+        run: StrategyAdvisorRun,
+        previous_run: StrategyAdvisorRun | None,
+    ) -> StrategyAdvisorRunComparison | None:
+        if previous_run is None:
+            return None
+        return StrategyAdvisorRunComparison(
+            previous_run_id=previous_run.id,
+            total_tokens_delta=StrategyExperimentService._optional_delta(
+                run.total_tokens,
+                previous_run.total_tokens,
+            ),
+            cache_hit_tokens_delta=StrategyExperimentService._optional_delta(
+                run.cache_hit_tokens,
+                previous_run.cache_hit_tokens,
+            ),
+            cache_miss_tokens_delta=StrategyExperimentService._optional_delta(
+                run.cache_miss_tokens,
+                previous_run.cache_miss_tokens,
+            ),
+            proposal_count_delta=run.proposal_count - previous_run.proposal_count,
+            review_count_delta=run.review_count - previous_run.review_count,
+        )
+
+    @staticmethod
+    def _advisor_run_audit_checks(
+        run: StrategyAdvisorRun,
+        *,
+        downstream_proposals: list[StrategyProposal],
+        downstream_reviews: list[StrategyReview],
+    ) -> list[StrategyAdvisorRunAuditCheck]:
+        checks: list[StrategyAdvisorRunAuditCheck] = []
+
+        def add(name: str, passed: bool, detail: str, *, blocking: bool = False) -> None:
+            checks.append(
+                StrategyAdvisorRunAuditCheck(
+                    name=name,
+                    status="pass" if passed else "fail",
+                    detail=detail,
+                    blocking=blocking,
+                )
+            )
+
+        failed = run.status.value == "failed"
+        add(
+            "paper_mode_only",
+            run.mode == ExecutionMode.PAPER,
+            "Advisor run is recorded in paper mode."
+            if run.mode == ExecutionMode.PAPER
+            else "Advisor run is not paper mode.",
+            blocking=True,
+        )
+        add(
+            "context_format_recorded",
+            bool(run.context_format),
+            "Advisor context format is recorded."
+            if run.context_format
+            else "Advisor context format is missing.",
+            blocking=not failed,
+        )
+        add(
+            "response_payload_recorded",
+            failed or run.response_payload is not None,
+            "Advisor response payload is stored."
+            if run.response_payload is not None
+            else "Failed advisor run has no response payload.",
+            blocking=not failed,
+        )
+        add(
+            "token_usage_traceable",
+            failed or any(
+                value is not None
+                for value in (
+                    run.prompt_tokens,
+                    run.completion_tokens,
+                    run.total_tokens,
+                    run.cache_hit_tokens,
+                    run.cache_miss_tokens,
+                )
+            ),
+            "Token/cache usage fields are available."
+            if not failed
+            else "Failed advisor run may not include token usage.",
+            blocking=False,
+        )
+        add(
+            "record_counts_match_downstream",
+            run.status.value != "recorded"
+            or (
+                run.proposal_count == len(downstream_proposals)
+                and run.review_count == len(downstream_reviews)
+            ),
+            "Recorded proposal/review counts match linked downstream records."
+            if run.status.value == "recorded"
+            else "Dry-run has not been recorded into proposal/review ledger.",
+            blocking=run.status.value == "recorded",
+        )
+        add(
+            "advisor_proposals_require_manual_approval",
+            all(proposal.approval_required for proposal in downstream_proposals),
+            "Linked advisor proposals require manual approval."
+            if downstream_proposals
+            else "No linked advisor proposals.",
+            blocking=True,
+        )
+        add(
+            "advisor_metadata_blocks_direct_execution",
+            all(
+                isinstance(proposal.candidate_payload, dict)
+                and proposal.candidate_payload.get("llm_direct_execution_allowed") is False
+                for proposal in downstream_proposals
+            )
+            and all(
+                isinstance(review.metrics_payload, dict)
+                and review.metrics_payload.get("llm_direct_execution_allowed") is False
+                for review in downstream_reviews
+            ),
+            "Linked proposal/review metadata keeps advisor output read-only."
+            if downstream_proposals or downstream_reviews
+            else "No downstream records to inspect.",
+            blocking=True,
+        )
+        return checks
+
+    @staticmethod
+    def _optional_delta(current: int | None, previous: int | None) -> int | None:
+        if current is None or previous is None:
+            return None
+        return current - previous
+
+    @staticmethod
+    def _status_counts(records: list[StrategyProposal] | list[StrategyReview]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for record in records:
+            status = record.status.value
+            counts[status] = counts.get(status, 0) + 1
+        return counts
 
     def _ensure_account(self, external_account_id: str) -> None:
         if self.broker_accounts.get_by_external_account_id(external_account_id) is None:

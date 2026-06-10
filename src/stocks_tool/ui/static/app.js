@@ -441,6 +441,9 @@ const state = {
   orders: [],
   spreads: [],
   runtime: null,
+  zeroDteLotteryRuntime: null,
+  zeroDteLotteryPreview: null,
+  zeroDteLotteryScanResult: null,
   strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
   coveredCallActivity: { summary: {}, proposals: [], runs: [], signals: [], reviews: [] },
   advisorContext: null,
@@ -505,6 +508,16 @@ function bindElements() {
   els.strategySkipCard = document.getElementById("strategy-skip-card");
   els.strategyJournalFeed = document.getElementById("strategy-journal-feed");
   els.strategyReviewCard = document.getElementById("strategy-review-card");
+  els.zeroDteLotteryStrip = document.getElementById("zero-dte-lottery-strip");
+  els.zeroDteLotteryControlsForm = document.getElementById("zero-dte-lottery-controls-form");
+  els.zeroDteLotteryAutoOrder = document.getElementById("zero-dte-lottery-auto-order");
+  els.zeroDteLotterySymbol = document.getElementById("zero-dte-lottery-symbol");
+  els.zeroDteLotteryDirection = document.getElementById("zero-dte-lottery-direction");
+  els.zeroDteLotteryHint = document.getElementById("zero-dte-lottery-hint");
+  els.saveZeroDteLotteryControls = document.getElementById("save-zero-dte-lottery-controls");
+  els.previewZeroDteLottery = document.getElementById("preview-zero-dte-lottery");
+  els.runZeroDteLotteryScan = document.getElementById("run-zero-dte-lottery-scan");
+  els.zeroDteLotteryResultCard = document.getElementById("zero-dte-lottery-result-card");
   els.strategyExperimentStrip = document.getElementById("strategy-experiment-strip");
   els.coveredCallActivityCard = document.getElementById("covered-call-activity-card");
   els.strategyProposalsCard = document.getElementById("strategy-proposals-card");
@@ -657,6 +670,25 @@ function wireEvents() {
   els.runStrategyReview.addEventListener("click", async () => {
     await runStrategyReview();
   });
+
+  if (els.zeroDteLotteryControlsForm) {
+    els.zeroDteLotteryControlsForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await saveZeroDteLotteryControls();
+    });
+  }
+
+  if (els.previewZeroDteLottery) {
+    els.previewZeroDteLottery.addEventListener("click", async () => {
+      await previewZeroDteLottery();
+    });
+  }
+
+  if (els.runZeroDteLotteryScan) {
+    els.runZeroDteLotteryScan.addEventListener("click", async () => {
+      await runZeroDteLotteryScan();
+    });
+  }
 
   if (els.loadAdvisorContext) {
     els.loadAdvisorContext.addEventListener("click", async () => {
@@ -1160,6 +1192,9 @@ async function loadAccountData() {
     state.orders = [];
     state.spreads = [];
     state.runtime = null;
+    state.zeroDteLotteryRuntime = null;
+    state.zeroDteLotteryPreview = null;
+    state.zeroDteLotteryScanResult = null;
     state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
     state.coveredCallActivity = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
     state.advisorContext = null;
@@ -1183,6 +1218,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderZeroDteLottery();
     renderCoveredCallActivity();
     renderStrategyExperiment();
     renderAdvisorPanel();
@@ -1203,6 +1239,7 @@ async function loadAccountData() {
       orders,
       spreads,
       runtime,
+      zeroDteLotteryRuntime,
       strategyExperiment,
       coveredCallActivity,
       advisorRuns,
@@ -1215,6 +1252,10 @@ async function loadAccountData() {
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
+      fetchJson(`/strategies/zero-dte-lottery/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`).catch((error) => {
+        console.error(error);
+        return null;
+      }),
       fetchJson(`/strategies/experiment?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=6`),
       fetchJson(`/strategies/covered-call/activity?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=8`).catch((error) => {
         console.error(error);
@@ -1229,6 +1270,7 @@ async function loadAccountData() {
     state.orders = orders;
     state.spreads = spreads;
     state.runtime = runtime;
+    state.zeroDteLotteryRuntime = zeroDteLotteryRuntime;
     state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
     state.coveredCallActivity = coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
     state.advisorRuns = Array.isArray(advisorRuns) ? advisorRuns : [];
@@ -1249,6 +1291,7 @@ async function loadAccountData() {
     renderPreOpenAssessment();
     renderLatestPreOpenRun();
     renderStrategyRuntime();
+    renderZeroDteLottery();
     renderCoveredCallActivity();
     renderStrategyExperiment();
     renderAdvisorPanel();
@@ -1559,6 +1602,113 @@ async function runStrategyReview() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
+  }
+}
+
+async function saveZeroDteLotteryControls() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before updating lottery controls.", "warning");
+    return;
+  }
+
+  const payload = {
+    auto_execute_enabled: els.zeroDteLotteryAutoOrder.value === "true",
+  };
+
+  setStatus(`Saving zero-DTE lottery controls for ${state.selectedAccountId}...`, "warning");
+  try {
+    state.zeroDteLotteryRuntime = await fetchJson(
+      `/strategies/zero-dte-lottery/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }
+    );
+    renderZeroDteLottery();
+    setStatus(`Zero-DTE lottery auto-order ${payload.auto_execute_enabled ? "enabled" : "disabled"}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Zero-DTE lottery controls update failed.", "error");
+  }
+}
+
+async function previewZeroDteLottery() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before previewing zero-DTE lottery.", "warning");
+    return;
+  }
+
+  let symbol = "";
+  try {
+    symbol = normalizeLotterySymbol();
+  } catch (error) {
+    setStatus(error.message || "Zero-DTE lottery symbol is required.", "error");
+    return;
+  }
+  const direction = els.zeroDteLotteryDirection.value || "auto";
+  setStatus(`Previewing zero-DTE lottery for ${symbol}...`, "warning");
+  try {
+    const params = new URLSearchParams();
+    params.set("external_account_id", state.selectedAccountId);
+    params.set("symbol", symbol);
+    params.set("direction", direction);
+    params.set("mode", "paper");
+    state.zeroDteLotteryPreview = await fetchJson(`/strategies/zero-dte-lottery/preview?${params.toString()}`);
+    state.zeroDteLotteryScanResult = null;
+    renderZeroDteLottery();
+    const message = state.zeroDteLotteryPreview.eligible
+      ? `Zero-DTE lottery candidate ready: ${state.zeroDteLotteryPreview.candidate?.option_symbol || symbol}.`
+      : state.zeroDteLotteryPreview.reasons?.[0] || "Zero-DTE lottery preview completed without a candidate.";
+    setStatus(message, state.zeroDteLotteryPreview.eligible ? "success" : "warning");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Zero-DTE lottery preview failed.", "error");
+  }
+}
+
+async function runZeroDteLotteryScan() {
+  if (!state.selectedAccountId) {
+    setStatus("Select a broker account before running zero-DTE lottery scan.", "warning");
+    return;
+  }
+  let symbol = "";
+  try {
+    symbol = normalizeLotterySymbol();
+  } catch (error) {
+    setStatus(error.message || "Zero-DTE lottery symbol is required.", "error");
+    return;
+  }
+  const direction = els.zeroDteLotteryDirection.value || "auto";
+  if (!window.confirm(`Force a paper zero-DTE lottery scan for ${symbol}? If eligible, this can submit one paper buy-limit option order.`)) {
+    return;
+  }
+
+  setStatus(`Running zero-DTE lottery force scan for ${symbol}...`, "warning");
+  updateZeroDteLotteryButtons(true);
+  try {
+    const params = new URLSearchParams();
+    params.set("symbol", symbol);
+    params.set("direction", direction);
+    params.set("mode", "paper");
+    params.set("force", "true");
+    state.zeroDteLotteryScanResult = await fetchJson(
+      `/strategies/zero-dte-lottery/runtime/${encodeURIComponent(state.selectedAccountId)}/scan?${params.toString()}`,
+      {
+        method: "POST",
+        timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+      }
+    );
+    state.zeroDteLotteryPreview = state.zeroDteLotteryScanResult.preview || state.zeroDteLotteryPreview;
+    await loadAccountData();
+    const message = state.zeroDteLotteryScanResult.executed
+      ? `Zero-DTE lottery paper order submitted: ${state.zeroDteLotteryScanResult.execution?.order?.symbol || symbol}.`
+      : state.zeroDteLotteryScanResult.reason || "Zero-DTE lottery scan completed without an order.";
+    setStatus(message, state.zeroDteLotteryScanResult.executed ? "success" : "warning");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Zero-DTE lottery scan failed.", "error");
+  } finally {
+    updateZeroDteLotteryButtons(false);
   }
 }
 
@@ -2465,6 +2615,163 @@ function renderStrategyRuntime() {
   }
 
   updateStrategyButtons();
+}
+
+function renderZeroDteLottery() {
+  if (!els.zeroDteLotteryStrip || !els.zeroDteLotteryResultCard) {
+    return;
+  }
+  const runtime = state.zeroDteLotteryRuntime;
+  if (!runtime) {
+    els.zeroDteLotteryStrip.innerHTML = `
+      <article class="mini-metric-tile">
+        <span class="metric-label">Auto Order</span>
+        <strong class="mini-metric-value">--</strong>
+        <span class="mini-metric-detail">Select a broker account to load lottery controls.</span>
+      </article>
+    `;
+    els.zeroDteLotteryAutoOrder.value = "false";
+    els.zeroDteLotteryHint.textContent = "Paper-only same-day long option. Auto-order is disabled by default and capped at $150.";
+    renderZeroDteLotteryResult();
+    updateZeroDteLotteryButtons();
+    return;
+  }
+
+  const autoOrderTone = runtime.auto_execute_enabled ? "warning" : "neutral";
+  const summaryValues = [
+    {
+      label: "Auto Order",
+      value: runtime.auto_execute_enabled ? "Enabled" : "Disabled",
+      tone: autoOrderTone,
+      detail: runtime.auto_execute_enabled ? "Scheduler may submit one paper order if eligible." : "Manual preview and force scan only.",
+    },
+    {
+      label: "Max Premium",
+      value: formatCurrency(runtime.max_premium_per_trade, "USD"),
+      tone: "success",
+      detail: `${runtime.contracts_per_trade || 1} contract(s) per order`,
+    },
+    {
+      label: "Scan Window",
+      value: `${runtime.scan_window_start || "--"}-${runtime.scan_window_end || "--"}`,
+      tone: runtime.enabled ? "success" : "neutral",
+      detail: `${runtime.scan_interval_seconds || "--"} second interval`,
+    },
+    {
+      label: "Daily Cap",
+      value: `${runtime.max_trades_per_day || 1}`,
+      tone: "warning",
+      detail: `${(runtime.symbols || []).join(", ") || "No symbols configured"}`,
+    },
+  ];
+  els.zeroDteLotteryStrip.innerHTML = summaryValues
+    .map(
+      (item) => `
+        <article class="mini-metric-tile">
+          <span class="metric-label">${escapeHtml(item.label)}</span>
+          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
+          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
+        </article>
+      `
+    )
+    .join("");
+
+  els.zeroDteLotteryAutoOrder.value = runtime.auto_execute_enabled ? "true" : "false";
+  if (!els.zeroDteLotterySymbol.value.trim()) {
+    els.zeroDteLotterySymbol.value = (runtime.symbols || [])[0] || "QQQ.US";
+  }
+  els.zeroDteLotteryHint.textContent = runtime.auto_execute_enabled
+    ? "Auto-order is armed for the running paper scheduler. Daily cap and $150 premium cap still apply."
+    : "Auto-order is off. Preview is read-only; Force Scan can submit a paper order only after confirmation.";
+  renderZeroDteLotteryResult();
+  updateZeroDteLotteryButtons();
+}
+
+function renderZeroDteLotteryResult() {
+  const scan = state.zeroDteLotteryScanResult;
+  const preview = state.zeroDteLotteryPreview || scan?.preview;
+  if (!els.zeroDteLotteryResultCard) {
+    return;
+  }
+  if (scan) {
+    els.zeroDteLotteryResultCard.className = "strategy-note-body";
+    els.zeroDteLotteryResultCard.innerHTML = renderZeroDteLotteryScanResult(scan);
+    return;
+  }
+  if (preview) {
+    els.zeroDteLotteryResultCard.className = "strategy-note-body";
+    els.zeroDteLotteryResultCard.innerHTML = renderZeroDteLotteryPreview(preview);
+    return;
+  }
+  els.zeroDteLotteryResultCard.className = "strategy-note-body empty";
+  els.zeroDteLotteryResultCard.textContent = "No zero-DTE lottery preview loaded yet.";
+}
+
+function renderZeroDteLotteryPreview(preview) {
+  const candidate = objectPayload(preview.candidate);
+  const details = [
+    ["Symbol", preview.symbol || "--", preview.direction ? formatStrategyStatusLabel(preview.direction) : "Direction not selected"],
+    ["Underlying", formatCurrency(preview.underlying_price, "USD"), `${formatSignedDecimal(preview.underlying_change_pct)}% vs prior close`],
+    ["Expiry", preview.selected_expiration_date || "--", `DTE ${preview.days_to_expiration ?? "--"}`],
+    ["Max Premium", formatCurrency(preview.max_premium_per_trade, "USD"), preview.eligible ? "Candidate is inside cap" : "No eligible candidate"],
+  ];
+  if (candidate.option_symbol) {
+    details.push(
+      ["Option", candidate.option_symbol, `${formatStrategyStatusLabel(candidate.direction)} ${formatNumber(candidate.strike)}`],
+      ["Bid / Ask", `${formatCurrency(candidate.option_bid, "USD")} / ${formatCurrency(candidate.option_ask, "USD")}`, `Mid ${formatCurrency(candidate.option_mid, "USD")}`],
+      ["Premium", formatCurrency(candidate.premium_at_ask, "USD"), `Max loss ${formatCurrency(candidate.max_loss, "USD")}`],
+      ["Liquidity", `OI ${displayValue(candidate.open_interest)} / Vol ${displayValue(candidate.volume)}`, `Delta ${formatSignedDecimal(candidate.delta)}`]
+    );
+  }
+  const reasons = Array.isArray(preview.reasons) && preview.reasons.length
+    ? `<p>${escapeHtml(preview.reasons[0])}</p>`
+    : "";
+  return `
+    <article class="strategy-journal-entry">
+      <div class="strategy-journal-head">
+        <strong>${escapeHtml(preview.eligible ? "Eligible Lottery Candidate" : "Preview Result")}</strong>
+        <span class="pill ${preview.eligible ? "success" : "warning"}">${escapeHtml(preview.eligible ? "Eligible" : "Skipped")}</span>
+      </div>
+      <div class="proposal-detail-grid">
+        ${details.map(renderStrategyProposalDetail).join("")}
+      </div>
+      ${reasons}
+      <span>${escapeHtml(`Evaluated ${formatDateTime(preview.evaluated_at)}`)}</span>
+    </article>
+  `;
+}
+
+function renderZeroDteLotteryScanResult(scan) {
+  const order = objectPayload(scan.execution?.order);
+  const previewMarkup = scan.preview ? renderZeroDteLotteryPreview(scan.preview) : "";
+  const orderMarkup = scan.executed
+    ? `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>Paper Order Submitted</strong>
+          <span class="pill success">${escapeHtml(formatStrategyStatusLabel(order.status || "submitted"))}</span>
+        </div>
+        <div class="proposal-detail-grid">
+          ${[
+            ["Order", order.id || "--", order.external_order_id || "Local paper order"],
+            ["Symbol", order.symbol || "--", `${formatStrategyStatusLabel(order.side)} ${displayValue(order.quantity)}`],
+            ["Limit", formatCurrency(order.limit_price, "USD"), formatDateTime(order.submitted_at)],
+            ["Mode", formatStrategyStatusLabel(order.mode || "paper"), "Zero-DTE lottery"],
+          ].map(renderStrategyProposalDetail).join("")}
+        </div>
+      </article>
+    `
+    : `
+      <article class="strategy-journal-entry">
+        <div class="strategy-journal-head">
+          <strong>Scan Skipped</strong>
+          <span class="pill warning">No Order</span>
+        </div>
+        <p>${escapeHtml(scan.reason || "Zero-DTE lottery scan completed without an eligible candidate.")}</p>
+        <span>${escapeHtml(formatDateTime(scan.scanned_at))}</span>
+      </article>
+    `;
+  return `${orderMarkup}${previewMarkup}`;
 }
 
 function renderCoveredCallActivity() {
@@ -4269,6 +4576,20 @@ function updateStrategyButtons() {
   els.runStrategyReview.title = hasAccount ? "" : "Select a broker account first.";
 }
 
+function updateZeroDteLotteryButtons(forceBusy = false) {
+  if (!els.saveZeroDteLotteryControls || !els.previewZeroDteLottery || !els.runZeroDteLotteryScan) {
+    return;
+  }
+  const hasAccount = Boolean(state.selectedAccountId);
+  const disabled = !hasAccount || forceBusy;
+  els.saveZeroDteLotteryControls.disabled = disabled;
+  els.previewZeroDteLottery.disabled = disabled;
+  els.runZeroDteLotteryScan.disabled = disabled;
+  els.saveZeroDteLotteryControls.title = hasAccount ? "" : "Select a broker account first.";
+  els.previewZeroDteLottery.title = hasAccount ? "Preview without submitting an order." : "Select a broker account first.";
+  els.runZeroDteLotteryScan.title = hasAccount ? "Force a paper scan; may submit one paper option order." : "Select a broker account first.";
+}
+
 function updatePreOpenButtons(forceSaving = false) {
   if (!els.loadPreOpenBoard || !els.loadPreOpenOverlays || !els.savePreOpenBoard) {
     return;
@@ -4464,6 +4785,17 @@ function parseSymbolList(value) {
     .split(",")
     .map((symbol) => symbol.trim().toUpperCase())
     .filter(Boolean);
+}
+
+function normalizeLotterySymbol() {
+  const symbol = String(els.zeroDteLotterySymbol?.value || "QQQ.US").trim().toUpperCase();
+  if (!symbol) {
+    throw new Error("Zero-DTE lottery symbol is required.");
+  }
+  if (els.zeroDteLotterySymbol) {
+    els.zeroDteLotterySymbol.value = symbol;
+  }
+  return symbol;
 }
 
 function isCancelableOrder(order) {

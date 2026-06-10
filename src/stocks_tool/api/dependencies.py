@@ -7,6 +7,9 @@ from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorClient
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
+from stocks_tool.application.services.zero_dte_lottery_strategy import (
+    ZeroDteLotteryStrategyService,
+)
 from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
@@ -281,6 +284,22 @@ def get_covered_call_strategy_service(
         longbridge_adapter=adapter,
         order_service=order_service,
         market_events=market_events,
+    )
+
+
+def get_zero_dte_lottery_strategy_service(
+    broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    order_service: OrderService = Depends(get_order_service),
+    experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
+) -> ZeroDteLotteryStrategyService:
+    settings: Settings = get_settings()
+    return ZeroDteLotteryStrategyService(
+        settings=settings,
+        broker_accounts=broker_accounts,
+        longbridge_adapter=adapter,
+        order_service=order_service,
+        experiments=experiments,
     )
 
 

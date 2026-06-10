@@ -359,6 +359,15 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_advisor_run_response_payload(
+        self,
+        advisor_run_id: str,
+        *,
+        response_payload: dict,
+    ) -> StrategyAdvisorRun:
+        raise NotImplementedError
+
+    @abstractmethod
     def mark_advisor_run_recorded(
         self,
         advisor_run_id: str,

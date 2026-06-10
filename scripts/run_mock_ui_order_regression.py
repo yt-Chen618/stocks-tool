@@ -171,6 +171,9 @@ def main() -> None:
             assert "QQQ / SPY Put Check" in dashboard.text
             assert "Stored Opening Follow-through" in dashboard.text
             assert "Bull Put Strategy" in dashboard.text
+            assert "Lottery Strategy" in dashboard.text
+            assert "Preview Lottery" in dashboard.text
+            assert "Force Scan" in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
             assert "Bull Put Monitor" in dashboard.text
@@ -205,6 +208,10 @@ def main() -> None:
                 "renderLatestPreOpenRun()",
                 "saveCurrentPreOpenBoard()",
                 "strategy-controls-form",
+                "zero-dte-lottery-controls-form",
+                "previewZeroDteLottery()",
+                "runZeroDteLotteryScan()",
+                "zero-dte-lottery/runtime",
                 "runStrategyScan()",
                 "runStrategyReview()",
                 "saveStrategyControls()",
@@ -253,6 +260,17 @@ def main() -> None:
             )
             assert runtime_state["auto_entry_enabled"] is True
             assert runtime_state["kill_switch_active"] is False
+            lottery_runtime = require_ok(
+                client.get("/strategies/zero-dte-lottery/runtime", params={"external_account_id": "LBPT10087357"})
+            )
+            assert lottery_runtime["auto_execute_enabled"] is False
+            lottery_preview = require_ok(
+                client.get(
+                    "/strategies/zero-dte-lottery/preview",
+                    params={"external_account_id": "LBPT10087357", "symbol": "QQQ.US", "direction": "auto"},
+                )
+            )
+            assert lottery_preview["eligible"] is True
             initial_executions = require_ok(client.get("/executions", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_executions) == 1
             assert initial_executions[0]["order_id"] == "mock-order-0002"
@@ -282,6 +300,7 @@ def main() -> None:
                             "account_seed": True,
                             "snapshot_seed": True,
                             "runtime_seed": True,
+                            "zero_dte_lottery_seed": True,
                             "spread_seed": True,
                             "execution_seed": True,
                             "journal_seed": True,

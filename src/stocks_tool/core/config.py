@@ -157,6 +157,43 @@ class CoveredCallStrategySettings(BaseModel):
         return self
 
 
+class ZeroDteLotteryStrategySettings(BaseModel):
+    enabled: bool = True
+    auto_execute_enabled: bool = False
+    scan_interval_seconds: int = Field(default=900, ge=60)
+    scan_window_start_hour_et: int = Field(default=10, ge=0, le=23)
+    scan_window_start_minute_et: int = Field(default=0, ge=0, le=59)
+    scan_window_end_hour_et: int = Field(default=14, ge=0, le=23)
+    scan_window_end_minute_et: int = Field(default=30, ge=0, le=59)
+    symbols: tuple[str, ...] = ("QQQ.US",)
+    max_premium_per_trade: Decimal = Field(default=Decimal("150"), gt=0)
+    contracts_per_trade: int = Field(default=1, ge=1)
+    max_trades_per_day: int = Field(default=1, ge=1)
+    delta_target: Decimal = Field(default=Decimal("0.22"), gt=0)
+    delta_min: Decimal = Field(default=Decimal("0.15"), gt=0)
+    delta_max: Decimal = Field(default=Decimal("0.30"), gt=0)
+    min_open_interest: int = Field(default=100, ge=0)
+    min_volume: int = Field(default=10, ge=0)
+    min_bid: Decimal = Field(default=Decimal("0.05"), gt=0)
+    max_bid_ask_spread_pct: Decimal = Field(default=Decimal("0.20"), gt=0)
+    max_option_quote_age_seconds: int = Field(default=1800, ge=1)
+    min_direction_change_pct: Decimal = Field(default=Decimal("0.30"), ge=0)
+    max_candidate_symbols: int = Field(default=80, ge=1)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self) -> "ZeroDteLotteryStrategySettings":
+        if (self.scan_window_end_hour_et, self.scan_window_end_minute_et) <= (
+            self.scan_window_start_hour_et,
+            self.scan_window_start_minute_et,
+        ):
+            raise ValueError("Zero-DTE lottery scan window end must be after the scan window start.")
+        if self.delta_min > self.delta_target:
+            raise ValueError("Zero-DTE lottery delta_min cannot exceed delta_target.")
+        if self.delta_target > self.delta_max:
+            raise ValueError("Zero-DTE lottery delta_target cannot exceed delta_max.")
+        return self
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -219,6 +256,9 @@ class Settings(BaseSettings):
     )
     covered_call_strategy: CoveredCallStrategySettings = Field(
         default_factory=CoveredCallStrategySettings
+    )
+    zero_dte_lottery_strategy: ZeroDteLotteryStrategySettings = Field(
+        default_factory=ZeroDteLotteryStrategySettings
     )
 
 

@@ -15,11 +15,15 @@ from stocks_tool.api.dependencies import (
     get_covered_call_strategy_service,
     get_strategy_advisor_intake_service,
     get_strategy_experiment_service,
+    get_zero_dte_lottery_strategy_service,
 )
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.strategy_advisor_intake import StrategyAdvisorIntakeService
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
+from stocks_tool.application.services.zero_dte_lottery_strategy import (
+    ZeroDteLotteryStrategyService,
+)
 from stocks_tool.domain.enums import (
     ExecutionMode,
     SpreadStatus,
@@ -42,6 +46,7 @@ from stocks_tool.domain.models import (
     PreOpenAssessmentReviewResult,
     RecordStrategyAdvisorResponseRequest,
     RunDeepSeekAdvisorRequest,
+    StrategyAdvisorAuditSnapshot,
     BullPutStrategyReviewResult,
     BullPutStrategyReadinessResult,
     BullPutStrategyRuntimeState,
@@ -60,6 +65,7 @@ from stocks_tool.domain.models import (
     ExecuteBullPutSpreadRequest,
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
+    ExecuteZeroDteLotteryRequest,
     StrategyAdvisorContext,
     StrategyAdvisorRun,
     StrategyAdvisorResponseResult,
@@ -71,9 +77,129 @@ from stocks_tool.domain.models import (
     StrategyRun,
     StrategySignal,
     UpdateBullPutStrategyRuntimeRequest,
+    UpdateZeroDteLotteryRuntimeRequest,
+    ZeroDteLotteryExecutionResult,
+    ZeroDteLotteryPreviewResult,
+    ZeroDteLotteryRuntimeState,
+    ZeroDteLotteryScanResult,
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+
+@router.get("/zero-dte-lottery/preview", response_model=ZeroDteLotteryPreviewResult)
+def preview_zero_dte_lottery(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    symbol: str | None = Query(default=None, description="Configured lottery symbol, e.g. QQQ.US"),
+    direction: str = Query(default="auto", description="auto, call, or put"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    as_of: datetime | None = Query(default=None),
+    service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+) -> ZeroDteLotteryPreviewResult:
+    try:
+        return service.preview(
+            external_account_id=external_account_id,
+            symbol=symbol,
+            direction=direction,
+            mode=mode,
+            as_of=as_of,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/zero-dte-lottery/execute", response_model=ZeroDteLotteryExecutionResult, status_code=201)
+def execute_zero_dte_lottery(
+    request: ExecuteZeroDteLotteryRequest,
+    service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+) -> ZeroDteLotteryExecutionResult:
+    try:
+        return service.execute(request)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/zero-dte-lottery/runtime", response_model=ZeroDteLotteryRuntimeState)
+def get_zero_dte_lottery_runtime(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+) -> ZeroDteLotteryRuntimeState:
+    try:
+        return service.get_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/zero-dte-lottery/runtime/{external_account_id}", response_model=ZeroDteLotteryRuntimeState)
+def update_zero_dte_lottery_runtime(
+    external_account_id: str,
+    request: UpdateZeroDteLotteryRuntimeRequest,
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+) -> ZeroDteLotteryRuntimeState:
+    try:
+        return service.update_runtime_state(
+            external_account_id=external_account_id,
+            request=request,
+            mode=mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/zero-dte-lottery/runtime/{external_account_id}/scan", response_model=ZeroDteLotteryScanResult)
+def run_zero_dte_lottery_scan(
+    external_account_id: str,
+    symbol: str | None = Query(default=None, description="Configured lottery symbol, e.g. QQQ.US"),
+    direction: str = Query(default="auto", description="auto, call, or put"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    force: bool = Query(default=False, description="Run even when auto-execution is disabled or outside the scan window."),
+    as_of: datetime | None = Query(default=None),
+    service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+) -> ZeroDteLotteryScanResult:
+    try:
+        return service.run_scan(
+            external_account_id=external_account_id,
+            symbol=symbol,
+            direction=direction,
+            mode=mode,
+            as_of=as_of,
+            force=force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LongbridgeDependencyError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeConfigurationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeIntegrationError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/covered-call/preview", response_model=CoveredCallPreviewResult)
@@ -382,6 +508,10 @@ def run_deepseek_advisor_dry_run(
             )
         )
         recordable_payload.advisor_run_id = advisor_run.id
+        advisor_run = service.update_advisor_run_response_payload(
+            advisor_run.id,
+            response_payload=recordable_payload.model_dump(mode="json", exclude_none=True),
+        )
         return DeepSeekAdvisorDryRunResult(
             external_account_id=request.external_account_id,
             context=context,
@@ -403,6 +533,25 @@ def run_deepseek_advisor_dry_run(
             )
         status_code = 400 if "configured" in str(exc).lower() else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/advisor/audit", response_model=StrategyAdvisorAuditSnapshot)
+def get_strategy_advisor_audit(
+    external_account_id: str | None = Query(default=None),
+    source: str | None = Query(default="deepseek"),
+    limit: int = Query(default=10, ge=1, le=50),
+    service: StrategyExperimentService = Depends(get_strategy_experiment_service),
+) -> StrategyAdvisorAuditSnapshot:
+    try:
+        return service.get_advisor_audit_snapshot(
+            external_account_id=external_account_id,
+            source=source,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

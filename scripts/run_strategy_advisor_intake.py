@@ -128,6 +128,22 @@ def summarize_generated(payload: dict[str, Any]) -> str:
     )
 
 
+def fetch_advisor_audit(args: argparse.Namespace, client: httpx.Client) -> dict[str, Any] | None:
+    try:
+        return require_json(
+            client.get(
+                "/strategies/advisor/audit",
+                params={
+                    "external_account_id": args.account_id,
+                    "source": args.source,
+                    "limit": 5,
+                },
+            )
+        )
+    except AdvisorIntakeError:
+        return None
+
+
 def main() -> None:
     args = parse_args()
     base_url = args.base_url.rstrip("/")
@@ -157,6 +173,7 @@ def main() -> None:
             intake_result = None
             if args.record:
                 intake_result = require_json(client.post("/strategies/advisor/responses", json=intake_payload))
+            advisor_audit = fetch_advisor_audit(args, client)
 
             if intake_result is not None:
                 summary = summarize_recorded(intake_result)
@@ -181,6 +198,7 @@ def main() -> None:
                         },
                         "recorded": intake_result is not None,
                         "intake_result": intake_result,
+                        "advisor_audit": advisor_audit,
                         "dry_run_payload": dry_run_result or (intake_payload if intake_result is None else None),
                     },
                 ),

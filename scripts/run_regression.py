@@ -15,6 +15,7 @@ SCRIPT_BY_WORKFLOW = {
     "real-preopen-board": ROOT / "scripts" / "run_real_local_preopen_board_regression.py",
     "real-ui-refresh": ROOT / "scripts" / "run_real_local_dashboard_refresh_regression.py",
     "advisor-intake": ROOT / "scripts" / "run_strategy_advisor_intake.py",
+    "unattended-paper": ROOT / "scripts" / "run_unattended_paper.py",
 }
 
 
@@ -27,7 +28,8 @@ def parse_args() -> argparse.Namespace:
             "`bull-put-real-paper` for real Longbridge bull put preview smoke, `real-paper` for the stock-order paper smoke flow, "
             "`real-preopen-board` for live localhost pre-open board checks, and `real-ui-refresh` for repeated reload "
             "timing checks against an already running localhost dashboard. Use `advisor-intake` to fetch advisor context "
-            "and optionally record read-only advisor responses."
+            "and optionally record read-only advisor responses. Use `unattended-paper` to arm, inspect, or resume "
+            "the local paper unattended workflow."
         )
     )
     parser.add_argument(

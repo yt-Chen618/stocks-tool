@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-06-03
+Last updated: 2026-06-10
 
 ## Project
 
@@ -30,6 +30,7 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `strategies`
 - `strategies/experiment`
 - `strategies/covered-call`
+- `strategies/zero-dte-lottery`
 - `market-events`
 - `executions`
 - `journals`
@@ -79,6 +80,8 @@ uvicorn --app-dir src stocks_tool.main:app --reload
 - `GET /strategies/advisor-context`
 - `POST /strategies/advisor/deepseek/dry-run`
 - `POST /strategies/advisor/responses`
+- `GET /strategies/advisor/runs`
+- `GET /strategies/advisor/audit`
 - `GET /strategies/covered-call/preview`
 - `GET /strategies/covered-call/activity`
 - `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
@@ -158,14 +161,15 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - LLM/advisor-sourced proposals such as `deepseek`, `llm`, `openai`, or `external_advisor` are treated as read-only advice until local deterministic checks and manual approval are present
   - advisor-sourced proposals must keep `approval_required=true`, cannot be created in live mode, and record a `strategy_policy` audit signal when accepted into the ledger
   - `POST /strategies/advisor/responses` records external advisor output as paper-only proposals or reviews after loading the local advisor context; it normalizes recognized sources such as `deepseek`, forces proposal `approval_required=true`, adds read-only/manual-approval checks, and does not touch any broker order path
-  - `POST /strategies/advisor/deepseek/dry-run` loads the same local advisor context, calls the configured DeepSeek client, creates a persistent `strategy_advisor_runs` audit row, and returns a recordable payload with `recorded=false` plus `advisor_run_id` so the dashboard can preview the result before writing proposal/review ledger rows
+  - `POST /strategies/advisor/deepseek/dry-run` loads the same local advisor context, calls the configured DeepSeek client, creates a persistent `strategy_advisor_runs` audit row, persists the recordable response payload back onto the run with `advisor_run_id`, and returns a recordable payload with `recorded=false` so the dashboard can preview the result before writing proposal/review ledger rows
   - `GET /strategies/advisor/runs` lists recent DeepSeek advisor run history with status, provider/model, response id, token/cache usage, proposal/review counts, context format, error messages, and record timestamps
+  - `GET /strategies/advisor/audit` returns local advisor audit snapshots with response payloads, raw response content when available, token/cache deltas against the previous run, downstream proposal/review impact, record state, and paper-first/manual-approval checks
   - the DeepSeek advisor prompt now prioritizes `covered_call_activity.summary`, `covered_call_activity.lifecycle_tasks`, proposal statuses, and later close/lifecycle runs over older monitor signals, so closed or rolled covered-call history is not mistaken for an active position
   - the DeepSeek advisor client now sends a compact `compact_v1` context that preserves controls, hard rules, covered-call summary/current state, lifecycle tasks, latest monitor, recent proposal/run/signal/review summaries, and selected option/risk fields while omitting bulky `candidate_payload`, `risk_payload`, `raw_payload`, broker snapshots, and full option-chain details
   - the compact context also exposes covered-call `auto_propose_enabled` and `new_entry_scheduler_active`; when auto-propose is disabled, the prompt tells DeepSeek not to recommend waiting for scheduler-generated covered-call entry signals
   - DeepSeek advisor output is lightly normalized before intake validation: placeholder optional text such as `None`, `N/A`, or `no recommendation` is removed from recommendations, and placeholder required summaries are replaced with a concrete no-action summary so the dashboard does not render `None`
   - the dashboard Strategy Experiment Bench now includes explicit Load Context, Run DeepSeek, Record Output, and recent DeepSeek run history controls; Run DeepSeek is the only dashboard path that sends advisor context to DeepSeek, while Record Output only writes local proposals/reviews and marks the matching advisor run `recorded`
-  - `scripts\run_regression.py advisor-intake --call-deepseek` now calls the same `/strategies/advisor/deepseek/dry-run` API path as the dashboard, so CLI dry-runs create the same advisor run history; it remains read-only unless `--record` is explicitly supplied
+  - `scripts\run_regression.py advisor-intake --call-deepseek` now calls the same `/strategies/advisor/deepseek/dry-run` API path as the dashboard, so CLI dry-runs create the same advisor run history; the local report includes `/strategies/advisor/audit` when available and remains read-only unless `--record` is explicitly supplied
 
 ### Covered call proposals
 
@@ -196,6 +200,29 @@ uvicorn --app-dir src stocks_tool.main:app --reload
   - dashboard covered-call activity includes a manual lifecycle refresh button backed by `POST /strategies/covered-call/lifecycle/{external_account_id}/reconcile`
   - covered-call activity also exposes `latest_monitor`, parsed from the latest monitor signal, so the dashboard can show monitor action, call mark, estimated open P/L, premium capture, DTE, and monitor timestamp without re-querying Longbridge
   - optional scheduler flags can scan for covered-call proposals, reconcile pending lifecycle orders, and monitor executed covered-call sell or roll proposals in the background, but they default to disabled and do not approve new proposals automatically
+
+### Zero-DTE lottery preview and paper execution
+
+- `zero_dte_lottery_v1` has a first-pass preview and paper execution workflow.
+- Routes:
+  - `GET /strategies/zero-dte-lottery/preview?external_account_id=LBPT10087357&symbol=QQQ.US&direction=auto&mode=paper`
+  - `POST /strategies/zero-dte-lottery/execute`
+  - `GET /strategies/zero-dte-lottery/runtime?external_account_id=LBPT10087357&mode=paper`
+  - `POST /strategies/zero-dte-lottery/runtime/{external_account_id}`
+  - `POST /strategies/zero-dte-lottery/runtime/{external_account_id}/scan`
+- Current scope:
+  - paper-only preview, paper buy-limit execution, controlled paper scan automation, in-process runtime auto-order control, and dashboard controls for preview / runtime switch / confirmed force scan; no proposal creation and no live mode
+  - configured symbol universe starts with `QQQ.US`
+  - selects same-day long calls or puts only
+  - `direction=auto` uses the underlying's same-day change versus prior close; if the move is inside the configured threshold, preview skips instead of forcing a trade
+  - `direction=call` or `direction=put` is available for manual what-if previews
+  - contract count is `1`
+  - ask-price / execution-limit premium cap is `$150` per candidate
+  - execution re-runs preview before order submission, requires `confirm_paper_order=true` for direct manual API execution, and enforces at most `1` lottery trade per account per U.S. session date
+  - filters candidates by same-day expiration, delta, quote freshness, open interest, volume, positive bid/ask, and bid/ask spread width
+  - `scan` returns skip reasons when automation is disabled or outside the configured U.S. session window; `force=true` bypasses the disabled/window checks for an explicit manual paper scan
+  - scheduler integration exists but defaults to off; enable through `POST /strategies/zero-dte-lottery/runtime/{external_account_id}` or with `ZERO_DTE_LOTTERY_STRATEGY__AUTO_EXECUTE_ENABLED=true`, with a default `900` second interval and `10:00-14:30 ET` scan window
+  - `scripts\run_regression.py unattended-paper arm --zero-dte-lottery-auto-order on` explicitly arms the same paper auto-order switch for the running API process; `resume --zero-dte-lottery-auto-order off` turns it back off
 
 ### Market event calendar
 
@@ -670,14 +697,17 @@ node --check src\stocks_tool\ui\static\app.js
 ## Current phase consolidation
 
 - The last committed handoff on `main` was clean before the current DeepSeek formalization edits.
-- Current code and tests include the strategy controls, advisor-context, covered-call activity, and covered-call lifecycle routes.
+- Current code and tests include the strategy controls, advisor-context, advisor audit snapshot, covered-call activity, and covered-call lifecycle routes.
 - The active product boundary is still paper-first: advisor/LLM inputs may write proposals or reviews into the ledger through `POST /strategies/advisor/responses`, but must not execute orders directly.
-- DeepSeek formalization is implemented with `strategy_advisor_runs`, `StrategyAdvisorRunStatus`, `GET /strategies/advisor/runs`, and migration `20260603_0011_strategy_advisor_runs`; the migration has been applied locally.
-- The `advisor-intake` regression workflow can fetch advisor context from the local API, optionally call DeepSeek through the same dry-run API path as the dashboard, and optionally record a provided or generated advisor response JSON only when `--record` is explicitly supplied.
+- DeepSeek formalization is implemented with `strategy_advisor_runs`, `StrategyAdvisorRunStatus`, `GET /strategies/advisor/runs`, `GET /strategies/advisor/audit`, and migration `20260603_0011_strategy_advisor_runs`; the migration has been applied locally.
+- The `advisor-intake` regression workflow can fetch advisor context from the local API, optionally call DeepSeek through the same dry-run API path as the dashboard, include the local advisor audit snapshot in its JSON report, and optionally record a provided or generated advisor response JSON only when `--record` is explicitly supplied.
 - The dashboard can now load advisor context, run a DeepSeek dry-run through `POST /strategies/advisor/deepseek/dry-run`, preview token usage/cache hit/miss plus generated proposals/reviews, display recent DeepSeek run history, and explicitly record the output through `POST /strategies/advisor/responses`.
 - Real DeepSeek calls export local advisor context to an external provider and should be run only after explicit approval for that data sharing.
 - The covered-call paper validation cycle is closed with no active covered-call proposal, pending roll, or pending lifecycle task reported by the activity endpoint.
-- Restart any long-running API process after pulling this change so OpenAPI and the dashboard pick up `/strategies/advisor/runs` and the latest static asset version.
+- Restart any long-running API process after pulling this change so OpenAPI and the dashboard pick up `/strategies/advisor/runs`, `/strategies/advisor/audit`, and the latest static asset version.
+- A first-pass unattended paper workflow is now implemented through `scripts\run_regression.py unattended-paper`. It uses the local API to arm conservative overnight mode by disabling new bull put entries while leaving the FastAPI background scheduler responsible for monitoring existing paper spreads, covered-call lifecycle reconciliation, zero-DTE lottery paper auto-ordering only when explicitly armed, and account/order sync. `status` emits a morning/evening summary with `strategy_loop_checks` for paper-first controls, covered-call auto-propose, bull put runtime state, linked spread/lifecycle orders, executions, journals, and zero-DTE cap/one-trade guard; `resume` re-enables bull put auto-entry. Optional `--notification-channel dry-run|console|file` produces a local notification payload for arm/status/resume, failure status, strategy-loop warnings/failures, order/lifecycle drift, and the zero-DTE auto-order switch; email/push/SMS are reserved channels and are not active yet.
+- `zero_dte_lottery_v1` preview, paper execution, manual scan, opt-in scheduler scan, runtime auto-order control, unattended script arming, and dashboard controls are implemented with a `$150` max premium cap, one-trade-per-day guard, strategy run/signal recording, and tests. Scheduler execution remains disabled by default.
+- Latest paper-loop / advisor-audit / unattended-notification code-level verification on `2026-06-10`: targeted advisor-intake and unattended tests passed with `40 passed`; full test suite passed with `200 passed in 3.72s`; `node --check src\stocks_tool\ui\static\app.js` passed; `scripts\run_regression.py mock-ui` passed and covered dashboard preview plus confirmed force scan against the mock backend; `git diff --check` reported only CRLF normalization warnings.
 
 ## Known cleanup items
 
@@ -685,9 +715,13 @@ node --check src\stocks_tool\ui\static\app.js
 - `artifacts/` contains temporary screenshots from manual UI regression.
 - There is no websocket push reconciliation yet.
 - The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
+- The unattended workflow now supports local dry-run/console/file notification payloads; external email/push/SMS delivery remains reserved for a later adapter.
 
 ## Recommended next steps
 
-1. Keep covered-call auto-propose disabled unless intentionally creating new candidates; leave auto-monitor / auto-lifecycle enabled only when there is an open or pending covered-call proposal to supervise.
-2. Apply `alembic upgrade head` in every environment and restart the API/dashboard so `/strategies/advisor/runs` and the run-history UI are available.
-3. For the next explicitly approved DeepSeek run, confirm the run appears in history as `succeeded`, inspect token/cache usage and response content, then use Record Output only when the proposal/review payload should be written locally.
+1. Stabilize the paper-account strategy loop for `LBPT10087357`: keep the product boundary paper-first, keep covered-call auto-propose disabled unless intentionally creating a new candidate, and use the dashboard plus runtime/activity endpoints to confirm bull put spreads, covered-call lifecycle tasks, zero-DTE runtime state, orders, executions, and journals agree before leaving the app unattended.
+2. Exercise the unattended paper workflow end to end for a few real paper sessions: before leaving the app unattended overnight, run `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper arm --json-output artifacts/unattended-paper-arm.json`, optionally add `--notification-channel dry-run` first and then `file` once the payload shape is accepted, keep the FastAPI scheduler process running, inspect `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts/unattended-paper-status.json` the next morning for account/order sync, open spread monitoring, lifecycle reconciliation, and zero-DTE switch state, then use `resume` only after deciding bull put auto-entry should be re-enabled.
+3. Complete controlled zero-DTE lottery validation before treating it as an unattended feature: use the dashboard `Lottery Strategy` panel or the equivalent preview endpoint, test confirmed force scan through `POST /strategies/zero-dte-lottery/runtime/LBPT10087357/scan?symbol=QQQ.US&direction=auto&mode=paper&force=true`, execute a manual paper order only with `confirm_paper_order=true`, and verify the `$150` premium cap, one-trade-per-session guard, run/signal recording, and explicit auto-order switch behavior. To arm scheduler paper auto-ordering, use the dashboard control or `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper arm --zero-dte-lottery-auto-order on --json-output artifacts/unattended-paper-lottery-on.json`; turn it back off with `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper resume --zero-dte-lottery-auto-order off --json-output artifacts/unattended-paper-resume.json`.
+4. Apply `alembic upgrade head` in every environment and restart the API/dashboard so `/strategies/advisor/runs`, `/strategies/advisor/audit`, and the run-history UI are available.
+5. For the next explicitly approved DeepSeek run, confirm the run appears in history as `succeeded`, inspect `/strategies/advisor/audit` for token/cache usage, response content, record state, checks, and downstream proposal/review impact, then use Record Output only when the payload should be written locally.
+6. Add external email/push/SMS notification delivery only after the local dry-run/console/file unattended payload has been exercised for a few paper sessions and the summary shape is stable.

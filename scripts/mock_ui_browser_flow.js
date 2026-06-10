@@ -14,6 +14,8 @@ async function main() {
   let journalPanelText = "";
   let strategySkipText = "";
   let strategyReviewText = "";
+  let lotteryPreviewText = "";
+  let lotteryScanText = "";
   let preOpenAssessmentText = "";
   let preOpenRunText = "";
 
@@ -38,13 +40,25 @@ async function main() {
     await expectText(page.locator("body"), "QQQ / SPY Put Check");
     await expectText(page.locator("body"), "Stored Opening Follow-through");
     await expectText(page.locator("body"), "Bull Put Strategy");
+    await expectText(page.locator("body"), "Lottery Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Execution Desk");
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
+    await expectText(page.locator("#zero-dte-lottery-strip"), "Auto Order");
     await expectText(page.locator("#strategy-experiment-strip"), "Active Proposals");
     await expectText(page.locator("#covered-call-activity-card"), "No covered-call activity yet.");
     await expectText(page.locator("#market-events-card"), "UNH earnings window");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
+    await page.click("#preview-zero-dte-lottery");
+    await page.waitForFunction(
+      () => document.getElementById("zero-dte-lottery-result-card")?.innerText?.includes("Eligible Lottery Candidate"),
+    );
+    lotteryPreviewText = await page.locator("#zero-dte-lottery-result-card").innerText();
+    await page.click("#run-zero-dte-lottery-scan");
+    await page.waitForFunction(
+      () => document.getElementById("status-banner")?.textContent?.includes("Zero-DTE lottery paper order submitted"),
+    );
+    lotteryScanText = await page.locator("#zero-dte-lottery-result-card").innerText();
     await page.getByRole("button", { name: "Load Live Macro" }).click();
     await expectText(page.locator("#preopen-summary-strip"), "Board Status");
     await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
@@ -160,6 +174,11 @@ async function main() {
             skipReason: strategySkipText,
             reviewRendered: strategyReviewText.toLowerCase().includes("short delta target"),
             reviewSummary: strategyReviewText,
+          },
+          lottery: {
+            previewRendered: lotteryPreviewText.includes("Eligible Lottery Candidate"),
+            scanRendered: lotteryScanText.includes("Paper Order Submitted"),
+            summary: lotteryScanText,
           },
           order: {
             selectedOrder: summary.selectedOrderText,

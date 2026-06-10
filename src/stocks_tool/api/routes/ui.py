@@ -293,6 +293,108 @@ def render_dashboard() -> HTMLResponse:
                         <section class="panel panel-span-2">
                           <div class="panel-header">
                             <div>
+                              <span class="section-kicker">Zero-DTE</span>
+                              <h2>Lottery Strategy</h2>
+                            </div>
+                          </div>
+                          <div id="zero-dte-lottery-strip" class="mini-metric-strip strategy-summary-strip">
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Auto Order</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">No runtime state loaded.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Max Premium</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">$150 default cap.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Scan Window</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">Automation is off by default.</span>
+                            </article>
+                            <article class="mini-metric-tile">
+                              <span class="metric-label">Daily Cap</span>
+                              <strong class="mini-metric-value">--</strong>
+                              <span class="mini-metric-detail">One lottery order per session.</span>
+                            </article>
+                          </div>
+
+                          <form id="zero-dte-lottery-controls-form" class="ticket-form">
+                            <div class="ticket-grid">
+                              <label class="field">
+                                <span>Auto Order</span>
+                                <select id="zero-dte-lottery-auto-order">
+                                  <option value="false">Disabled</option>
+                                  <option value="true">Enabled</option>
+                                </select>
+                              </label>
+                              <label class="field">
+                                <span>Symbol</span>
+                                <input id="zero-dte-lottery-symbol" type="text" maxlength="32" value="QQQ.US" />
+                              </label>
+                              <label class="field">
+                                <span>Direction</span>
+                                <select id="zero-dte-lottery-direction">
+                                  <option value="auto">Auto</option>
+                                  <option value="call">Call</option>
+                                  <option value="put">Put</option>
+                                </select>
+                              </label>
+                            </div>
+                            <div class="form-foot">
+                              <p id="zero-dte-lottery-hint" class="form-hint">Paper-only same-day long option. Auto-order is disabled by default and capped at $150.</p>
+                              <div class="inline-actions">
+                                <button id="save-zero-dte-lottery-controls" class="icon-button" type="submit">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M5 5h11l3 3v11H5z"/>
+                                      <path d="M8 5v6h8"/>
+                                      <path d="M8 19v-6h8v6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Save Lottery Controls</span>
+                                </button>
+                                <button id="preview-zero-dte-lottery" class="icon-button" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M4 5h16v14H4z"/>
+                                      <path d="M8 9h8"/>
+                                      <path d="M8 13h6"/>
+                                      <path d="M8 17h5"/>
+                                    </svg>
+                                  </span>
+                                  <span>Preview Lottery</span>
+                                </button>
+                                <button id="run-zero-dte-lottery-scan" class="icon-button accent" type="button">
+                                  <span class="icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" focusable="false">
+                                      <path d="M3 12h18"/>
+                                      <path d="m13 6 6 6-6 6"/>
+                                    </svg>
+                                  </span>
+                                  <span>Force Scan</span>
+                                </button>
+                              </div>
+                            </div>
+                          </form>
+
+                          <div class="strategy-notes-grid experiment-grid">
+                            <article class="strategy-note-card lottery-note-card">
+                              <div class="form-header">
+                                <span class="section-kicker">Candidate</span>
+                                <h3>Lottery Preview / Scan</h3>
+                              </div>
+                              <div id="zero-dte-lottery-result-card" class="strategy-note-body empty">
+                                No zero-DTE lottery preview loaded yet.
+                              </div>
+                            </article>
+                          </div>
+                        </section>
+
+                        <section class="panel panel-span-2">
+                          <div class="panel-header">
+                            <div>
                               <span class="section-kicker">Risk Calendar</span>
                               <h2>Market Event Calendar</h2>
                             </div>

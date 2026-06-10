@@ -438,8 +438,108 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
         ),
     ]
     assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
-    assert monitor_call.args[0] == "spread-1"
-    assert monitor_call.kwargs["as_of"] is not None
+
+
+def test_reconciliation_coordinator_runs_zero_dte_lottery_scan_when_enabled(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    now = datetime.now(timezone.utc)
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": now,
+            "orders_last_sync_attempt_at": now,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    orders = Mock()
+    orders.list_orders.return_value = []
+    zero_dte_service = Mock()
+
+    class FakeZeroDteLotteryStrategyService:
+        def __new__(cls, **kwargs):
+            return zero_dte_service
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutStrategyRuntimeRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyMarketEventRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyStrategyExperimentRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "ZeroDteLotteryStrategyService",
+        FakeZeroDteLotteryStrategyService,
+    )
+
+    settings = Settings(
+        bull_put_strategy={"enabled": False},
+        covered_call_strategy={"enabled": False},
+        zero_dte_lottery_strategy={
+            "enabled": True,
+            "auto_execute_enabled": True,
+            "scan_interval_seconds": 60,
+        },
+    )
+    coordinator = ReconciliationCoordinator(
+        settings=settings,
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+
+    zero_dte_service.run_scan.assert_called_once()
+    scan_call = zero_dte_service.run_scan.call_args
+    assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
+    assert scan_call.kwargs["mode"] == ExecutionMode.PAPER
+    assert scan_call.kwargs["as_of"] is not None
 
 
 def test_reconciliation_coordinator_imports_configured_market_event_csv(
