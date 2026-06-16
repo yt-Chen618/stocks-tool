@@ -1,5 +1,7 @@
+import hashlib
+import json
+import logging
 from datetime import datetime, timezone
-
 from decimal import Decimal, InvalidOperation
 
 from stocks_tool.domain.enums import (
@@ -8,15 +10,19 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    AdvisorPlaybook,
     CoveredCallLifecycleTask,
     CoveredCallActivitySnapshot,
     CoveredCallActivitySummary,
     CoveredCallMonitorSnapshot,
+    CreateStrategyAuditEventRequest,
     CreateStrategyAdvisorRunRequest,
     CreateStrategyProposalRequest,
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
+    AdvisorRunCard,
+    PaperMandate,
     StrategyAdvisorContext,
     StrategyAdvisorAuditSnapshot,
     StrategyAdvisorRun,
@@ -32,14 +38,60 @@ from stocks_tool.domain.models import (
     StrategyReview,
     StrategyRun,
     StrategySignal,
+    StrategyAuditEvent,
 )
 from stocks_tool.core.config import Settings
-from stocks_tool.ports.repository import BrokerAccountRepository, StrategyExperimentRepository
+from stocks_tool.ports.repository import (
+    BrokerAccountRepository,
+    StrategyAuditEventRepository,
+    StrategyExperimentRepository,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class StrategyExperimentService:
     WORKING_ORDER_STALE_AFTER_SECONDS = 15 * 60
     advisor_sources = {"deepseek", "llm", "llm_advisor", "openai", "external_advisor"}
+    advisor_playbooks = (
+        AdvisorPlaybook(
+            id="bull_put_v1",
+            strategy_id="paper_bull_put_v1",
+            title="Bull Put Paper Workbench",
+            summary="Review paper bull put spread posture and propose local proposal/review records only.",
+            allowed_outputs=["proposal", "review"],
+            hard_limits=[
+                "Paper mode only.",
+                "Cannot submit, cancel, replace, or recover broker orders.",
+                "Execution still requires deterministic checks and manual approval.",
+            ],
+        ),
+        AdvisorPlaybook(
+            id="covered_call_v1",
+            strategy_id="covered_call_v1",
+            title="Covered Call Paper Workbench",
+            summary="Review covered call proposal and lifecycle state without direct broker execution.",
+            allowed_outputs=["proposal", "review"],
+            hard_limits=[
+                "Advisor output is advisory only.",
+                "Opening, closing, and rolling require local policy checks.",
+                "Manual approval remains required before execution flows inspect a proposal.",
+            ],
+        ),
+        AdvisorPlaybook(
+            id="zero_dte_lottery_v1",
+            strategy_id="zero_dte_lottery_v1",
+            title="Zero-DTE Lottery Guardrail Review",
+            summary="Assess zero-DTE lottery controls and risk posture without arming direct execution.",
+            allowed_outputs=["review"],
+            hard_limits=[
+                "No direct order placement.",
+                "Auto-execute posture must remain visible in operator controls.",
+                "Reviews must keep premium and daily trade caps explicit.",
+            ],
+        ),
+    )
 
     def __init__(
         self,
@@ -47,10 +99,12 @@ class StrategyExperimentService:
         experiments: StrategyExperimentRepository,
         broker_accounts: BrokerAccountRepository,
         settings: Settings | None = None,
+        audit_events: StrategyAuditEventRepository | None = None,
     ) -> None:
         self.experiments = experiments
         self.broker_accounts = broker_accounts
         self.settings = settings
+        self.audit_events = audit_events
 
     def get_snapshot(
         self,
@@ -228,6 +282,7 @@ class StrategyExperimentService:
                     detail="Paper execution is allowed; live execution remains blocked unless ALLOW_LIVE_TRADING=true.",
                 ),
             ],
+            paper_mandate=self._paper_mandate_from_settings(external_account_id=external_account_id),
         )
 
     def get_advisor_context(
@@ -266,7 +321,11 @@ class StrategyExperimentService:
                     detail="Advisor-sourced proposals cannot be created in live mode.",
                 ),
             ],
+            playbooks=self.list_advisor_playbooks(),
         )
+
+    def list_advisor_playbooks(self) -> list[AdvisorPlaybook]:
+        return list(self.advisor_playbooks)
 
     def list_proposals(
         self,
@@ -369,13 +428,33 @@ class StrategyExperimentService:
         review_count: int,
         response_payload: dict | None = None,
     ) -> StrategyAdvisorRun:
-        return self.experiments.mark_advisor_run_recorded(
+        recorded = self.experiments.mark_advisor_run_recorded(
             advisor_run_id,
             recorded_at=datetime.now(timezone.utc),
             proposal_count=proposal_count,
             review_count=review_count,
             response_payload=response_payload,
         )
+        self._append_audit_event(
+            CreateStrategyAuditEventRequest(
+                external_account_id=recorded.external_account_id,
+                mode=recorded.mode,
+                actor="advisor",
+                source=recorded.source,
+                strategy="strategy_advisor",
+                action="advisor_run_card_recorded",
+                run_id=recorded.id,
+                summary=f"Advisor run recorded with {proposal_count} proposal(s) and {review_count} review(s).",
+                payload={
+                    "provider": recorded.provider,
+                    "model": recorded.model,
+                    "status": recorded.status.value,
+                    "proposal_count": proposal_count,
+                    "review_count": review_count,
+                },
+            )
+        )
+        return recorded
 
     def list_advisor_runs(
         self,
@@ -427,6 +506,45 @@ class StrategyExperimentService:
                 for index, run in enumerate(runs)
             ],
         )
+
+    def list_advisor_run_cards(
+        self,
+        *,
+        external_account_id: str | None = None,
+        source: str | None = "deepseek",
+        limit: int = 10,
+    ) -> list[AdvisorRunCard]:
+        audit = self.get_advisor_audit_snapshot(
+            external_account_id=external_account_id,
+            source=source,
+            limit=limit,
+        )
+        return [self._advisor_run_card(run_audit) for run_audit in audit.runs]
+
+    def list_audit_events(
+        self,
+        *,
+        external_account_id: str | None = None,
+        limit: int = 50,
+    ) -> list[StrategyAuditEvent]:
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        events: list[StrategyAuditEvent] = []
+        for signal in self.experiments.list_signals(
+            external_account_id=external_account_id,
+            strategy_id=None,
+            limit=limit,
+        ):
+            event = self._audit_event_from_signal(signal)
+            if event is not None:
+                events.append(event)
+        for run in self.experiments.list_advisor_runs(
+            external_account_id=external_account_id,
+            source=None,
+            limit=limit,
+        ):
+            events.append(self._audit_event_from_advisor_run(run))
+        return sorted(events, key=lambda event: event.emitted_at, reverse=True)[:limit]
 
     @staticmethod
     def _advisor_run_audit(
@@ -488,6 +606,207 @@ class StrategyExperimentService:
         if run.status.value == "failed":
             return "failed"
         return "dry_run_only"
+
+    @staticmethod
+    def _advisor_run_card(run_audit: StrategyAdvisorRunAudit) -> AdvisorRunCard:
+        run = run_audit.advisor_run
+        warnings = [
+            check.detail
+            for check in run_audit.checks
+            if check.blocking or check.status in {"warn", "fail"}
+        ]
+        if run_audit.record_state == "dry_run_only":
+            warnings.append("Advisor output has not been recorded into proposals or reviews.")
+        if run.error_message:
+            warnings.append(run.error_message)
+        summary = StrategyExperimentService._advisor_run_summary(run_audit)
+        return AdvisorRunCard(
+            run_id=run.id,
+            external_account_id=run.external_account_id,
+            source=run.source,
+            provider=run.provider,
+            model=run.model,
+            status=run.status,
+            playbook_id=StrategyExperimentService._advisor_playbook_id(run),
+            context_format=run.context_format,
+            context_hash=StrategyExperimentService._advisor_context_hash(run),
+            token_usage=run_audit.token_usage,
+            summary=summary,
+            recorded=run_audit.record_state == "recorded",
+            recordable_status=run_audit.record_state,
+            impact_summary=StrategyExperimentService._advisor_run_impact_summary(run_audit),
+            proposal_count=run.proposal_count,
+            review_count=run.review_count,
+            warnings=warnings,
+            downstream_proposal_ids=run_audit.downstream_impact.proposal_ids,
+            downstream_review_ids=run_audit.downstream_impact.review_ids,
+            completed_at=run.completed_at,
+            recorded_at=run.recorded_at,
+            created_at=run.created_at,
+        )
+
+    @staticmethod
+    def _advisor_run_summary(run_audit: StrategyAdvisorRunAudit) -> str:
+        run = run_audit.advisor_run
+        if run.error_message:
+            return run.error_message
+        impact = run_audit.downstream_impact
+        return (
+            f"{run_audit.record_state}; "
+            f"{run.proposal_count} proposal(s), {run.review_count} review(s); "
+            f"{len(impact.proposal_ids)} proposal link(s), {len(impact.review_ids)} review link(s)."
+        )
+
+    @staticmethod
+    def _advisor_context_hash(run: StrategyAdvisorRun) -> str:
+        payload = {
+            "external_account_id": run.external_account_id,
+            "source": run.source,
+            "provider": run.provider,
+            "model": run.model,
+            "context_format": run.context_format,
+            "context_limit": run.context_limit,
+            "response_payload": run.response_payload,
+        }
+        encoded = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _audit_event_from_signal(signal: StrategySignal) -> StrategyAuditEvent | None:
+        payload = signal.signal_payload if isinstance(signal.signal_payload, dict) else {}
+        audit_event = payload.get("audit_event")
+        if not audit_event:
+            return None
+        previous_status = payload.get("previous_status")
+        new_status = payload.get("new_status")
+        order_ids = StrategyExperimentService._audit_order_ids(payload)
+        return StrategyAuditEvent(
+            id=signal.id,
+            emitted_at=signal.emitted_at,
+            external_account_id=signal.external_account_id,
+            mode=signal.mode,
+            actor=payload.get("actor") or "local_system",
+            source=signal.source or payload.get("source"),
+            strategy=signal.strategy_id,
+            action=str(payload.get("action") or audit_event),
+            before={"status": previous_status} if previous_status else None,
+            after={"status": new_status} if new_status else None,
+            order_ids=order_ids,
+            proposal_id=signal.proposal_id or payload.get("proposal_id"),
+            run_id=signal.run_id or payload.get("run_id") or payload.get("advisor_run_id"),
+            warning_code=payload.get("warning_code") or payload.get("warning"),
+            summary=signal.summary,
+            detail=signal.detail,
+            payload=payload,
+            event_origin="synthetic",
+        )
+
+    @staticmethod
+    def _audit_event_from_advisor_run(run: StrategyAdvisorRun) -> StrategyAuditEvent:
+        record_state = StrategyExperimentService._advisor_run_record_state(run)
+        return StrategyAuditEvent(
+            id=f"advisor-run-{run.id}",
+            emitted_at=run.recorded_at or run.completed_at or run.created_at,
+            external_account_id=run.external_account_id,
+            mode=run.mode,
+            actor="advisor",
+            source=run.source,
+            strategy="strategy_advisor",
+            action="advisor_run_card_recorded" if record_state == "recorded" else "advisor_run_card_observed",
+            run_id=run.id,
+            warning_code="advisor_run_failed" if record_state == "failed" else None,
+            summary=(
+                run.error_message
+                or f"{record_state}; {run.proposal_count} proposal(s), {run.review_count} review(s)."
+            ),
+            payload={
+                "provider": run.provider,
+                "model": run.model,
+                "status": run.status.value,
+                "context_format": run.context_format,
+                "recorded": record_state == "recorded",
+            },
+            event_origin="synthetic",
+        )
+
+    @staticmethod
+    def _advisor_playbook_id(run: StrategyAdvisorRun) -> str | None:
+        payload = run.response_payload if isinstance(run.response_payload, dict) else {}
+        strategy_ids: list[str] = []
+        for key in ("proposals", "reviews"):
+            records = payload.get(key)
+            if isinstance(records, list):
+                strategy_ids.extend(
+                    str(item.get("strategy_id"))
+                    for item in records
+                    if isinstance(item, dict) and item.get("strategy_id")
+                )
+        if "paper_bull_put_v1" in strategy_ids:
+            return "bull_put_v1"
+        if "covered_call_v1" in strategy_ids:
+            return "covered_call_v1"
+        if "zero_dte_lottery_v1" in strategy_ids:
+            return "zero_dte_lottery_v1"
+        return None
+
+    @staticmethod
+    def _advisor_run_impact_summary(run_audit: StrategyAdvisorRunAudit) -> str:
+        impact = run_audit.downstream_impact
+        return (
+            f"{len(impact.proposal_ids)} proposal link(s), "
+            f"{len(impact.review_ids)} review link(s); advisor cannot submit orders."
+        )
+
+    @staticmethod
+    def _audit_order_ids(payload: dict) -> list[str]:
+        order_ids: list[str] = []
+        for key, value in payload.items():
+            if not key.endswith("order_id") and key != "order_id":
+                continue
+            if isinstance(value, str) and value:
+                order_ids.append(value)
+            elif isinstance(value, list):
+                order_ids.extend(str(item) for item in value if item)
+        return sorted(set(order_ids))
+
+    def _paper_mandate_from_settings(self, *, external_account_id: str | None) -> PaperMandate:
+        if self.settings is None:
+            return PaperMandate(external_account_id=external_account_id)
+        bull_put = self.settings.bull_put_strategy
+        covered_call = self.settings.covered_call_strategy
+        zero_dte = self.settings.zero_dte_lottery_strategy
+        enabled_strategies = []
+        if bull_put.enabled:
+            enabled_strategies.append("paper_bull_put_v1")
+        if covered_call.enabled:
+            enabled_strategies.append("covered_call_v1")
+        if zero_dte.enabled:
+            enabled_strategies.append("zero_dte_lottery_v1")
+        symbol_universe = sorted(set(bull_put.symbols) | set(zero_dte.symbols))
+        return PaperMandate(
+            external_account_id=external_account_id,
+            enabled_strategies=enabled_strategies,
+            symbol_universe=symbol_universe,
+            daily_caps={
+                "bull_put_new_spreads": bull_put.max_new_spreads_per_day,
+                "zero_dte_lottery_trades": zero_dte.max_trades_per_day,
+            },
+            risk_caps={
+                "bull_put_daily_realized_loss_limit": str(bull_put.daily_realized_loss_limit),
+                "bull_put_per_trade_max_account_risk_pct": str(bull_put.per_trade_max_account_risk_pct),
+                "zero_dte_max_premium_per_trade": str(zero_dte.max_premium_per_trade),
+                "covered_call_max_contracts_per_symbol": covered_call.max_contracts_per_symbol,
+            },
+            auto_switches={
+                "bull_put_auto_scan": bull_put.auto_scan_enabled,
+                "bull_put_auto_monitor": bull_put.auto_monitor_enabled,
+                "bull_put_auto_review": bull_put.auto_review_enabled,
+                "covered_call_auto_propose": covered_call.auto_propose_enabled,
+                "covered_call_auto_monitor": covered_call.auto_monitor_enabled,
+                "covered_call_auto_lifecycle": covered_call.auto_lifecycle_enabled,
+                "zero_dte_auto_execute": zero_dte.auto_execute_enabled,
+            },
+        )
 
     @staticmethod
     def _advisor_run_comparison(
@@ -641,7 +960,7 @@ class StrategyExperimentService:
             raise ValueError("Advisor-sourced proposals cannot be created in live mode.")
 
     def _record_advisor_proposal_audit(self, proposal: StrategyProposal) -> StrategySignal:
-        return self.experiments.create_signal(
+        signal = self.experiments.create_signal(
             CreateStrategySignalRequest(
                 strategy_id=proposal.strategy_id,
                 external_account_id=proposal.external_account_id,
@@ -662,6 +981,27 @@ class StrategyExperimentService:
                 },
             )
         )
+        self._append_audit_event(
+            CreateStrategyAuditEventRequest(
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                actor="advisor",
+                source="strategy_policy",
+                strategy=proposal.strategy_id,
+                action="advisor_proposal_recorded",
+                proposal_id=proposal.id,
+                run_id=proposal.source_run_id,
+                summary="Advisor-sourced strategy proposal recorded as read-only advice.",
+                detail="Local deterministic checks and manual approval are still required before execution.",
+                payload={
+                    "signal_id": signal.id,
+                    "advisor_source": self._normalized_source(proposal.source),
+                    "llm_direct_execution_allowed": False,
+                    "approval_required": proposal.approval_required,
+                },
+            )
+        )
+        return signal
 
     @classmethod
     def _is_advisor_source(cls, source: str | None) -> bool:
@@ -683,7 +1023,7 @@ class StrategyExperimentService:
         previous_status: StrategyProposalStatus,
         new_status: StrategyProposalStatus,
     ) -> StrategySignal:
-        return self.experiments.create_signal(
+        signal = self.experiments.create_signal(
             CreateStrategySignalRequest(
                 strategy_id=proposal.strategy_id,
                 external_account_id=proposal.external_account_id,
@@ -705,6 +1045,35 @@ class StrategyExperimentService:
                 },
             )
         )
+        self._append_audit_event(
+            CreateStrategyAuditEventRequest(
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                actor=actor,
+                source="strategy_policy",
+                strategy=proposal.strategy_id,
+                action=action,
+                before={"status": previous_status.value},
+                after={"status": new_status.value},
+                proposal_id=proposal.id,
+                summary=f"Strategy proposal {action} recorded.",
+                detail=note,
+                payload={
+                    "signal_id": signal.id,
+                    "approval_required": proposal.approval_required,
+                    "proposed_action": proposal.proposed_action,
+                },
+            )
+        )
+        return signal
+
+    def _append_audit_event(self, request: CreateStrategyAuditEventRequest) -> None:
+        if self.audit_events is None:
+            return
+        try:
+            self.audit_events.create_event(request)
+        except Exception:
+            logger.exception("Failed to append strategy audit event '%s'.", request.action)
 
     @staticmethod
     def _covered_call_activity_summary(

@@ -64,4 +64,8 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Longbridge Status" not in response.text
     assert "Quick Quote" not in response.text
     assert '/static/app.css?v=' in response.text
+    assert '/static/lifecycle-warning.js?v=' in response.text
+    assert '/static/api-client.js?v=' in response.text
+    assert '/static/formatters.js?v=' in response.text
+    assert '/static/state.js?v=' in response.text
     assert '/static/app.js?v=' in response.text

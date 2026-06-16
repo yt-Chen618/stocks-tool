@@ -1207,6 +1207,84 @@ a {
   color: var(--danger-text);
 }
 
+.recover-close-panel {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+  max-width: 280px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.recover-close-head,
+.recover-close-meta {
+  display: grid;
+  gap: 3px;
+}
+
+.recover-close-head strong {
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.recover-close-head strong.is-success {
+  color: var(--success-text);
+}
+
+.recover-close-head strong.is-warning {
+  color: var(--warn-text);
+}
+
+.recover-close-head strong.is-neutral {
+  color: var(--text-soft);
+}
+
+.recover-close-head span,
+.recover-close-meta span {
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.recover-close-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(72px, 92px);
+  gap: 6px;
+}
+
+.recover-close-form input[type="text"],
+.recover-close-form input[type="number"] {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 8px;
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.recover-close-form input:disabled {
+  color: var(--text-soft);
+  background: rgba(245, 247, 250, 0.8);
+}
+
+.recover-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.recover-close-form .table-action {
+  min-height: 28px;
+  border-radius: 8px;
+}
+
 .pnl-chip {
   display: inline-flex;
   align-items: center;

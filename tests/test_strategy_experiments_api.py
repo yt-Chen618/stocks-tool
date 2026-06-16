@@ -18,6 +18,7 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    AdvisorRunCard,
     CreateStrategyAdvisorRunRequest,
     CreateStrategyProposalRequest,
     CoveredCallLifecycleTask,
@@ -834,6 +835,69 @@ def test_strategy_advisor_runs_route_lists_deepseek_history() -> None:
     )
 
 
+def test_strategy_advisor_run_cards_route_lists_run_card_projection() -> None:
+    service = Mock()
+    service.list_advisor_run_cards.return_value = [
+        AdvisorRunCard(
+            run_id="advisor-run-1",
+            external_account_id="LBPT10087357",
+            source="deepseek",
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            status=StrategyAdvisorRunStatus.RECORDED,
+            context_format="compact_v1",
+            context_hash="abc123",
+            token_usage={"total_tokens": 120, "cache_hit_tokens": 40},
+            summary="recorded; 0 proposal(s), 1 review(s).",
+            recorded=True,
+            proposal_count=0,
+            review_count=1,
+            warnings=[],
+            completed_at=NOW,
+            recorded_at=NOW,
+            created_at=NOW,
+        )
+    ]
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get(
+            "/strategies/advisor/run-cards",
+            params={"external_account_id": "LBPT10087357", "source": "deepseek", "limit": "5"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["run_id"] == "advisor-run-1"
+    assert body[0]["recorded"] is True
+    assert body[0]["token_usage"]["cache_hit_tokens"] == 40
+    service.list_advisor_run_cards.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+
+def test_strategy_advisor_playbooks_route_lists_static_boundaries() -> None:
+    service = Mock()
+    service.list_advisor_playbooks.return_value = StrategyExperimentService.advisor_playbooks
+
+    client = with_experiment_service(service)
+    try:
+        response = client.get("/strategies/advisor/playbooks")
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    playbook_ids = {item["id"] for item in body}
+    assert {"bull_put_v1", "covered_call_v1", "zero_dte_lottery_v1"} <= playbook_ids
+    assert any("Cannot submit" in " ".join(item["hard_limits"]) for item in body)
+    service.list_advisor_playbooks.assert_called_once_with()
+
+
 def test_strategy_advisor_audit_route_returns_traceable_summary() -> None:
     service = Mock()
     run = build_advisor_run(StrategyAdvisorRunStatus.RECORDED)
@@ -941,6 +1005,46 @@ def test_strategy_experiment_service_records_approval_audit_signal() -> None:
     assert signal_request.signal_payload["actor"] == "operator-a"
     assert signal_request.signal_payload["previous_status"] == "pending"
     assert signal_request.signal_payload["new_status"] == "approved"
+
+
+def test_strategy_experiment_service_projects_audit_events_from_existing_ledgers() -> None:
+    signal = build_signal().model_copy(
+        update={
+            "id": "signal-audit-1",
+            "source": "strategy_policy",
+            "proposal_id": "proposal-1",
+            "signal_payload": {
+                "audit_event": "proposal_decision",
+                "action": "approve",
+                "actor": "operator-a",
+                "previous_status": "pending",
+                "new_status": "approved",
+            },
+        }
+    )
+    experiments = Mock()
+    broker_accounts = Mock()
+    broker_accounts.get_by_external_account_id.return_value = object()
+    experiments.list_signals.return_value = [signal]
+    experiments.list_advisor_runs.return_value = [build_advisor_run(StrategyAdvisorRunStatus.RECORDED)]
+    service = StrategyExperimentService(
+        experiments=experiments,
+        broker_accounts=broker_accounts,
+        settings=Settings(),
+    )
+
+    events = service.list_audit_events(
+        external_account_id="LBPT10087357",
+        limit=10,
+    )
+
+    proposal_event = next(event for event in events if event.id == "signal-audit-1")
+    advisor_event = next(event for event in events if event.id == "advisor-run-advisor-run-1")
+    assert proposal_event.actor == "operator-a"
+    assert proposal_event.action == "approve"
+    assert proposal_event.before == {"status": "pending"}
+    assert proposal_event.after == {"status": "approved"}
+    assert advisor_event.action == "advisor_run_card_recorded"
 
 
 def test_strategy_experiment_service_blocks_advisor_proposal_without_manual_approval() -> None:
@@ -1092,6 +1196,11 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
     assert context.covered_call_activity.summary.total_proposals == 1
     assert context.advisor_sources[0] == "deepseek"
     assert context.hard_rules[0].name == "advisor_context_is_read_only"
+    assert [playbook.id for playbook in context.playbooks] == [
+        "bull_put_v1",
+        "covered_call_v1",
+        "zero_dte_lottery_v1",
+    ]
     experiments.list_proposals.assert_any_call(
         external_account_id="LBPT10087357",
         strategy_id=None,
@@ -1238,6 +1347,17 @@ def test_strategy_experiment_service_builds_advisor_audit_snapshot() -> None:
         source="deepseek",
         limit=5,
     )
+
+    cards = service.list_advisor_run_cards(
+        external_account_id="LBPT10087357",
+        source="deepseek",
+        limit=5,
+    )
+
+    assert cards[0].run_id == "advisor-run-1"
+    assert cards[0].recorded is True
+    assert cards[0].context_hash
+    assert cards[0].downstream_proposal_ids == ["proposal-advisor-1"]
 
 
 def test_create_strategy_run_signal_and_review_routes() -> None:

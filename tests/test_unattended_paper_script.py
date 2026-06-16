@@ -35,6 +35,17 @@ def base_snapshot() -> dict:
             "paper_execution_allowed": True,
             "live_execution_allowed": False,
             "llm_direct_execution_allowed": False,
+            "paper_mandate": {
+                "external_account_id": "LBPT10087357",
+                "enabled_strategies": ["paper_bull_put_v1", "covered_call_v1", "zero_dte_lottery_v1"],
+                "symbol_universe": ["QQQ.US", "SMH.US"],
+                "daily_caps": {"bull_put_new_spreads": 1, "zero_dte_lottery_trades": 1},
+                "risk_caps": {"zero_dte_max_premium_per_trade": "150"},
+                "auto_switches": {"zero_dte_auto_execute": False},
+                "manual_pause": False,
+                "kill_switch": False,
+                "expires_at": None,
+            },
             "automation_controls": [
                 {
                     "strategy_id": "covered_call_v1",
@@ -49,6 +60,111 @@ def base_snapshot() -> dict:
                     "auto_execute_enabled": False,
                     "scan_interval_seconds": 900,
                 },
+            ],
+        },
+        "operator_status": {
+            "external_account_id": "LBPT10087357",
+            "mode": "paper",
+            "generated_at": "2026-06-04T14:32:00Z",
+            "status": "pass",
+            "ready_for_unattended": True,
+            "operator_posture_reason": "All operator posture checks passed.",
+            "checks": [
+                {
+                    "name": "scheduler_recent_runs",
+                    "status": "pass",
+                    "detail": "Recent scheduler job-run observations are available.",
+                }
+            ],
+            "controls": {},
+            "broker_profiles": [
+                {
+                    "id": "longbridge-paper-LBPT10087357",
+                    "broker": "longbridge",
+                    "name": "longbridge",
+                    "external_account_id": "LBPT10087357",
+                    "mode": "paper",
+                    "supported_modes": ["paper", "live"],
+                    "capabilities": [],
+                    "readonly": False,
+                    "paper_guard": "config_declared",
+                    "configured": True,
+                    "credential_status": "ready",
+                    "notes": ["Paper guard is declared by local configuration."],
+                }
+            ],
+            "paper_mandate": {
+                "external_account_id": "LBPT10087357",
+                "enabled_strategies": ["paper_bull_put_v1", "covered_call_v1", "zero_dte_lottery_v1"],
+                "symbol_universe": ["QQQ.US", "SMH.US"],
+                "daily_caps": {"bull_put_new_spreads": 1, "zero_dte_lottery_trades": 1},
+                "risk_caps": {"zero_dte_max_premium_per_trade": "150"},
+                "auto_switches": {"zero_dte_auto_execute": False},
+                "manual_pause": False,
+                "kill_switch": False,
+                "expires_at": None,
+            },
+            "audit_events": [],
+            "audit_summary": {"event_count": 1, "warning_count": 0, "by_action": {"advisor_run_card_observed": 1}},
+            "bull_put_runtime": None,
+            "zero_dte_lottery_runtime": None,
+            "active_bull_put_spread_count": 1,
+            "open_order_count": 0,
+            "lifecycle_warnings": [],
+            "recent_scheduler_runs": [],
+            "recent_scheduler_summaries": [],
+        },
+        "broker_profiles": [
+            {
+                "id": "longbridge-paper-LBPT10087357",
+                "broker": "longbridge",
+                "name": "longbridge",
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "supported_modes": ["paper", "live"],
+                "capabilities": [],
+                "readonly": False,
+                "paper_guard": "config_declared",
+                "configured": True,
+                "credential_status": "ready",
+                "notes": ["Paper guard is declared by local configuration."],
+            }
+        ],
+        "audit_events": [
+            {
+                "id": "advisor-run-1",
+                "emitted_at": "2026-06-04T14:31:00Z",
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "actor": "advisor",
+                "source": "deepseek",
+                "strategy": "strategy_advisor",
+                "action": "advisor_run_card_observed",
+                "order_ids": [],
+                "summary": "Advisor run observed.",
+                "payload": {},
+            }
+        ],
+        "audit_summary": {
+            "generated_at": "2026-06-04T14:32:00Z",
+            "external_account_id": "LBPT10087357",
+            "mode": "paper",
+            "since": None,
+            "limit": 200,
+            "event_count": 1,
+            "warning_count": 0,
+            "groups": [
+                {
+                    "external_account_id": "LBPT10087357",
+                    "mode": "paper",
+                    "source": "deepseek",
+                    "action": "advisor_run_card_observed",
+                    "strategy": "strategy_advisor",
+                    "warning_code": None,
+                    "event_origin": "synthetic",
+                    "count": 1,
+                    "latest_emitted_at": "2026-06-04T14:31:00Z",
+                }
             ],
         },
         "runtime": {
@@ -174,6 +290,33 @@ def test_validate_unattended_snapshot_requires_scheduler() -> None:
         validate_unattended_snapshot(snapshot)
 
 
+def test_validate_unattended_snapshot_rejects_operator_posture_failure() -> None:
+    snapshot = base_snapshot()
+    snapshot["operator_status"]["status"] = "fail"
+    snapshot["operator_status"]["ready_for_unattended"] = False
+    snapshot["operator_status"]["operator_posture_reason"] = "Manual action required."
+
+    with pytest.raises(UnattendedPaperError, match="operator_posture_ready"):
+        validate_unattended_snapshot(snapshot)
+
+
+def test_validate_unattended_snapshot_rejects_bad_broker_profile_guard() -> None:
+    snapshot = base_snapshot()
+    snapshot["broker_profiles"][0]["paper_guard"] = "unknown"
+    snapshot["operator_status"]["broker_profiles"][0]["paper_guard"] = "unknown"
+
+    with pytest.raises(UnattendedPaperError, match="broker_profile_paper_guard"):
+        validate_unattended_snapshot(snapshot)
+
+
+def test_validate_unattended_snapshot_rejects_paused_paper_mandate() -> None:
+    snapshot = base_snapshot()
+    snapshot["operator_status"]["paper_mandate"]["kill_switch"] = True
+
+    with pytest.raises(UnattendedPaperError, match="paper_mandate_allows_monitoring"):
+        validate_unattended_snapshot(snapshot)
+
+
 def test_validate_unattended_snapshot_rejects_covered_call_auto_propose() -> None:
     snapshot = base_snapshot()
     snapshot["controls"]["automation_controls"][0]["auto_propose_enabled"] = True
@@ -199,6 +342,104 @@ def test_validate_unattended_snapshot_rejects_missing_order_links() -> None:
 
     with pytest.raises(UnattendedPaperError, match="bull_put_spread_order_links"):
         validate_unattended_snapshot(snapshot)
+
+
+def test_validate_unattended_snapshot_rejects_canceled_stop_loss_close_order() -> None:
+    snapshot = base_snapshot()
+    spread = snapshot["spreads"][0]
+    spread.update(
+        {
+            "short_symbol": "QQQ260626P708000.US",
+            "short_entry_order_id": "short-entry-order",
+            "short_exit_order_id": "short-exit-order",
+            "exit_reason": "stop_loss",
+            "raw_payload": {
+                "monitor": {
+                    "should_close": True,
+                    "exit_reason": "stop_loss",
+                }
+            },
+        }
+    )
+    snapshot["orders"] = [
+        *snapshot["orders"],
+        {
+            "id": "short-entry-order",
+            "symbol": "QQQ260626P708000.US",
+            "asset_type": "option",
+            "side": "sell",
+            "status": "filled",
+            "mode": "paper",
+        },
+        {
+            "id": "short-exit-order",
+            "symbol": "QQQ260626P708000.US",
+            "asset_type": "option",
+            "side": "buy",
+            "status": "canceled",
+            "mode": "paper",
+        },
+    ]
+
+    with pytest.raises(UnattendedPaperError, match="bull_put_close_order_state"):
+        validate_unattended_snapshot(snapshot)
+
+    checks = build_strategy_loop_checks(snapshot)
+    close_order_check = next(check for check in checks if check["name"] == "bull_put_close_order_state")
+    assert close_order_check["status"] == "fail"
+
+    payload = build_payload(snapshot)
+    assert payload["strategy_loop_summary"]["check_status"] == "failed"
+    warning = payload["monitorable_spreads"][0]["lifecycle_warning"]
+    assert warning["code"] == "close_order_canceled_manual_action_needed"
+    assert warning["manual_action_required"] is True
+    assert warning["order_id"] == "short-exit-order"
+
+
+def test_unattended_payload_reports_normalized_bull_put_lifecycle_warning() -> None:
+    snapshot = base_snapshot()
+    spread = snapshot["spreads"][0]
+    spread.update(
+        {
+            "short_symbol": "QQQ260626P708000.US",
+            "short_entry_order_id": "short-entry-order",
+            "short_exit_order_id": "short-exit-order",
+            "exit_reason": "stop_loss",
+            "raw_payload": None,
+            "lifecycle_warning_code": "close_order_canceled_manual_action_needed",
+            "manual_action_required": True,
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "canceled",
+            "next_monitor_after": "2026-06-15T14:55:00+00:00",
+        }
+    )
+    snapshot["orders"] = [
+        *snapshot["orders"],
+        {
+            "id": "short-entry-order",
+            "symbol": "QQQ260626P708000.US",
+            "asset_type": "option",
+            "side": "sell",
+            "status": "filled",
+            "mode": "paper",
+        },
+        {
+            "id": "short-exit-order",
+            "symbol": "QQQ260626P708000.US",
+            "asset_type": "option",
+            "side": "buy",
+            "status": "canceled",
+            "mode": "paper",
+        },
+    ]
+
+    checks = build_strategy_loop_checks(snapshot)
+    close_order_check = next(check for check in checks if check["name"] == "bull_put_close_order_state")
+    assert close_order_check["status"] == "fail"
+
+    warning = build_payload(snapshot)["monitorable_spreads"][0]["lifecycle_warning"]
+    assert warning["code"] == "close_order_canceled_manual_action_needed"
+    assert warning["order_status"] == "canceled"
 
 
 def test_validate_unattended_snapshot_rejects_execution_or_journal_drift() -> None:
@@ -261,9 +502,20 @@ def test_payload_filters_to_monitorable_spreads() -> None:
     assert payload["strategy_loop_summary"]["recent_journal_count"] == 1
     assert {check["name"] for check in payload["strategy_loop_checks"]} >= {
         "paper_first_boundary",
+        "broker_profile_paper_guard",
+        "operator_posture_ready",
+        "paper_mandate_allows_monitoring",
+        "operator_audit_summary_available",
         "covered_call_auto_propose_disabled",
         "zero_dte_lottery_runtime_policy",
     }
+    assert payload["operator_status"]["status"] == "pass"
+    assert payload["broker_profiles"][0]["paper_guard"] == "config_declared"
+    assert payload["paper_mandate"]["external_account_id"] == "LBPT10087357"
+    assert payload["audit_events"][0]["action"] == "advisor_run_card_observed"
+    assert payload["operator_posture_reason"] == "All operator posture checks passed."
+    assert payload["strategy_loop_summary"]["operator_posture_status"] == "pass"
+    assert payload["strategy_loop_summary"]["audit_event_count"] == 1
     assert [spread["id"] for spread in payload["monitorable_spreads"]] == ["spread-1"]
     assert payload["monitorable_spreads"][0]["monitor"] == {"should_close": False}
     assert payload["recent_orders"] == [
@@ -309,6 +561,16 @@ def test_arm_unattended_can_enable_zero_dte_lottery_auto_order() -> None:
             return httpx.Response(200, json=snapshot["health"])
         if request.method == "GET" and request.url.path == "/strategies/controls":
             return httpx.Response(200, json=snapshot["controls"])
+        if request.method == "GET" and request.url.path == "/ops/unattended-status":
+            operator_status = snapshot["operator_status"]
+            operator_status["paper_mandate"]["auto_switches"]["zero_dte_auto_execute"] = state["zero_auto"]
+            return httpx.Response(200, json=operator_status)
+        if request.method == "GET" and request.url.path == "/ops/audit":
+            return httpx.Response(200, json=snapshot["audit_events"])
+        if request.method == "GET" and request.url.path == "/ops/audit/summary":
+            return httpx.Response(200, json=snapshot["audit_summary"])
+        if request.method == "GET" and request.url.path == "/brokers/profiles":
+            return httpx.Response(200, json=snapshot["broker_profiles"])
         if request.method == "GET" and request.url.path == "/strategies/bull-put/runtime":
             return httpx.Response(200, json=snapshot["runtime"])
         if request.method == "GET" and request.url.path == "/strategies/bull-put/spreads":

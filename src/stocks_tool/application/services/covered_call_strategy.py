@@ -4,8 +4,35 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.application.services.covered_call.candidate import (
+    annualize_income_yield as compute_annualized_income_yield,
+    build_candidate as build_covered_call_candidate,
+    build_risk_summary as build_covered_call_risk_summary,
+    days_to_expiration as compute_days_to_expiration,
+    monitor_action as compute_monitor_action,
+    proposal_confidence as compute_proposal_confidence,
+    quote_mid as compute_quote_mid,
+    safe_pct as compute_safe_pct,
+)
+from stocks_tool.application.services.covered_call.order_lifecycle import (
+    build_order_request as build_covered_call_order_request,
+    latest_runs_by_proposal as covered_call_latest_runs_by_proposal,
+    normalize_symbol as normalize_covered_call_symbol,
+    optional_decimal as optional_covered_call_decimal,
+    order_filled as covered_call_order_filled,
+    order_timing_payload as covered_call_order_timing_payload,
+    reference_time as covered_call_reference_time,
+    validate_close_order as validate_covered_call_close_order,
+    validate_open_sell_order as validate_covered_call_open_sell_order,
+    validate_roll_buyback_order as validate_covered_call_roll_buyback_order,
+    validate_roll_sell_order as validate_covered_call_roll_sell_order,
+)
+from stocks_tool.application.services.covered_call.policy import (
+    ADVISOR_SOURCES,
+    assert_order_execution_policy,
+)
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.option_snapshot_planner import ranked_otm_call_symbols
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -14,13 +41,10 @@ from stocks_tool.domain.enums import (
     MarketEventSeverity,
     OptionRight,
     OrderSide,
-    OrderStatus,
-    OrderType,
     RiskStatus,
     StrategyProposalStatus,
     StrategyRunStatus,
     StrategySignalType,
-    TimeInForce,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -43,7 +67,6 @@ from stocks_tool.domain.models import (
     ExecuteCoveredCallProposalRequest,
     ExecuteCoveredCallRollProposalRequest,
     OptionChainEntry,
-    OptionContractRef,
     Order,
     OptionMarketSnapshot,
     PositionSnapshot,
@@ -54,12 +77,13 @@ from stocks_tool.ports.repository import (
     MarketEventRepository,
     StrategyExperimentRepository,
 )
+from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
 
 
 class CoveredCallStrategyService:
     strategy_id = "covered_call_v1"
     open_proposal_actions = {"sell_covered_call", "roll_covered_call"}
-    advisor_sources = {"deepseek", "llm", "llm_advisor", "openai", "external_advisor"}
+    advisor_sources = ADVISOR_SOURCES
 
     def __init__(
         self,
@@ -68,7 +92,7 @@ class CoveredCallStrategyService:
         broker_accounts: BrokerAccountRepository,
         account_snapshots: AccountSnapshotRepository,
         experiments: StrategyExperimentRepository,
-        longbridge_adapter: LongbridgeBrokerAdapter,
+        longbridge_adapter: BrokerMarketDataGateway,
         order_service: OrderService | None = None,
         market_events: MarketEventRepository | None = None,
     ) -> None:
@@ -399,23 +423,12 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' has no positive limit price.")
 
         order = self.order_service.submit_order(
-            CreateOrderRequest(
+            self._covered_call_order_request(
                 external_account_id=proposal.external_account_id,
-                broker=BrokerName.LONGBRIDGE,
-                symbol=candidate.call_symbol,
-                asset_type=AssetType.OPTION,
                 side=OrderSide.SELL,
-                quantity=candidate.contracts,
-                order_type=OrderType.LIMIT,
-                time_in_force=TimeInForce.DAY,
                 mode=proposal.mode,
+                candidate=candidate,
                 limit_price=limit_price,
-                option_contract=OptionContractRef(
-                    underlying_symbol=candidate.underlying_symbol,
-                    expiration_date=candidate.expiration_date,
-                    strike=candidate.call_strike,
-                    right=OptionRight.CALL,
-                ),
                 remark=request.remark or "covered-call",
             )
         )
@@ -520,23 +533,12 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' has no positive close limit price.")
 
         order = self.order_service.submit_order(
-            CreateOrderRequest(
+            self._covered_call_order_request(
                 external_account_id=proposal.external_account_id,
-                broker=BrokerName.LONGBRIDGE,
-                symbol=candidate.call_symbol,
-                asset_type=AssetType.OPTION,
                 side=OrderSide.BUY,
-                quantity=candidate.contracts,
-                order_type=OrderType.LIMIT,
-                time_in_force=TimeInForce.DAY,
                 mode=proposal.mode,
+                candidate=candidate,
                 limit_price=limit_price,
-                option_contract=OptionContractRef(
-                    underlying_symbol=candidate.underlying_symbol,
-                    expiration_date=candidate.expiration_date,
-                    strike=candidate.call_strike,
-                    right=OptionRight.CALL,
-                ),
                 remark=request.remark or "covered-call-close",
             )
         )
@@ -1393,10 +1395,7 @@ class CoveredCallStrategyService:
 
     @staticmethod
     def _order_timing_payload(order: Order, *, prefix: str = "order") -> dict[str, str | None]:
-        return {
-            f"{prefix}_submitted_at": order.submitted_at.isoformat() if order.submitted_at else None,
-            f"{prefix}_updated_at": order.updated_at.isoformat() if order.updated_at else None,
-        }
+        return covered_call_order_timing_payload(order, prefix=prefix)
 
     def _record_open_lifecycle_run(
         self,
@@ -1515,20 +1514,14 @@ class CoveredCallStrategyService:
         required_checks: set[str],
         require_manual_approval: bool,
     ) -> None:
-        if proposal.mode == ExecutionMode.LIVE and not self.settings.allow_live_trading:
-            raise PermissionError(
-                f"{action} is blocked because live execution is disabled by ALLOW_LIVE_TRADING."
-            )
-        if require_manual_approval and not proposal.approval_required:
-            raise PermissionError(f"{action} requires a proposal that cannot bypass manual approval.")
-        source = (proposal.source or "").strip().lower()
-        if source in self.advisor_sources:
-            missing_checks = sorted(required_checks.difference(set(proposal.checks)))
-            if missing_checks:
-                raise PermissionError(
-                    f"{action} is blocked for advisor-sourced proposal '{proposal.id}' until local checks are present: "
-                    + ", ".join(missing_checks)
-                )
+        assert_order_execution_policy(
+            proposal=proposal,
+            action=action,
+            required_checks=required_checks,
+            require_manual_approval=require_manual_approval,
+            allow_live_trading=self.settings.allow_live_trading,
+            advisor_sources=self.advisor_sources,
+        )
 
     def _get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot:
         snapshot = self.account_snapshots.get_latest_account_snapshot(external_account_id)
@@ -1796,24 +1789,13 @@ class CoveredCallStrategyService:
         underlying_price: Decimal,
     ) -> list[str]:
         strategy = self.settings.covered_call_strategy
-        min_strike = underlying_price * (Decimal("1") + strategy.min_otm_pct)
-        max_strike = underlying_price * (Decimal("1") + strategy.max_otm_pct)
-        candidates = [
-            entry
-            for entry in chain
-            if entry.standard
-            and entry.call_symbol
-            and min_strike <= entry.strike <= max_strike
-        ]
-        target_strike = underlying_price * (Decimal("1") + strategy.min_otm_pct)
-        ranked = sorted(
-            candidates,
-            key=lambda entry: (
-                abs(entry.strike - target_strike),
-                entry.strike,
-            ),
+        return ranked_otm_call_symbols(
+            chain=chain,
+            underlying_price=underlying_price,
+            min_otm_pct=strategy.min_otm_pct,
+            max_otm_pct=strategy.max_otm_pct,
+            limit=80,
         )
-        return [entry.call_symbol for entry in ranked[:80] if entry.call_symbol]
 
     def _build_candidate(
         self,
@@ -1824,34 +1806,13 @@ class CoveredCallStrategyService:
         contracts: int,
         evaluated_at: datetime,
     ) -> CoveredCallCandidate:
-        covered_shares = contracts * 100
-        call_mid = self._quote_mid(quote)
-        premium_income = (quote.bid or Decimal("0")) * Decimal(covered_shares)
-        cost_basis = position.average_cost * Decimal(covered_shares)
-        income_yield = self._safe_pct(premium_income, underlying_price * Decimal(covered_shares))
-        assignment_profit = ((quote.strike - position.average_cost) * Decimal(covered_shares)) + premium_income
-        if_called_return = self._safe_pct(assignment_profit, cost_basis)
-        return CoveredCallCandidate(
-            underlying_symbol=position.symbol.upper(),
-            expiration_date=quote.expiration_date,
-            days_to_expiration=self._days_to_expiration(quote.expiration_date, evaluated_at),
-            contracts=contracts,
-            covered_shares=covered_shares,
-            share_quantity=position.quantity,
-            average_cost=position.average_cost,
+        return build_covered_call_candidate(
+            position=position,
+            quote=quote,
             underlying_price=underlying_price,
-            call_symbol=quote.symbol,
-            call_strike=quote.strike,
-            call_bid=quote.bid or Decimal("0"),
-            call_ask=quote.ask or Decimal("0"),
-            call_mid=call_mid,
-            premium_income=premium_income.quantize(Decimal("0.01")),
-            annualized_income_yield=self._annualize(income_yield, quote.expiration_date, evaluated_at),
-            if_called_return_pct=if_called_return,
-            delta=quote.delta,
-            open_interest=quote.open_interest,
-            volume=quote.volume,
-            quote_timestamp=quote.timestamp,
+            contracts=contracts,
+            evaluated_at=evaluated_at,
+            market_timezone=self.new_york,
         )
 
     def _build_risk_summary(
@@ -1860,26 +1821,9 @@ class CoveredCallStrategyService:
         position: PositionSnapshot,
         candidate: CoveredCallCandidate,
     ) -> CoveredCallRiskSummary:
-        warnings: list[str] = []
-        if candidate.call_strike < position.average_cost:
-            warnings.append("Selected call strike is below the current average cost and may lock in a realized loss if assigned.")
-        shares_not_covered = position.quantity - Decimal(candidate.covered_shares)
-        if shares_not_covered > 0:
-            warnings.append(f"{shares_not_covered} shares remain uncovered by this one-contract proposal.")
-
-        assignment_profit = (
-            (candidate.call_strike - position.average_cost) * Decimal(candidate.covered_shares)
-        ) + candidate.premium_income
-        max_loss_if_zero = (position.average_cost * Decimal(candidate.covered_shares)) - candidate.premium_income
-        break_even = position.average_cost - (candidate.premium_income / Decimal(candidate.covered_shares))
-        return CoveredCallRiskSummary(
-            status=RiskStatus.WARN if warnings else RiskStatus.PASS,
-            warnings=warnings,
-            max_income=candidate.premium_income,
-            max_assignment_profit=assignment_profit.quantize(Decimal("0.01")),
-            max_loss_if_zero=max_loss_if_zero.quantize(Decimal("0.01")),
-            break_even=break_even.quantize(Decimal("0.01")),
-            shares_not_covered=shares_not_covered,
+        return build_covered_call_risk_summary(
+            position=position,
+            candidate=candidate,
         )
 
     def _event_warnings(self, *, symbol: str, evaluated_at: datetime) -> list[str]:
@@ -1940,23 +1884,12 @@ class CoveredCallStrategyService:
         limit_price: Decimal,
         remark: str,
     ) -> CreateOrderRequest:
-        return CreateOrderRequest(
+        return build_covered_call_order_request(
             external_account_id=external_account_id,
-            broker=BrokerName.LONGBRIDGE,
-            symbol=candidate.call_symbol,
-            asset_type=AssetType.OPTION,
             side=side,
-            quantity=candidate.contracts,
-            order_type=OrderType.LIMIT,
-            time_in_force=TimeInForce.DAY,
             mode=mode,
+            candidate=candidate,
             limit_price=limit_price,
-            option_contract=OptionContractRef(
-                underlying_symbol=candidate.underlying_symbol,
-                expiration_date=candidate.expiration_date,
-                strike=candidate.call_strike,
-                right=OptionRight.CALL,
-            ),
             remark=remark,
         )
 
@@ -1982,14 +1915,11 @@ class CoveredCallStrategyService:
         proposal,
         roll_from: CoveredCallCandidate,
     ) -> None:
-        if buyback_order.external_account_id != proposal.external_account_id:
-            raise ValueError("Roll buyback order belongs to a different account.")
-        if buyback_order.mode != proposal.mode:
-            raise ValueError("Roll buyback order mode does not match the proposal.")
-        if buyback_order.symbol != roll_from.call_symbol:
-            raise ValueError("Roll buyback order does not match the current short call symbol.")
-        if buyback_order.side != OrderSide.BUY:
-            raise ValueError("Roll buyback order must be a buy-to-close order.")
+        validate_covered_call_roll_buyback_order(
+            buyback_order=buyback_order,
+            proposal=proposal,
+            roll_from=roll_from,
+        )
 
     def _validate_roll_sell_order(
         self,
@@ -1998,14 +1928,11 @@ class CoveredCallStrategyService:
         proposal,
         roll_to: CoveredCallCandidate,
     ) -> None:
-        if sell_order.external_account_id != proposal.external_account_id:
-            raise ValueError("Roll sell order belongs to a different account.")
-        if sell_order.mode != proposal.mode:
-            raise ValueError("Roll sell order mode does not match the proposal.")
-        if sell_order.symbol != roll_to.call_symbol:
-            raise ValueError("Roll sell order does not match the new short call symbol.")
-        if sell_order.side != OrderSide.SELL:
-            raise ValueError("Roll sell order must be a sell-to-open order.")
+        validate_covered_call_roll_sell_order(
+            sell_order=sell_order,
+            proposal=proposal,
+            roll_to=roll_to,
+        )
 
     def _validate_open_sell_order(
         self,
@@ -2014,14 +1941,11 @@ class CoveredCallStrategyService:
         proposal,
         candidate: CoveredCallCandidate,
     ) -> None:
-        if sell_order.external_account_id != proposal.external_account_id:
-            raise ValueError("Covered call sell order belongs to a different account.")
-        if sell_order.mode != proposal.mode:
-            raise ValueError("Covered call sell order mode does not match the proposal.")
-        if sell_order.symbol != candidate.call_symbol:
-            raise ValueError("Covered call sell order does not match the proposed short call symbol.")
-        if sell_order.side != OrderSide.SELL:
-            raise ValueError("Covered call sell order must be a sell-to-open order.")
+        validate_covered_call_open_sell_order(
+            sell_order=sell_order,
+            proposal=proposal,
+            candidate=candidate,
+        )
 
     def _validate_close_order(
         self,
@@ -2030,14 +1954,11 @@ class CoveredCallStrategyService:
         proposal,
         candidate: CoveredCallCandidate,
     ) -> None:
-        if close_order.external_account_id != proposal.external_account_id:
-            raise ValueError("Covered call close order belongs to a different account.")
-        if close_order.mode != proposal.mode:
-            raise ValueError("Covered call close order mode does not match the proposal.")
-        if close_order.symbol != candidate.call_symbol:
-            raise ValueError("Covered call close order does not match the current short call symbol.")
-        if close_order.side != OrderSide.BUY:
-            raise ValueError("Covered call close order must be a buy-to-close order.")
+        validate_covered_call_close_order(
+            close_order=close_order,
+            proposal=proposal,
+            candidate=candidate,
+        )
 
     def _passes_liquidity_filter(self, quote: OptionMarketSnapshot) -> bool:
         strategy = self.settings.covered_call_strategy
@@ -2098,14 +2019,7 @@ class CoveredCallStrategyService:
         )
 
     def _proposal_confidence(self, preview: CoveredCallPreviewResult) -> Decimal:
-        if preview.candidate is None or preview.risk is None:
-            return Decimal("0")
-        confidence = Decimal("0.60")
-        if preview.risk.status == RiskStatus.PASS:
-            confidence += Decimal("0.05")
-        if preview.candidate.open_interest and preview.candidate.open_interest >= 500:
-            confidence += Decimal("0.03")
-        return min(confidence, Decimal("0.75"))
+        return compute_proposal_confidence(preview)
 
     def _covered_call_monitor_action(
         self,
@@ -2115,21 +2029,12 @@ class CoveredCallStrategyService:
         premium_capture_pct: Decimal | None,
         days_to_expiration: int,
     ) -> tuple[str, list[str]]:
-        reasons: list[str] = []
-        if premium_capture_pct is not None and premium_capture_pct >= Decimal("50"):
-            reasons.append("At least 50% of the original premium is captured.")
-            return "consider_buyback_take_profit", reasons
-        if underlying_price >= candidate.call_strike:
-            reasons.append("Underlying is trading at or above the short call strike.")
-            return "assignment_or_roll_review", reasons
-        if underlying_price >= candidate.call_strike * Decimal("0.995"):
-            reasons.append("Underlying is within 0.5% of the short call strike.")
-            return "watch_assignment_pressure", reasons
-        if days_to_expiration <= 7:
-            reasons.append("Covered call is inside the final 7 DTE management window.")
-            return "expiration_week_review", reasons
-        reasons.append("No take-profit, assignment-pressure, or expiration-week trigger is active.")
-        return "hold", reasons
+        return compute_monitor_action(
+            candidate=candidate,
+            underlying_price=underlying_price,
+            premium_capture_pct=premium_capture_pct,
+            days_to_expiration=days_to_expiration,
+        )
 
     def _signal_strength(self, preview: CoveredCallPreviewResult) -> Decimal:
         if not preview.eligible or preview.candidate is None:
@@ -2139,24 +2044,19 @@ class CoveredCallStrategyService:
         return Decimal("0.20")
 
     def _days_to_expiration(self, expiry_date: date, evaluated_at: datetime) -> int:
-        evaluated_date = evaluated_at.astimezone(self.new_york).date()
-        return (expiry_date - evaluated_date).days
+        return compute_days_to_expiration(
+            expiry_date=expiry_date,
+            evaluated_at=evaluated_at,
+            market_timezone=self.new_york,
+        )
 
     @staticmethod
     def _quote_mid(quote: OptionMarketSnapshot) -> Decimal:
-        if quote.bid is not None and quote.ask is not None:
-            return ((quote.bid + quote.ask) / Decimal("2")).quantize(Decimal("0.01"))
-        if quote.bid is not None:
-            return quote.bid.quantize(Decimal("0.01"))
-        if quote.ask is not None:
-            return quote.ask.quantize(Decimal("0.01"))
-        return Decimal("0")
+        return compute_quote_mid(quote)
 
     @staticmethod
     def _safe_pct(numerator: Decimal, denominator: Decimal) -> Decimal | None:
-        if denominator == 0:
-            return None
-        return ((numerator / denominator) * Decimal("100")).quantize(Decimal("0.01"))
+        return compute_safe_pct(numerator, denominator)
 
     def _annualize(
         self,
@@ -2164,46 +2064,29 @@ class CoveredCallStrategyService:
         expiration_date: date,
         evaluated_at: datetime,
     ) -> Decimal | None:
-        if income_yield is None:
-            return None
-        days = self._days_to_expiration(expiration_date, evaluated_at)
-        if days <= 0:
-            return None
-        return ((income_yield / Decimal(days)) * Decimal("365")).quantize(Decimal("0.01"))
+        return compute_annualized_income_yield(
+            income_yield=income_yield,
+            expiration_date=expiration_date,
+            evaluated_at=evaluated_at,
+            market_timezone=self.new_york,
+        )
 
     @staticmethod
     def _order_filled(order: Order | None) -> bool:
-        return order is not None and order.status == OrderStatus.FILLED
+        return covered_call_order_filled(order)
 
     @staticmethod
     def _latest_runs_by_proposal(runs: list[object], run_types: set[str]) -> dict[str, object]:
-        latest: dict[str, object] = {}
-        for run in runs:
-            proposal_id = getattr(run, "proposal_id", None)
-            run_type = getattr(run, "run_type", None)
-            if not proposal_id or run_type not in run_types or proposal_id in latest:
-                continue
-            latest[proposal_id] = run
-        return latest
+        return covered_call_latest_runs_by_proposal(runs, run_types)
 
     @staticmethod
     def _optional_decimal(value) -> Decimal | None:
-        if value is None:
-            return None
-        try:
-            return Decimal(str(value))
-        except Exception:
-            return None
+        return optional_covered_call_decimal(value)
 
     @staticmethod
     def _reference_time(as_of: datetime | None) -> datetime:
-        reference = as_of or datetime.now(timezone.utc)
-        if reference.tzinfo is None:
-            return reference.replace(tzinfo=timezone.utc)
-        return reference
+        return covered_call_reference_time(as_of)
 
     @staticmethod
     def _normalize_symbol(symbol: str | None) -> str:
-        if symbol is None:
-            return ""
-        return symbol.strip().upper()
+        return normalize_covered_call_symbol(symbol)

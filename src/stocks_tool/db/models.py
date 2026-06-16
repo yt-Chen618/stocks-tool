@@ -340,6 +340,17 @@ class BullPutSpreadRecord(TimestampMixin, Base):
     break_even: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     account_risk_pct: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
     exit_reason: Mapped[str | None] = mapped_column(Text)
+    lifecycle_warning_code: Mapped[str | None] = mapped_column(String(80), index=True)
+    manual_action_required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+        index=True,
+    )
+    latest_monitor_should_close: Mapped[bool | None] = mapped_column(Boolean, index=True)
+    latest_close_order_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    next_monitor_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
     entry_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -437,6 +448,60 @@ class PreOpenAssessmentRunRecord(TimestampMixin, Base):
     last_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     review_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class SchedulerJobRunRecord(TimestampMixin, Base):
+    __tablename__ = "scheduler_job_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    job_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    job_label: Mapped[str | None] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    backoff_seconds: Mapped[int | None] = mapped_column(Integer)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class StrategyAuditEventRecord(TimestampMixin, Base):
+    __tablename__ = "strategy_audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    execution_mode: Mapped[str | None] = mapped_column(String(16), index=True)
+    actor: Mapped[str | None] = mapped_column(String(80), index=True)
+    source: Mapped[str | None] = mapped_column(String(64), index=True)
+    strategy: Mapped[str | None] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    before_payload: Mapped[dict | None] = mapped_column(JSONB)
+    after_payload: Mapped[dict | None] = mapped_column(JSONB)
+    order_ids: Mapped[list[str] | None] = mapped_column(JSONB)
+    proposal_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    warning_code: Mapped[str | None] = mapped_column(String(96), index=True)
+    summary: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict | None] = mapped_column(JSONB)
+    event_origin: Mapped[str] = mapped_column(String(16), nullable=False, default="durable", server_default="durable")
+    emitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 

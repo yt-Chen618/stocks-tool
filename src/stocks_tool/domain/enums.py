@@ -64,6 +64,13 @@ class StrategyAdvisorRunStatus(str, Enum):
     RECORDED = "recorded"
 
 
+class SchedulerJobRunStatus(str, Enum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    BACKOFF = "backoff"
+
+
 class MarketEventType(str, Enum):
     EARNINGS = "earnings"
     DIVIDEND = "dividend"

@@ -7,8 +7,14 @@ from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+SRC_DIR = ROOT_DIR / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 import httpx
 from regression_common import build_report, emit_report
+from stocks_tool.application.services.strategy_lifecycle import bull_put_close_order_warning
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_ACCOUNT_ID = "LBPT10087357"
@@ -107,6 +113,22 @@ def collect_snapshot(client: httpx.Client, *, account_id: str, mode: str) -> dic
             "/strategies/controls",
             params={"external_account_id": account_id, "mode": mode},
         ),
+        "operator_status": get_json(
+            client,
+            "/ops/unattended-status",
+            params={"external_account_id": account_id, "mode": mode},
+        ),
+        "audit_events": get_json(
+            client,
+            "/ops/audit",
+            params={"external_account_id": account_id, "limit": 20},
+        ),
+        "audit_summary": get_json(
+            client,
+            "/ops/audit/summary",
+            params={"external_account_id": account_id, "mode": mode, "limit": 200},
+        ),
+        "broker_profiles": get_json(client, "/brokers/profiles"),
         "runtime": get_json(
             client,
             "/strategies/bull-put/runtime",
@@ -271,6 +293,10 @@ def build_strategy_loop_checks(
     mode = snapshot.get("mode") or "paper"
     health = snapshot.get("health") or {}
     controls = snapshot.get("controls") or {}
+    operator_status = snapshot.get("operator_status") or {}
+    broker_profiles = _snapshot_broker_profiles(snapshot)
+    paper_mandate = _snapshot_paper_mandate(snapshot)
+    audit_summary = _snapshot_audit_summary(snapshot)
     runtime = snapshot.get("runtime") or {}
     orders = snapshot.get("orders") or []
     executions = snapshot.get("executions") or []
@@ -302,6 +328,72 @@ def build_strategy_loop_checks(
         "Execution controls are paper-first and block live/LLM direct execution."
         if paper_first_ok
         else paper_first_failure,
+    )
+
+    operator_ready = (
+        isinstance(operator_status, dict)
+        and operator_status.get("status") != "fail"
+        and operator_status.get("ready_for_unattended") is not False
+    )
+    add(
+        "operator_posture_ready",
+        "pass" if operator_ready else "fail",
+        (
+            operator_status.get("operator_posture_reason")
+            or "Operator status reports paper unattended posture is ready."
+        )
+        if operator_ready
+        else (
+            operator_status.get("operator_posture_reason")
+            or "Operator status is missing or reports a failing unattended posture."
+        ),
+    )
+
+    broker_profile = _selected_broker_profile(
+        broker_profiles=broker_profiles,
+        account_id=account_id,
+    )
+    broker_profile_ok = (
+        broker_profile is not None
+        and broker_profile.get("mode", mode) == "paper"
+        and broker_profile.get("paper_guard") == "config_declared"
+        and broker_profile.get("external_account_id") in {None, account_id}
+    )
+    add(
+        "broker_profile_paper_guard",
+        "pass" if broker_profile_ok else "fail",
+        "Broker profile resolves to the selected paper account with config-declared paper guard."
+        if broker_profile_ok
+        else "Broker profile does not prove the selected paper account and config-declared paper guard.",
+    )
+
+    mandate_ok = (
+        isinstance(paper_mandate, dict)
+        and paper_mandate.get("external_account_id") in {None, account_id}
+        and paper_mandate.get("kill_switch") is not True
+        and paper_mandate.get("manual_pause") is not True
+    )
+    add(
+        "paper_mandate_allows_monitoring",
+        "pass" if mandate_ok else "fail",
+        "Paper mandate matches the selected account and leaves monitoring unpaused."
+        if mandate_ok
+        else "Paper mandate is missing, targets another account, or has manual pause / kill switch active.",
+    )
+
+    audit_summary_present = isinstance(audit_summary, dict)
+    audit_warning_count = int(audit_summary.get("warning_count") or 0) if audit_summary_present else 0
+    add(
+        "operator_audit_summary_available",
+        "warn" if audit_summary_present and audit_warning_count else ("pass" if audit_summary_present else "fail"),
+        (
+            f"Operator audit summary is available with {audit_warning_count} warning event(s)."
+            if audit_summary_present and audit_warning_count
+            else "Operator audit summary is available."
+            if audit_summary_present
+            else "Operator audit summary is missing from unattended posture."
+        ),
+        blocking=not audit_summary_present,
     )
 
     add(
@@ -356,6 +448,11 @@ def build_strategy_loop_checks(
         for order in orders
         if isinstance(order, dict) and order.get("id") is not None
     }
+    orders_by_id = {
+        str(order.get("id")): order
+        for order in orders
+        if isinstance(order, dict) and order.get("id") is not None
+    }
     known_execution_ids = {
         str(execution.get("id"))
         for execution in executions
@@ -371,6 +468,19 @@ def build_strategy_loop_checks(
         "Monitorable bull put spread order links are present in the order list."
         if not missing_spread_orders
         else f"Missing linked bull put order ids: {', '.join(missing_spread_orders)}.",
+    )
+
+    close_order_warnings = _bull_put_close_order_warnings(
+        snapshot.get("spreads") or [],
+        orders_by_id,
+    )
+    add(
+        "bull_put_close_order_state",
+        "pass" if not close_order_warnings else "fail",
+        "Bull put close-order state is consistent with the latest monitor snapshot."
+        if not close_order_warnings
+        else "Bull put close order canceled/rejected while the latest monitor still requires close; "
+        f"manual action is required for spread(s): {', '.join(close_order_warnings)}.",
     )
 
     missing_lifecycle_orders = _missing_lifecycle_orders(
@@ -486,14 +596,31 @@ def build_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     runtime = snapshot.get("runtime") or {}
     spreads = snapshot.get("spreads") or []
     orders = snapshot.get("orders") or []
+    orders_by_id = {
+        str(order.get("id")): order
+        for order in orders
+        if isinstance(order, dict) and order.get("id") is not None
+    }
     executions = snapshot.get("executions") or []
     journals = snapshot.get("journals") or []
     covered_call_activity = snapshot.get("covered_call_activity") or {}
+    operator_status = snapshot.get("operator_status") or {}
+    audit_events = snapshot.get("audit_events") or []
+    audit_summary = _snapshot_audit_summary(snapshot)
+    broker_profiles = _snapshot_broker_profiles(snapshot)
+    paper_mandate = _snapshot_paper_mandate(snapshot)
     return {
         "strategy_loop_checks": build_strategy_loop_checks(snapshot),
         "strategy_loop_summary": summarize_strategy_loop(snapshot),
         "health": snapshot.get("health"),
         "controls": snapshot.get("controls"),
+        "operator_status": operator_status,
+        "operator_posture_reason": operator_status.get("operator_posture_reason"),
+        "operator_reason_codes": _operator_reason_codes(operator_status),
+        "broker_profiles": broker_profiles,
+        "paper_mandate": paper_mandate,
+        "audit_events": audit_events[:20] if isinstance(audit_events, list) else [],
+        "audit_summary": audit_summary,
         "runtime": runtime,
         "monitorable_spreads": [
             {
@@ -505,7 +632,8 @@ def build_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
                 "long_strike": spread.get("long_strike"),
                 "entry_net_credit": spread.get("entry_net_credit"),
                 "last_synced_at": spread.get("last_synced_at"),
-                "monitor": (spread.get("raw_payload") or {}).get("monitor"),
+                "monitor": _bull_put_monitor_payload(spread),
+                "lifecycle_warning": _bull_put_close_order_warning(spread, orders_by_id),
             }
             for spread in spreads
             if spread.get("status") in MONITORABLE_SPREAD_STATUSES
@@ -528,9 +656,14 @@ def summarize_strategy_loop(snapshot: dict[str, Any]) -> dict[str, Any]:
     executions = snapshot.get("executions") or []
     journals = snapshot.get("journals") or []
     covered_call_activity = snapshot.get("covered_call_activity") or {}
+    operator_status = snapshot.get("operator_status") or {}
+    audit_summary = _snapshot_audit_summary(snapshot)
     return {
         "account_id": snapshot.get("account_id"),
         "mode": snapshot.get("mode") or "paper",
+        "operator_posture_status": operator_status.get("status"),
+        "operator_posture_reason": operator_status.get("operator_posture_reason"),
+        "operator_reason_codes": _operator_reason_codes(operator_status),
         "check_status": "passed" if all(check["status"] != "fail" for check in checks) else "failed",
         "failed_checks": [check["name"] for check in checks if check["status"] == "fail"],
         "warning_checks": [check["name"] for check in checks if check["status"] == "warn"],
@@ -544,6 +677,9 @@ def summarize_strategy_loop(snapshot: dict[str, Any]) -> dict[str, Any]:
         "zero_dte_lottery_auto_order_enabled": bool(
             (snapshot.get("zero_dte_lottery_runtime") or {}).get("auto_execute_enabled")
         ),
+        "broker_profile_count": len(_snapshot_broker_profiles(snapshot)),
+        "audit_event_count": audit_summary.get("event_count") if isinstance(audit_summary, dict) else None,
+        "audit_warning_count": audit_summary.get("warning_count") if isinstance(audit_summary, dict) else None,
     }
 
 
@@ -675,6 +811,71 @@ def _automation_control(controls: dict[str, Any], strategy_id: str) -> dict[str,
     return None
 
 
+def _snapshot_broker_profiles(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    profiles = snapshot.get("broker_profiles")
+    if isinstance(profiles, list) and profiles:
+        return [profile for profile in profiles if isinstance(profile, dict)]
+    operator_status = snapshot.get("operator_status") if isinstance(snapshot.get("operator_status"), dict) else {}
+    profiles = operator_status.get("broker_profiles") if isinstance(operator_status, dict) else None
+    if isinstance(profiles, list):
+        return [profile for profile in profiles if isinstance(profile, dict)]
+    return []
+
+
+def _selected_broker_profile(
+    *,
+    broker_profiles: list[dict[str, Any]],
+    account_id: str | None,
+) -> dict[str, Any] | None:
+    for profile in broker_profiles:
+        if profile.get("external_account_id") in {None, account_id}:
+            return profile
+    return broker_profiles[0] if broker_profiles else None
+
+
+def _snapshot_paper_mandate(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    operator_status = snapshot.get("operator_status") if isinstance(snapshot.get("operator_status"), dict) else {}
+    mandate = operator_status.get("paper_mandate") if isinstance(operator_status, dict) else None
+    if isinstance(mandate, dict):
+        return mandate
+    controls = snapshot.get("controls") if isinstance(snapshot.get("controls"), dict) else {}
+    mandate = controls.get("paper_mandate") if isinstance(controls, dict) else None
+    return mandate if isinstance(mandate, dict) else None
+
+
+def _operator_reason_codes(operator_status: dict[str, Any]) -> list[str]:
+    codes: list[str] = []
+    checks = operator_status.get("checks") if isinstance(operator_status, dict) else None
+    if isinstance(checks, list):
+        for check in checks:
+            if isinstance(check, dict) and check.get("reason_code"):
+                codes.append(str(check["reason_code"]))
+    mandate = operator_status.get("paper_mandate") if isinstance(operator_status, dict) else None
+    mandate_codes = mandate.get("reason_codes") if isinstance(mandate, dict) else None
+    if isinstance(mandate_codes, list):
+        codes.extend(str(code) for code in mandate_codes if code)
+    return sorted(set(codes))
+
+
+def _snapshot_audit_summary(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    audit_summary = snapshot.get("audit_summary")
+    if isinstance(audit_summary, dict):
+        return audit_summary
+    operator_status = snapshot.get("operator_status") if isinstance(snapshot.get("operator_status"), dict) else {}
+    audit_summary = operator_status.get("audit_summary") if isinstance(operator_status, dict) else None
+    if isinstance(audit_summary, dict):
+        return audit_summary
+    audit_events = snapshot.get("audit_events")
+    if isinstance(audit_events, list):
+        warning_count = sum(
+            1
+            for event in audit_events
+            if isinstance(event, dict) and event.get("warning_code")
+        )
+        return {"event_count": len(audit_events), "warning_count": warning_count}
+    return None
+
+
 def _missing_linked_orders(spreads: list[dict[str, Any]], known_order_ids: set[str]) -> list[str]:
     missing: set[str] = set()
     for spread in spreads:
@@ -685,6 +886,57 @@ def _missing_linked_orders(spreads: list[dict[str, Any]], known_order_ids: set[s
             if order_id is not None and str(order_id) not in known_order_ids:
                 missing.add(str(order_id))
     return sorted(missing)
+
+
+def _bull_put_close_order_warnings(
+    spreads: list[dict[str, Any]],
+    orders_by_id: dict[str, dict[str, Any]],
+) -> list[str]:
+    warnings: list[str] = []
+    for spread in spreads:
+        warning = _bull_put_close_order_warning(spread, orders_by_id)
+        if warning:
+            warnings.append(str(spread.get("id") or warning["order_id"]))
+    return sorted(warnings)
+
+
+def _bull_put_close_order_warning(
+    spread: dict[str, Any],
+    orders_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(spread, dict) or spread.get("status") not in MONITORABLE_SPREAD_STATUSES:
+        return None
+    short_exit_order_id = spread.get("short_exit_order_id")
+    short_exit_order = orders_by_id.get(str(short_exit_order_id))
+    raw_payload = spread.get("raw_payload") if isinstance(spread.get("raw_payload"), dict) else None
+    lifecycle = (raw_payload or {}).get("lifecycle") or {}
+    return bull_put_close_order_warning(
+        spread_status=spread.get("status"),
+        short_exit_order_id=short_exit_order_id,
+        short_exit_order_status=(short_exit_order or {}).get("status")
+        or spread.get("latest_close_order_status")
+        or lifecycle.get("close_order_state"),
+        short_symbol=spread.get("short_symbol"),
+        raw_payload=raw_payload,
+        exit_reason=spread.get("exit_reason"),
+        orders_by_id=orders_by_id,
+        latest_monitor_should_close=spread.get("latest_monitor_should_close"),
+        lifecycle_warning_code=spread.get("lifecycle_warning_code") or lifecycle.get("warning"),
+        manual_action_required=spread.get("manual_action_required") or lifecycle.get("manual_action_required"),
+    )
+
+
+def _bull_put_monitor_payload(spread: dict[str, Any]) -> dict[str, Any] | None:
+    raw_payload = spread.get("raw_payload") if isinstance(spread.get("raw_payload"), dict) else None
+    raw_monitor = (raw_payload or {}).get("monitor")
+    if isinstance(raw_monitor, dict):
+        return raw_monitor
+    monitor: dict[str, Any] = {}
+    if "latest_monitor_should_close" in spread:
+        monitor["should_close"] = spread.get("latest_monitor_should_close")
+    if spread.get("next_monitor_after") is not None:
+        monitor["next_monitor_after"] = spread.get("next_monitor_after")
+    return monitor or None
 
 
 def _missing_lifecycle_orders(tasks: list[dict[str, Any]], known_order_ids: set[str]) -> list[str]:

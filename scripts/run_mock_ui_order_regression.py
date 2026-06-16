@@ -15,6 +15,17 @@ from regression_common import build_report, emit_report
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
+MOCK_SCENARIOS = (
+    "normal",
+    "degraded-broker",
+    "paused-mandate",
+    "advisor-pending-record",
+    "manual-action-required",
+    "scheduler-backoff",
+    "recover-eligible",
+    "recover-rejected",
+    "recover-already-working",
+)
 
 
 class RegressionError(RuntimeError):
@@ -35,10 +46,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=float, default=0.5, help="Polling interval for mock state checks.")
     parser.add_argument("--keep-server", action="store_true", help="Leave the mock server running after the script exits.")
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
+    parser.add_argument(
+        "--scenario",
+        choices=(*MOCK_SCENARIOS, "all"),
+        default="normal",
+        help="Mock posture scenario to run, or all for the full posture matrix.",
+    )
     return parser.parse_args()
 
 
-def start_server(host: str, port: int) -> subprocess.Popen[str]:
+def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
@@ -47,6 +64,8 @@ def start_server(host: str, port: int) -> subprocess.Popen[str]:
             host,
             "--port",
             str(port),
+            "--scenario",
+            scenario,
         ],
         cwd=ROOT,
         stdout=subprocess.PIPE,
@@ -150,15 +169,149 @@ def run_browser_flow(base_url: str) -> dict[str, Any]:
         raise RegressionError(f"Browser regression output was not valid JSON: {completed.stdout}") from error
 
 
+def run_scenario_assertions(client: httpx.Client, *, scenario: str) -> dict[str, Any]:
+    operator_status = require_ok(
+        client.get("/ops/unattended-status", params={"external_account_id": "LBPT10087357", "mode": "paper"})
+    )
+    audit_events = require_ok(client.get("/ops/audit", params={"external_account_id": "LBPT10087357"}))
+    audit_summary = require_ok(
+        client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"})
+    )
+    spreads = require_ok(client.get("/strategies/bull-put/spreads", params={"external_account_id": "LBPT10087357"}))
+    recovery_eligibility = (
+        require_ok(
+            client.get(
+                f"/strategies/bull-put/spreads/{spreads[0]['id']}/recover-close/eligibility",
+                params={"external_account_id": "LBPT10087357", "mode": "paper"},
+            )
+        )
+        if spreads
+        else None
+    )
+    advisor_run_cards = require_ok(
+        client.get(
+            "/strategies/advisor/run-cards",
+            params={"external_account_id": "LBPT10087357", "source": "deepseek"},
+        )
+    )
+    evidence = {
+        "scenario": scenario,
+        "operator_status": operator_status.get("status"),
+        "operator_posture_reason": operator_status.get("operator_posture_reason"),
+        "reason_codes": [
+            check.get("reason_code")
+            for check in operator_status.get("checks", [])
+            if isinstance(check, dict) and check.get("reason_code")
+        ],
+        "audit_actions": [event.get("action") for event in audit_events],
+        "audit_warning_codes": [event.get("warning_code") for event in audit_events if event.get("warning_code")],
+        "audit_summary_groups": len(audit_summary.get("groups") or []) if isinstance(audit_summary, dict) else None,
+        "recover_close_eligibility": recovery_eligibility,
+        "advisor_recorded": advisor_run_cards[0].get("recorded") if advisor_run_cards else None,
+    }
+    if scenario == "degraded-broker":
+        profiles = operator_status.get("broker_profiles") or []
+        assert profiles and profiles[0]["credential_status"] == "degraded"
+    elif scenario == "paused-mandate":
+        mandate = operator_status.get("paper_mandate") or {}
+        assert mandate.get("manual_pause") is True
+        assert "manual_pause" in (mandate.get("reason_codes") or [])
+    elif scenario == "advisor-pending-record":
+        assert advisor_run_cards and advisor_run_cards[0]["recorded"] is False
+        assert "advisor_pending_record" in evidence["audit_warning_codes"]
+    elif scenario == "manual-action-required":
+        assert operator_status.get("lifecycle_warnings")
+        assert "manual_action_required" in evidence["reason_codes"]
+    elif scenario == "scheduler-backoff":
+        summaries = operator_status.get("recent_scheduler_summaries") or []
+        assert summaries and summaries[0]["due_status"] == "backoff"
+        assert "scheduler_backoff" in evidence["reason_codes"]
+    elif scenario == "recover-eligible":
+        assert recovery_eligibility and recovery_eligibility["eligible"] is True
+        assert recovery_eligibility["old_short_close_order_status"] == "canceled"
+    elif scenario == "recover-rejected":
+        assert recovery_eligibility and recovery_eligibility["eligible"] is False
+        assert "close_not_required" in recovery_eligibility["reasons"]
+    elif scenario == "recover-already-working":
+        assert recovery_eligibility and recovery_eligibility["eligible"] is False
+        assert recovery_eligibility["working_replacement_order_id"] == "mock-order-0001"
+        assert "working_replacement_exists" in recovery_eligibility["reasons"]
+    else:
+        assert operator_status["paper_mandate"]["external_account_id"] == "LBPT10087357"
+        assert operator_status["audit_summary"]["event_count"] >= 1
+    return evidence
+
+
 def main() -> None:
     args = parse_args()
+    if args.scenario == "all":
+        scenario_reports: list[dict[str, Any]] = []
+        for scenario in MOCK_SCENARIOS:
+            command = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--host",
+                args.host,
+                "--port",
+                str(args.port),
+                "--timeout-seconds",
+                str(args.timeout_seconds),
+                "--poll-seconds",
+                str(args.poll_seconds),
+                "--scenario",
+                scenario,
+            ]
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                detail = completed.stderr.strip() or completed.stdout.strip() or f"Scenario {scenario} failed."
+                raise RegressionError(detail)
+            try:
+                scenario_reports.append(json.loads(completed.stdout))
+            except json.JSONDecodeError as error:
+                raise RegressionError(f"Scenario {scenario} did not emit JSON evidence: {completed.stdout}") from error
+        emit_report(
+            build_report(
+                script="run_mock_ui_order_regression.py",
+                workflow="mock-dashboard-scenario-matrix",
+                status="passed",
+                mode="mock",
+                target=f"http://{args.host}:{args.port}",
+                summary="Mock dashboard posture scenario matrix passed.",
+                payload={"scenarios": scenario_reports},
+            ),
+            json_output=args.json_output,
+        )
+        return
+
     base_url = f"http://{args.host}:{args.port}"
-    server = start_server(args.host, args.port)
+    server = start_server(args.host, args.port, scenario=args.scenario)
 
     try:
         wait_for_server(f"{base_url}/", args.timeout_seconds, server)
         client = httpx.Client(base_url=base_url, timeout=args.timeout_seconds)
         try:
+            if args.scenario != "normal":
+                evidence = run_scenario_assertions(client, scenario=args.scenario)
+                emit_report(
+                    build_report(
+                        script="run_mock_ui_order_regression.py",
+                        workflow=f"mock-dashboard-{args.scenario}",
+                        status="passed",
+                        mode="mock",
+                        target=base_url,
+                        summary=f"Mock dashboard posture scenario '{args.scenario}' passed.",
+                        payload={"scenario": args.scenario, "evidence": evidence},
+                    ),
+                    json_output=args.json_output,
+                )
+                return
+
             dashboard = client.get("/")
             dashboard.raise_for_status()
             assert "Strategy Center" in dashboard.text
@@ -230,6 +383,8 @@ def main() -> None:
                 "replaceSelectedOrder()",
                 "renderSpreads()",
                 "monitorSpread(",
+                "recoverCloseSpread(",
+                "recover-close/eligibility",
                 "renderSelectedExecution()",
                 "renderSelectedJournal()",
             ):
@@ -255,6 +410,13 @@ def main() -> None:
             initial_spreads = require_ok(client.get("/strategies/bull-put/spreads", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_spreads) == 1
             assert initial_spreads[0]["status"] == "open"
+            recovery_eligibility = require_ok(
+                client.get(
+                    f"/strategies/bull-put/spreads/{initial_spreads[0]['id']}/recover-close/eligibility",
+                    params={"external_account_id": "LBPT10087357", "mode": "paper"},
+                )
+            )
+            assert "eligible" in recovery_eligibility
             runtime_state = require_ok(
                 client.get("/strategies/bull-put/runtime", params={"external_account_id": "LBPT10087357"})
             )
@@ -277,7 +439,27 @@ def main() -> None:
             initial_journals = require_ok(client.get("/journals", params={"external_account_id": "LBPT10087357"}))
             assert len(initial_journals) == 1
             assert initial_journals[0]["order_id"] == "mock-order-0002"
+            broker_profiles = require_ok(client.get("/brokers/profiles"))
+            assert broker_profiles[0]["paper_guard"] == "config_declared"
+            operator_status = require_ok(
+                client.get("/ops/unattended-status", params={"external_account_id": "LBPT10087357", "mode": "paper"})
+            )
+            assert operator_status["paper_mandate"]["external_account_id"] == "LBPT10087357"
+            assert operator_status["audit_summary"]["event_count"] >= 1
+            advisor_run_cards = require_ok(
+                client.get(
+                    "/strategies/advisor/run-cards",
+                    params={"external_account_id": "LBPT10087357", "source": "deepseek"},
+                )
+            )
+            assert advisor_run_cards[0]["recorded"] is True
+            audit_events = require_ok(client.get("/ops/audit", params={"external_account_id": "LBPT10087357"}))
+            assert any(event["action"] == "advisor_run_card_recorded" for event in audit_events)
+            audit_summary = require_ok(client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"}))
+            assert audit_summary["event_count"] >= 1
             browser = run_browser_flow(base_url)
+            assert browser["operator"]["rendered"] is True
+            scenario_evidence = run_scenario_assertions(client, scenario=args.scenario)
 
             emit_report(
                 build_report(
@@ -304,9 +486,16 @@ def main() -> None:
                             "spread_seed": True,
                             "execution_seed": True,
                             "journal_seed": True,
+                            "operator_posture_seed": True,
+                            "advisor_run_card_seed": True,
+                            "audit_seed": True,
+                            "audit_summary_seed": True,
+                            "recover_close_eligibility_seed": True,
                             "browser_flow": True,
                         },
                         "browser": browser,
+                        "scenario": args.scenario,
+                        "scenario_evidence": scenario_evidence,
                     },
                 ),
                 json_output=args.json_output,

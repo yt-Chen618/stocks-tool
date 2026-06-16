@@ -73,8 +73,17 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return BrokerName.LONGBRIDGE
 
     def get_profile(self) -> BrokerProfile:
+        configured = bool(
+            self.settings.longbridge_app_key
+            and self.settings.longbridge_app_secret
+            and self.settings.longbridge_paper_access_token
+        )
         return BrokerProfile(
+            id="longbridge-paper-LBPT10087357",
+            broker=self.name,
             name=self.name,
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
             supported_modes=[ExecutionMode.PAPER, ExecutionMode.LIVE],
             capabilities=[
                 BrokerCapability(
@@ -102,6 +111,15 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                     supported=True,
                     notes="This codebase keeps live execution behind an environment switch.",
                 ),
+            ],
+            readonly=False,
+            paper_guard="config_declared",
+            configured=configured,
+            credential_status="ready" if configured else "missing_paper_credentials",
+            notes=[
+                "Longbridge paper/live mode is selected by local configuration and token choice.",
+                "The SDK response is not treated as structured proof that an account is paper.",
+                "Local policy keeps live execution outside the paper-first workbench.",
             ],
         )
 

@@ -3,13 +3,26 @@ from __future__ import annotations
 import argparse
 import sys
 from copy import deepcopy
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.staticfiles import StaticFiles
+
+from mock_dashboard_fixtures import (
+    MOCK_ACCOUNT_ID,
+    MOCK_SYMBOL,
+    build_mock_account,
+    build_mock_advisor_run_card,
+    build_mock_broker_profile,
+    build_mock_configuration,
+    build_mock_paper_mandate,
+    build_mock_quote,
+    build_mock_watchlists,
+    format_price,
+    iso_now,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -19,74 +32,35 @@ if str(SRC) not in sys.path:
 from stocks_tool.api.routes import ui  # noqa: E402
 
 
-def iso_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def format_price(value: float | None) -> str | None:
-    if value is None:
-        return None
-    return f"{value:.4f}"
+MOCK_SCENARIOS = {
+    "normal",
+    "degraded-broker",
+    "paused-mandate",
+    "advisor-pending-record",
+    "manual-action-required",
+    "scheduler-backoff",
+    "recover-eligible",
+    "recover-rejected",
+    "recover-already-working",
+}
 
 
 class MockDashboardState:
-    def __init__(self) -> None:
-        self.account_id = "LBPT10087357"
-        self.symbol = "MOCK.US"
+    def __init__(self, *, scenario: str = "normal") -> None:
+        if scenario not in MOCK_SCENARIOS:
+            raise ValueError(f"Unknown mock dashboard scenario '{scenario}'.")
+        self.scenario = scenario
+        self.account_id = MOCK_ACCOUNT_ID
+        self.symbol = MOCK_SYMBOL
         self._order_counter = 1000
         self._journal_counter = 2000
         self._spread_counter = 3000
-        self.account = {
-            "id": "mock-account-1",
-            "broker": "longbridge",
-            "external_account_id": self.account_id,
-            "display_name": "Longbridge Paper",
-            "base_currency": "USD",
-            "options_level": "level_1",
-            "is_active": True,
-            "auto_reconcile_enabled": True,
-            "account_sync_status": "success",
-            "account_last_sync_attempt_at": "2026-05-21T02:14:50Z",
-            "account_last_synced_at": "2026-05-21T02:14:52Z",
-            "account_last_sync_error": None,
-            "orders_sync_status": "success",
-            "orders_last_sync_attempt_at": "2026-05-21T02:14:53Z",
-            "orders_last_synced_at": "2026-05-21T02:14:54Z",
-            "orders_last_sync_error": None,
-            "created_at": "2026-05-21T00:00:00Z",
-            "updated_at": "2026-05-21T00:00:00Z",
-        }
-        self.watchlists = [
-            {
-                "id": "mock-watchlist-1",
-                "name": "core-us",
-                "items": [
-                    {"symbol": "MOCK.US", "asset_type": "stock", "notes": "ui regression seed"},
-                    {"symbol": "UNH.US", "asset_type": "stock", "notes": "real paper validation symbol"},
-                ],
-            }
-        ]
-        self.configuration = {
-            "app_key_configured": True,
-            "app_secret_configured": True,
-            "paper_token_configured": True,
-            "live_token_configured": False,
-        }
-        self.quote = {
-            "symbol": self.symbol,
-            "last_done": "400.000",
-            "prev_close": "398.000",
-            "open": "399.500",
-            "high": "401.250",
-            "low": "397.750",
-            "timestamp": "2026-05-21T04:00:00Z",
-            "volume": 1250000,
-            "turnover": "500000000.000",
-            "trade_status": "TradeStatus.Normal",
-            "pre_market_quote": None,
-            "post_market_quote": None,
-            "overnight_quote": None,
-        }
+        self.account = build_mock_account(self.account_id)
+        self.watchlists = build_mock_watchlists(self.symbol)
+        self.configuration = build_mock_configuration()
+        self.quote = build_mock_quote(self.symbol)
+        self.broker_profile = build_mock_broker_profile(self.account_id)
+        self.advisor_run_cards = [build_mock_advisor_run_card(self.account_id)]
         self.pre_open_assessment = {
             "analyzed_at": "2026-05-23T12:20:00Z",
             "session": "premarket",
@@ -622,7 +596,7 @@ class MockDashboardState:
                 "long_entry_order_id": "mock-order-0003",
                 "short_entry_order_id": "mock-order-0004",
                 "long_exit_order_id": None,
-                "short_exit_order_id": None,
+                "short_exit_order_id": "mock-order-0001",
                 "entry_long_price": "1.1000",
                 "entry_short_price": "2.4000",
                 "entry_net_credit": "1.3000",
@@ -637,16 +611,23 @@ class MockDashboardState:
                         "evaluated_at": "2026-05-21T02:14:54Z",
                         "next_monitor_after": "2026-05-21T02:19:54Z",
                         "underlying_price": "501.2500",
-                        "estimated_exit_debit": "1.6000",
-                        "estimated_pnl": "-30.0000",
+                        "estimated_exit_debit": "1.6300",
+                        "estimated_pnl": "-33.0000",
                         "days_to_expiration": 29,
-                        "exit_reason": None,
-                        "should_close": False,
+                        "exit_reason": "stop_loss",
+                        "should_close": True,
                         "take_profit_debit": "0.6500",
                         "stop_loss_debit": "2.6000",
                         "distance_to_take_profit_debit": "0.9500",
                         "distance_to_stop_loss_debit": "1.0000",
                         "short_strike_distance": "31.2500",
+                    },
+                    "lifecycle": {
+                        "warning": "close_order_canceled_manual_action_needed",
+                        "manual_action_required": True,
+                        "close_order_id": "mock-order-0001",
+                        "close_order_state": "canceled",
+                        "exit_reason": "stop_loss",
                     },
                 },
                 "entry_started_at": "2026-05-20T19:45:00Z",
@@ -702,6 +683,329 @@ class MockDashboardState:
             "contracts_per_trade": 1,
             "max_trades_per_day": 1,
             "symbols": ["QQQ.US"],
+        }
+        self._apply_scenario()
+
+    def _apply_scenario(self) -> None:
+        if self.scenario not in {"normal", "manual-action-required", "recover-eligible"}:
+            self._clear_manual_action_seed()
+        if self.scenario == "degraded-broker":
+            self.broker_profile["configured"] = False
+            self.broker_profile["credential_status"] = "degraded"
+            self.broker_profile["notes"] = ["Mock degraded broker profile for operator posture regression."]
+            self.account["account_sync_status"] = "error"
+            self.account["account_last_sync_error"] = "Mock broker account sync failed."
+        elif self.scenario == "paused-mandate":
+            self.runtime["auto_entry_enabled"] = False
+            self.runtime["manual_pause"] = True
+            self.runtime["last_action"] = "Manual pause is active."
+        elif self.scenario == "advisor-pending-record":
+            card = build_mock_advisor_run_card(self.account_id)
+            card.update(
+                {
+                    "status": "succeeded",
+                    "recorded": False,
+                    "recordable_status": "dry_run_only",
+                    "summary": "dry_run_only; 1 proposal(s), 0 review(s); advisor cannot submit orders.",
+                    "impact_summary": "0 proposal link(s), 0 review link(s); advisor cannot submit orders.",
+                    "proposal_count": 1,
+                    "review_count": 0,
+                    "warnings": ["Advisor output has not been recorded into proposals or reviews."],
+                    "recorded_at": None,
+                }
+            )
+            self.advisor_run_cards = [card]
+        elif self.scenario == "scheduler-backoff":
+            self.runtime["auto_entry_enabled"] = False
+        elif self.scenario == "recover-rejected":
+            self.runtime["auto_entry_enabled"] = False
+        elif self.scenario == "recover-already-working":
+            self.runtime["auto_entry_enabled"] = False
+            self._set_order_status("mock-order-0001", "submitted")
+            for spread in self.spreads:
+                raw_payload = dict(spread.get("raw_payload") or {})
+                monitor = dict(raw_payload.get("monitor") or {})
+                monitor["should_close"] = True
+                monitor["exit_reason"] = "stop_loss"
+                raw_payload["monitor"] = monitor
+                spread["raw_payload"] = raw_payload
+                spread["latest_close_order_status"] = "submitted"
+                spread["last_synced_at"] = "2026-05-21T02:14:54Z"
+
+    def _clear_manual_action_seed(self) -> None:
+        for spread in self.spreads:
+            raw_payload = dict(spread.get("raw_payload") or {})
+            raw_payload.pop("lifecycle", None)
+            monitor = dict(raw_payload.get("monitor") or {})
+            monitor["should_close"] = False
+            monitor["exit_reason"] = None
+            raw_payload["monitor"] = monitor
+            spread["raw_payload"] = raw_payload
+            spread["exit_reason"] = None
+
+    def _set_order_status(self, order_id: str, status_value: str) -> None:
+        for order in self.orders:
+            if order["id"] == order_id:
+                order["status"] = status_value
+                order["updated_at"] = iso_now()
+                return
+
+    def paper_mandate(self) -> dict[str, Any]:
+        return build_mock_paper_mandate(
+            self.account_id,
+            bull_put_auto_entry=bool(self.runtime.get("auto_entry_enabled")),
+            zero_dte_auto_execute=bool(self.zero_dte_lottery_runtime.get("auto_execute_enabled")),
+            manual_pause=bool(self.runtime.get("manual_pause")),
+            kill_switch=bool(self.runtime.get("kill_switch_active")),
+        )
+
+    def lifecycle_warnings(self) -> list[dict[str, Any]]:
+        warnings: list[dict[str, Any]] = []
+        for spread in self.spreads:
+            lifecycle = ((spread.get("raw_payload") or {}).get("lifecycle") or {})
+            if not lifecycle.get("manual_action_required"):
+                continue
+            warnings.append(
+                {
+                    "strategy_id": spread.get("strategy_id"),
+                    "code": lifecycle.get("warning") or "manual_action_required",
+                    "message": "Close order canceled / manual action needed",
+                    "detail": "Review close workflow before leaving unattended.",
+                    "manual_action_required": True,
+                    "record_id": spread.get("id"),
+                    "context": {
+                        "spread_status": spread.get("status"),
+                        "short_exit_order_id": spread.get("short_exit_order_id"),
+                        "short_exit_order_status": lifecycle.get("close_order_state"),
+                        "exit_reason": lifecycle.get("exit_reason"),
+                    },
+                }
+            )
+        return warnings
+
+    def audit_events(self) -> list[dict[str, Any]]:
+        advisor_card = self.advisor_run_cards[0] if self.advisor_run_cards else {}
+        advisor_recorded = advisor_card.get("recorded") is True
+        events = [
+            {
+                "id": "mock-audit-advisor-run",
+                "emitted_at": "2026-05-29T14:55:00Z",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "actor": "advisor",
+                "source": "deepseek",
+                "strategy": "strategy_advisor",
+                "action": "advisor_run_card_recorded" if advisor_recorded else "advisor_run_card_observed",
+                "before": None,
+                "after": None,
+                "order_ids": [],
+                "proposal_id": None,
+                "run_id": "mock-advisor-run-0001",
+                "warning_code": None if advisor_recorded else "advisor_pending_record",
+                "summary": "Mock advisor run-card recorded." if advisor_recorded else "Mock advisor run-card is pending record.",
+                "detail": None,
+                "payload": {"provider": "deepseek", "model": "deepseek-v4-pro"},
+                "event_origin": "durable",
+            }
+        ]
+        for warning in self.lifecycle_warnings():
+            events.append(
+                {
+                    "id": f"mock-audit-{warning['record_id']}",
+                    "emitted_at": "2026-05-21T02:14:54Z",
+                    "external_account_id": self.account_id,
+                    "mode": "paper",
+                    "actor": "local_system",
+                    "source": "orders",
+                    "strategy": "paper_bull_put_v1",
+                    "action": "manual_action_warning",
+                    "before": None,
+                    "after": None,
+                    "order_ids": [warning["context"]["short_exit_order_id"]],
+                    "proposal_id": None,
+                    "run_id": None,
+                    "warning_code": warning["code"],
+                    "summary": warning["message"],
+                    "detail": warning["detail"],
+                    "payload": warning["context"],
+                    "event_origin": "durable",
+                }
+            )
+        return events
+
+    def audit_summary(self, *, external_account_id: str | None = None, mode: str | None = None, limit: int = 200) -> dict[str, Any]:
+        events = self.audit_events()
+        if external_account_id is not None:
+            events = [event for event in events if event.get("external_account_id") == external_account_id]
+        if mode is not None:
+            events = [event for event in events if event.get("mode") == mode]
+        events = events[:limit]
+        groups: dict[tuple, dict[str, Any]] = {}
+        for event in events:
+            key = (
+                event.get("external_account_id"),
+                event.get("mode"),
+                event.get("source"),
+                event.get("action"),
+                event.get("strategy"),
+                event.get("warning_code"),
+                event.get("event_origin"),
+            )
+            group = groups.setdefault(
+                key,
+                {
+                    "external_account_id": event.get("external_account_id"),
+                    "mode": event.get("mode"),
+                    "source": event.get("source"),
+                    "action": event.get("action"),
+                    "strategy": event.get("strategy"),
+                    "warning_code": event.get("warning_code"),
+                    "event_origin": event.get("event_origin"),
+                    "count": 0,
+                    "latest_emitted_at": event.get("emitted_at"),
+                },
+            )
+            group["count"] += 1
+            if str(event.get("emitted_at")) > str(group.get("latest_emitted_at")):
+                group["latest_emitted_at"] = event.get("emitted_at")
+        return {
+            "generated_at": iso_now(),
+            "external_account_id": external_account_id,
+            "mode": mode,
+            "since": None,
+            "limit": limit,
+            "event_count": len(events),
+            "warning_count": len([event for event in events if event.get("warning_code")]),
+            "groups": sorted(groups.values(), key=lambda item: item["latest_emitted_at"], reverse=True),
+        }
+
+    def operator_status_snapshot(self) -> dict[str, Any]:
+        lifecycle_warnings = self.lifecycle_warnings()
+        audit_events = self.audit_events()
+        warning_count = sum(1 for event in audit_events if event.get("warning_code"))
+        scheduler_backoff = self.scenario == "scheduler-backoff"
+        degraded_broker = self.scenario == "degraded-broker"
+        advisor_pending = self.scenario == "advisor-pending-record"
+        status_value = (
+            "fail"
+            if lifecycle_warnings
+            else "warn"
+            if scheduler_backoff or degraded_broker or advisor_pending or self.runtime.get("manual_pause") or self.runtime.get("auto_entry_enabled")
+            else "pass"
+        )
+        reason = (
+            f"{len(lifecycle_warnings)} strategy lifecycle warning(s) require operator review."
+            if lifecycle_warnings
+            else "Scheduler backoff is active for mock order reconciliation."
+            if scheduler_backoff
+            else "Broker profile is degraded in the mock scenario."
+            if degraded_broker
+            else "Advisor output is pending explicit Record Output."
+            if advisor_pending
+            else "Manual pause is active for the paper mandate."
+            if self.runtime.get("manual_pause")
+            else "Bull put auto-entry is enabled; verify this is intentional before leaving the app unattended."
+            if self.runtime.get("auto_entry_enabled")
+            else "All operator posture checks passed."
+        )
+        scheduler_summary = self._scheduler_summary(backoff=scheduler_backoff)
+        return {
+            "external_account_id": self.account_id,
+            "mode": "paper",
+            "generated_at": iso_now(),
+            "status": status_value,
+            "ready_for_unattended": status_value != "fail",
+            "operator_posture_reason": reason,
+            "checks": [
+                {
+                    "name": "scheduler_recent_runs",
+                    "status": "warn" if scheduler_backoff else "pass",
+                    "detail": scheduler_summary["status_detail"],
+                    "reason_code": "scheduler_backoff" if scheduler_backoff else "scheduler_recent_runs_healthy",
+                    "severity": "warning" if scheduler_backoff else "info",
+                },
+                {
+                    "name": "lifecycle_warnings",
+                    "status": "fail" if lifecycle_warnings else "pass",
+                    "detail": reason,
+                    "reason_code": "manual_action_required" if lifecycle_warnings else "no_manual_action_required",
+                    "severity": "critical" if lifecycle_warnings else "info",
+                },
+            ],
+            "controls": {
+                "external_account_id": self.account_id,
+                "execution_mode": "paper",
+                "live_trading_enabled": False,
+                "scheduler_enabled": True,
+                "approval_required_for_execution": True,
+                "llm_direct_execution_allowed": False,
+                "paper_execution_allowed": True,
+                "live_execution_allowed": False,
+                "automation_controls": [],
+                "permission_boundaries": [],
+                "paper_mandate": self.paper_mandate(),
+            },
+            "broker_profiles": [deepcopy(self.broker_profile)],
+            "paper_mandate": self.paper_mandate(),
+            "audit_events": deepcopy(audit_events[:5]),
+            "audit_summary": {
+                "event_count": len(audit_events),
+                "warning_count": warning_count,
+                "by_action": {
+                    "advisor_run_card_recorded": 1,
+                    "manual_action_warning": warning_count,
+                },
+            },
+            "bull_put_runtime": self._runtime_with_computed_fields(),
+            "zero_dte_lottery_runtime": self.get_zero_dte_lottery_runtime(self.account_id),
+            "active_bull_put_spread_count": len(
+                [spread for spread in self.spreads if spread["status"] in {"open", "exit_pending_short", "exit_pending_long"}]
+            ),
+            "open_order_count": len([order for order in self.orders if order["status"] in {"created", "submitted", "partially_filled"}]),
+            "lifecycle_warnings": lifecycle_warnings,
+            "recent_scheduler_runs": [],
+            "recent_scheduler_summaries": [scheduler_summary],
+        }
+
+    def _scheduler_summary(self, *, backoff: bool = False) -> dict[str, Any]:
+        if backoff:
+            return {
+                "job_key": "orders-sync",
+                "job_label": "order reconciliation",
+                "external_account_id": self.account_id,
+                "posture": "warn",
+                "due_status": "backoff",
+                "status_detail": "Backoff active after 2 consecutive failure(s): mock timeout.",
+                "last_status": "backoff",
+                "last_started_at": "2026-05-21T02:14:54Z",
+                "last_completed_at": "2026-05-21T02:14:55Z",
+                "next_attempt_at": "2026-05-21T02:29:55Z",
+                "backoff_seconds": 900,
+                "consecutive_failures": 2,
+                "error_message": "mock timeout",
+                "detail": "Transient broker failure; backing off for 900s.",
+                "last_problem_at": "2026-05-21T02:14:54Z",
+                "recent_run_count": 2,
+                "recent_problem_count": 2,
+            }
+        return {
+            "job_key": "bull-put-monitor",
+            "job_label": "bull put monitor",
+            "external_account_id": self.account_id,
+            "posture": "pass",
+            "due_status": "healthy",
+            "status_detail": "Last scheduler run succeeded.",
+            "last_status": "succeeded",
+            "last_started_at": "2026-05-21T02:14:54Z",
+            "last_completed_at": "2026-05-21T02:14:55Z",
+            "next_attempt_at": None,
+            "backoff_seconds": None,
+            "consecutive_failures": 0,
+            "error_message": None,
+            "detail": "Mock scheduler monitor completed.",
+            "last_problem_at": None,
+            "recent_run_count": 1,
+            "recent_problem_count": 0,
         }
 
     def _build_order(
@@ -1058,6 +1362,85 @@ class MockDashboardState:
         if status is not None:
             rows = [row for row in rows if row["status"] == status]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def recover_close_eligibility(
+        self,
+        spread_id: str,
+        *,
+        external_account_id: str | None = None,
+        mode: str = "paper",
+    ) -> dict[str, Any]:
+        spread = self.get_spread(spread_id)
+        order = None
+        if spread.get("short_exit_order_id"):
+            try:
+                order = self.get_order(str(spread["short_exit_order_id"]))
+            except KeyError:
+                order = None
+        raw_payload = spread.get("raw_payload") if isinstance(spread.get("raw_payload"), dict) else {}
+        monitor = raw_payload.get("monitor") if isinstance(raw_payload.get("monitor"), dict) else {}
+        latest_should_close = bool(monitor.get("should_close")) or spread.get("latest_monitor_should_close") is True
+        order_status = order.get("status") if isinstance(order, dict) else spread.get("latest_close_order_status")
+        reasons: list[str] = []
+        if mode != "paper":
+            reasons.append("mode_not_paper")
+        if spread.get("mode") != "paper":
+            reasons.append("spread_not_paper")
+        if external_account_id is not None and external_account_id != spread.get("external_account_id"):
+            reasons.append("account_mismatch")
+        if spread.get("status") != "open":
+            reasons.append("spread_not_open")
+        if not latest_should_close:
+            reasons.append("close_not_required")
+        if not spread.get("short_exit_order_id") or order is None:
+            reasons.append("missing_short_close_order")
+        elif order_status in {"created", "submitted", "partially_filled"}:
+            reasons.append("working_replacement_exists")
+        elif order_status not in {"canceled", "cancelled", "rejected", "expired"}:
+            reasons.append("short_close_order_not_failed")
+        return {
+            "spread_id": spread["id"],
+            "eligible": not reasons,
+            "reasons": reasons,
+            "external_account_id": spread["external_account_id"],
+            "mode": spread.get("mode", "paper"),
+            "latest_should_close": latest_should_close,
+            "old_short_close_order_id": spread.get("short_exit_order_id"),
+            "old_short_close_order_status": order_status,
+            "working_replacement_order_id": order["id"] if isinstance(order, dict) and order_status in {"created", "submitted", "partially_filled"} else None,
+            "max_debit_required_hint": monitor.get("estimated_exit_debit"),
+        }
+
+    def recover_close(self, spread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("confirm_paper_order") is not True:
+            raise ValueError("Set confirm_paper_order=true before submitting a paper recovery order.")
+        eligibility = self.recover_close_eligibility(
+            spread_id,
+            external_account_id=payload.get("external_account_id"),
+            mode=str(payload.get("mode") or "paper"),
+        )
+        if not eligibility["eligible"]:
+            raise ValueError(f"Recovery blocked: {', '.join(eligibility['reasons'])}.")
+        spread = self.get_spread(spread_id)
+        order = self.submit_order(
+            {
+                "external_account_id": spread["external_account_id"],
+                "symbol": spread["short_symbol"],
+                "asset_type": "option",
+                "side": "buy",
+                "quantity": spread["contracts"],
+                "order_type": "limit",
+                "time_in_force": "day",
+                "mode": "paper",
+                "limit_price": payload.get("max_debit") or eligibility.get("max_debit_required_hint") or "1.00",
+                "remark": payload.get("note") or "mock recover close",
+            }
+        )
+        spread["status"] = "exit_pending_short"
+        spread["short_exit_order_id"] = order["id"]
+        spread["latest_close_order_status"] = order["status"]
+        spread["updated_at"] = iso_now()
+        return deepcopy(spread)
 
     def get_runtime_state(self, external_account_id: str) -> dict[str, Any]:
         if external_account_id != self.account_id:
@@ -1535,8 +1918,8 @@ class MockDashboardState:
         }
 
 
-def create_app() -> FastAPI:
-    state = MockDashboardState()
+def create_app(*, scenario: str = "normal") -> FastAPI:
+    state = MockDashboardState(scenario=scenario)
     app = FastAPI(title="Mock Stocks Tool Dashboard", docs_url="/docs", redoc_url=None)
     static_dir = ROOT / "src" / "stocks_tool" / "ui" / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -1545,6 +1928,14 @@ def create_app() -> FastAPI:
     @app.get("/broker-accounts")
     def broker_accounts() -> list[dict[str, Any]]:
         return [deepcopy(state.account)]
+
+    @app.get("/brokers/profiles")
+    def broker_profiles() -> list[dict[str, Any]]:
+        return [deepcopy(state.broker_profile)]
+
+    @app.get("/brokers/longbridge/profile")
+    def longbridge_profile() -> dict[str, Any]:
+        return deepcopy(state.broker_profile)
 
     @app.get("/watchlists")
     def watchlists() -> list[dict[str, Any]]:
@@ -1560,6 +1951,52 @@ def create_app() -> FastAPI:
         data["symbol"] = symbol.upper()
         data["mode"] = mode
         return data
+
+    @app.get("/ops/unattended-status")
+    def unattended_status(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        if external_account_id != state.account_id or mode != "paper":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock operator status not found.")
+        return state.operator_status_snapshot()
+
+    @app.get("/ops/audit")
+    def ops_audit(
+        external_account_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        source: str | None = Query(default=None),
+        strategy: str | None = Query(default=None),
+        action: str | None = Query(default=None),
+        warning_only: bool = Query(default=False),
+        since: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[dict[str, Any]]:
+        _ = since
+        if external_account_id is not None and external_account_id != state.account_id:
+            return []
+        events = state.audit_events()
+        if mode is not None:
+            events = [event for event in events if event.get("mode") == mode]
+        if source is not None:
+            events = [event for event in events if event.get("source") == source]
+        if strategy is not None:
+            events = [event for event in events if event.get("strategy") == strategy]
+        if action is not None:
+            events = [event for event in events if event.get("action") == action]
+        if warning_only:
+            events = [event for event in events if event.get("warning_code")]
+        return deepcopy(events[:limit])
+
+    @app.get("/ops/audit/summary")
+    def ops_audit_summary(
+        external_account_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        since: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> dict[str, Any]:
+        _ = since
+        return state.audit_summary(external_account_id=external_account_id, mode=mode, limit=limit)
 
     @app.get("/strategies/pre-open-risk")
     def pre_open_risk(include_option_overlays: bool = Query(default=False)) -> dict[str, Any]:
@@ -1584,6 +2021,46 @@ def create_app() -> FastAPI:
             strategy_id=strategy_id,
             limit=limit,
         )
+
+    @app.get("/strategies/advisor/run-cards")
+    def advisor_run_cards(
+        external_account_id: str | None = Query(default=None),
+        source: str | None = Query(default="deepseek"),
+        limit: int = Query(default=10, ge=1, le=50),
+    ) -> list[dict[str, Any]]:
+        if external_account_id is not None and external_account_id != state.account_id:
+            return []
+        rows = [row for row in state.advisor_run_cards if source is None or row.get("source") == source]
+        return deepcopy(rows[:limit])
+
+    @app.get("/strategies/advisor/playbooks")
+    def advisor_playbooks() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "bull_put_v1",
+                "strategy_id": "paper_bull_put_v1",
+                "title": "Bull Put Paper Workbench",
+                "summary": "Review paper bull put spread posture and propose local records only.",
+                "allowed_outputs": ["proposal", "review"],
+                "hard_limits": ["Paper mode only.", "Cannot submit broker orders."],
+            },
+            {
+                "id": "covered_call_v1",
+                "strategy_id": "covered_call_v1",
+                "title": "Covered Call Paper Workbench",
+                "summary": "Review covered call proposal and lifecycle state.",
+                "allowed_outputs": ["proposal", "review"],
+                "hard_limits": ["Advisor output is advisory only."],
+            },
+            {
+                "id": "zero_dte_lottery_v1",
+                "strategy_id": "zero_dte_lottery_v1",
+                "title": "Zero-DTE Lottery Guardrail Review",
+                "summary": "Assess controls without arming direct execution.",
+                "allowed_outputs": ["review"],
+                "hard_limits": ["No direct order placement."],
+            },
+        ]
 
     @app.get("/strategies/covered-call/activity")
     def covered_call_activity(
@@ -1761,6 +2238,21 @@ def create_app() -> FastAPI:
     ) -> list[dict[str, Any]]:
         return state.list_spreads(external_account_id=external_account_id, status=status)
 
+    @app.get("/strategies/bull-put/spreads/{spread_id}/recover-close/eligibility")
+    def recover_close_eligibility(
+        spread_id: str,
+        external_account_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        try:
+            return state.recover_close_eligibility(
+                spread_id,
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
+
     @app.get("/strategies/bull-put/runtime")
     def bull_put_runtime(
         external_account_id: str = Query(...),
@@ -1844,6 +2336,15 @@ def create_app() -> FastAPI:
         except KeyError as error:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
 
+    @app.post("/strategies/bull-put/spreads/{spread_id}/recover-close")
+    def recover_close(spread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return state.recover_close(spread_id, payload)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Spread '{spread_id}' was not found.") from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
     @app.post("/strategies/bull-put/spreads/{spread_id}/monitor")
     def monitor_spread(spread_id: str) -> dict[str, Any]:
         try:
@@ -1922,12 +2423,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve a mock Stocks Tool dashboard backend for UI regression.")
     parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
     parser.add_argument("--port", type=int, default=8765, help="Port to bind.")
+    parser.add_argument("--scenario", choices=sorted(MOCK_SCENARIOS), default="normal", help="Mock posture scenario.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(create_app(scenario=args.scenario), host=args.host, port=args.port, log_level="warning")
 
 
 if __name__ == "__main__":

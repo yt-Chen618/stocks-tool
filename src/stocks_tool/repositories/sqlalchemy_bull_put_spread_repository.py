@@ -3,6 +3,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from stocks_tool.application.services.strategy_lifecycle import bull_put_lifecycle_summary
 from stocks_tool.db.models import BrokerAccountRecord, BullPutSpreadRecord
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, SpreadStatus
 from stocks_tool.domain.models import BullPutSpread
@@ -86,6 +87,21 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         record.account_risk_pct = spread.account_risk_pct
         record.exit_reason = spread.exit_reason
         record.raw_payload = spread.raw_payload
+        if spread.raw_payload is not None:
+            lifecycle_summary = bull_put_lifecycle_summary(spread.raw_payload)
+        else:
+            lifecycle_summary = {
+                "lifecycle_warning_code": spread.lifecycle_warning_code,
+                "manual_action_required": spread.manual_action_required,
+                "latest_monitor_should_close": spread.latest_monitor_should_close,
+                "latest_close_order_status": spread.latest_close_order_status,
+                "next_monitor_after": spread.next_monitor_after,
+            }
+        record.lifecycle_warning_code = lifecycle_summary["lifecycle_warning_code"]
+        record.manual_action_required = bool(lifecycle_summary["manual_action_required"])
+        record.latest_monitor_should_close = lifecycle_summary["latest_monitor_should_close"]
+        record.latest_close_order_status = lifecycle_summary["latest_close_order_status"]
+        record.next_monitor_after = lifecycle_summary["next_monitor_after"]
         record.entry_started_at = spread.entry_started_at
         record.opened_at = spread.opened_at
         record.closed_at = spread.closed_at
@@ -120,6 +136,11 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
             break_even=Decimal(record.break_even) if record.break_even is not None else None,
             account_risk_pct=Decimal(record.account_risk_pct) if record.account_risk_pct is not None else None,
             exit_reason=record.exit_reason,
+            lifecycle_warning_code=record.lifecycle_warning_code,
+            manual_action_required=record.manual_action_required,
+            latest_monitor_should_close=record.latest_monitor_should_close,
+            latest_close_order_status=record.latest_close_order_status,
+            next_monitor_after=record.next_monitor_after,
             raw_payload=record.raw_payload,
             entry_started_at=record.entry_started_at,
             opened_at=record.opened_at,

@@ -6,6 +6,21 @@ const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
 const COLLAPSED_MODULES_STORAGE_KEY = "stocks-tool-collapsed-modules";
+const {
+  toNumber,
+  toFiniteNumber,
+  formatCurrency,
+  formatNumber,
+  formatDateTime,
+  formatSignedCurrency,
+  formatWeight,
+  formatPercent,
+  formatSignedPercentValue,
+  formatPercentValue,
+  formatSignedDecimal,
+  formatImpliedVolatility,
+  formatPositionQuantity,
+} = window.StocksToolFormatters;
 const TEXT_NODE_ORIGINALS = new WeakMap();
 const ATTRIBUTE_ORIGINALS = new WeakMap();
 const TRANSLATIONS = {
@@ -138,6 +153,10 @@ const TRANSLATIONS = {
     "Credit": "权利金",
     "Latest Action": "最近动作",
     "Actions": "操作",
+    "Manual Action Needed": "\u9700\u8981\u4eba\u5de5\u5904\u7406",
+    "Close order canceled / manual action needed": "\u5e73\u4ed3\u8ba2\u5355\u5df2\u53d6\u6d88 / \u9700\u8981\u4eba\u5de5\u5904\u7406",
+    "Close order canceled": "\u5e73\u4ed3\u8ba2\u5355\u5df2\u53d6\u6d88",
+    "Review close workflow before leaving unattended.": "\u65e0\u4eba\u503c\u5b88\u524d\u8bf7\u590d\u6838\u5e73\u4ed3\u6d41\u7a0b\u3002",
     "No bull put spreads loaded.": "尚未加载牛市看跌价差。",
     "Macro": "宏观",
     "Live Macro": "实时宏观",
@@ -434,40 +453,7 @@ const TRANSLATIONS = {
   },
 };
 
-const state = {
-  accounts: [],
-  selectedAccountId: "",
-  watchlists: [],
-  orders: [],
-  spreads: [],
-  runtime: null,
-  zeroDteLotteryRuntime: null,
-  zeroDteLotteryPreview: null,
-  zeroDteLotteryScanResult: null,
-  strategyExperiment: { proposals: [], runs: [], signals: [], reviews: [] },
-  coveredCallActivity: { summary: {}, proposals: [], runs: [], signals: [], reviews: [] },
-  advisorContext: null,
-  advisorDraft: null,
-  advisorRuns: [],
-  advisorStatus: {
-    kind: "idle",
-    detail: "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app.",
-    reason: "",
-  },
-  marketEvents: [],
-  executions: [],
-  journals: [],
-  brokerStatus: null,
-  latestSnapshot: null,
-  selectedOrderId: "",
-  quote: null,
-  quoteStatus: { kind: "idle", detail: "Load a quote manually to keep the dashboard fast.", reason: "" },
-  preOpenAssessment: null,
-  preOpenStatus: { kind: "idle", detail: "Macro board is available on demand so option strategy requests stay first.", reason: "" },
-  preOpenRuns: [],
-  preOpenSeedAttempts: {},
-  language: readStoredLanguage(),
-};
+const state = window.StocksToolState.createInitialState();
 
 const els = {};
 let isApplyingLanguage = false;
@@ -764,6 +750,15 @@ function wireEvents() {
     }
   });
 
+  els.spreadsBody.addEventListener("submit", async (event) => {
+    const form = event.target.closest("form[data-recover-close-form]");
+    if (!form) {
+      return;
+    }
+    event.preventDefault();
+    await recoverCloseSpread(form.dataset.recoverCloseForm, new FormData(form));
+  });
+
   if (els.strategyProposalsCard) {
     els.strategyProposalsCard.addEventListener("click", async (event) => {
       const button = event.target.closest("button[data-proposal-action]");
@@ -931,15 +926,6 @@ function isModuleCollapseInteractiveTarget(target) {
       "a, button, input, select, textarea, label, summary, [role='button'], [data-module-collapse-toggle], .panel-actions"
     )
   );
-}
-
-function readStoredLanguage() {
-  try {
-    const stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-    return stored === "en" || stored === "zh" ? stored : DEFAULT_LANGUAGE;
-  } catch {
-    return DEFAULT_LANGUAGE;
-  }
 }
 
 function setLanguage(language) {
@@ -1200,6 +1186,7 @@ async function loadAccountData() {
     state.advisorContext = null;
     state.advisorDraft = null;
     state.advisorRuns = [];
+    state.operatorStatus = null;
     state.advisorStatus = buildOverlayStatus(
       "idle",
       "Select a broker account before loading advisor context."
@@ -1208,6 +1195,7 @@ async function loadAccountData() {
     state.executions = [];
     state.journals = [];
     state.preOpenRuns = [];
+    state.recoverCloseEligibility = {};
     state.latestSnapshot = null;
     state.selectedOrderId = "";
     state.preOpenAssessment = null;
@@ -1247,6 +1235,7 @@ async function loadAccountData() {
       executions,
       journals,
       preOpenRuns,
+      operatorStatus,
     ] = await Promise.all([
       fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
@@ -1261,14 +1250,19 @@ async function loadAccountData() {
         console.error(error);
         return { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
       }),
-      fetchJson(`/strategies/advisor/runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&source=deepseek&limit=5`).catch(() => []),
+      fetchJson(`/strategies/advisor/run-cards?external_account_id=${encodeURIComponent(state.selectedAccountId)}&source=deepseek&limit=5`).catch(() => []),
       fetchJson("/market-events?limit=8"),
       fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
       fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
+      fetchJson(`/ops/unattended-status?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`).catch((error) => {
+        console.error(error);
+        return null;
+      }),
     ]);
     state.orders = orders;
     state.spreads = spreads;
+    state.recoverCloseEligibility = await loadRecoverCloseEligibility(spreads);
     state.runtime = runtime;
     state.zeroDteLotteryRuntime = zeroDteLotteryRuntime;
     state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
@@ -1278,6 +1272,7 @@ async function loadAccountData() {
     state.executions = executions;
     state.journals = journals;
     state.preOpenRuns = preOpenRuns;
+    state.operatorStatus = operatorStatus;
     state.latestSnapshot = latestSnapshot;
     seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
 
@@ -1307,6 +1302,37 @@ async function loadAccountData() {
     console.error(error);
     setStatus(error.message || "Failed to load account data.", "error");
   }
+}
+
+async function loadRecoverCloseEligibility(spreads) {
+  const entries = await Promise.all(
+    (Array.isArray(spreads) ? spreads : []).map(async (spread) => {
+      try {
+        const eligibility = await fetchJson(
+          `/strategies/bull-put/spreads/${encodeURIComponent(spread.id)}/recover-close/eligibility?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`
+        );
+        return [spread.id, eligibility];
+      } catch (error) {
+        console.error(error);
+        return [
+          spread.id,
+          {
+            spread_id: spread.id,
+            eligible: false,
+            reasons: ["eligibility_unavailable"],
+            external_account_id: spread.external_account_id,
+            mode: spread.mode || "paper",
+            latest_should_close: Boolean(spread.latest_monitor_should_close),
+            old_short_close_order_id: spread.short_exit_order_id,
+            old_short_close_order_status: spread.latest_close_order_status,
+            working_replacement_order_id: null,
+            max_debit_required_hint: null,
+          },
+        ];
+      }
+    })
+  );
+  return Object.fromEntries(entries);
 }
 
 function prepareMarketOverlayPanels() {
@@ -2117,6 +2143,40 @@ async function monitorSpread(spreadId) {
   }
 }
 
+async function recoverCloseSpread(spreadId, formData) {
+  const spread = state.spreads.find((item) => item.id === spreadId);
+  const actor = String(formData.get("actor") || "").trim();
+  const note = String(formData.get("note") || "").trim();
+  const maxDebit = String(formData.get("max_debit") || "").trim();
+  const confirmed = formData.get("confirm_paper_order") === "on";
+  if (!actor || !note || !maxDebit || !confirmed) {
+    setStatus("Recover close requires actor, note, max debit, and paper-order confirmation.", "error");
+    return;
+  }
+  if (!window.confirm(`Submit paper buy-to-close recovery for ${spread?.underlying_symbol || spreadId}?`)) {
+    return;
+  }
+  setStatus(`Submitting recovery close for ${spread?.underlying_symbol || spreadId}...`, "warning");
+  try {
+    const recovered = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
+      method: "POST",
+      body: JSON.stringify({
+        external_account_id: state.selectedAccountId,
+        mode: "paper",
+        confirm_paper_order: true,
+        max_debit: maxDebit,
+        actor,
+        note,
+      }),
+    });
+    await loadAccountData();
+    setStatus(`Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
+  } catch (error) {
+    console.error(error);
+    setStatus(error.message || "Recover close failed.", "error");
+  }
+}
+
 async function cancelOrder(orderId) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) {
@@ -2272,15 +2332,41 @@ function renderReconciliationStatus() {
     return;
   }
 
+  const operatorStatus = objectPayload(state.operatorStatus);
+  const brokerProfiles = Array.isArray(operatorStatus.broker_profiles) ? operatorStatus.broker_profiles : [];
+  const brokerProfile = brokerProfiles[0] || null;
+  const mandate = objectPayload(operatorStatus.paper_mandate);
+  const schedulerCheck = getOperatorCheck(operatorStatus, "scheduler_recent_runs");
+  const manualActionCount = Array.isArray(operatorStatus.lifecycle_warnings)
+    ? operatorStatus.lifecycle_warnings.length
+    : 0;
+  const mandateStrategyCount = Array.isArray(mandate.enabled_strategies)
+    ? mandate.enabled_strategies.length
+    : null;
+  const latestAdvisorRun = Array.isArray(state.advisorRuns) ? state.advisorRuns[0] : null;
   const cards = [
     {
-      label: "Auto Reconciliation",
-      tone: account.auto_reconcile_enabled ? "success" : "neutral",
-      badge: account.auto_reconcile_enabled ? "Enabled" : "Disabled",
-      value: account.auto_reconcile_enabled ? "Enabled" : "Disabled",
-      detail: account.auto_reconcile_enabled
-        ? "Background polling is active for this paper account."
-        : "Automatic polling is disabled for this account.",
+      label: "Broker Profile",
+      tone: brokerProfile?.configured === false ? "warning" : "success",
+      badge: brokerProfile?.paper_guard || "Profile",
+      value: brokerProfile
+        ? `${formatBrokerName(brokerProfile.broker || brokerProfile.name)} / ${formatStrategyStatusLabel(brokerProfile.mode || "paper")}`
+        : "Longbridge / Paper",
+      detail: brokerProfile
+        ? `${brokerProfile.external_account_id || account.external_account_id} / ${formatStrategyStatusLabel(brokerProfile.credential_status || "unknown")}`
+        : "Using the local Longbridge paper account profile.",
+    },
+    {
+      label: "Scheduler Posture",
+      tone: postureTone(schedulerCheck?.status || operatorStatus.status || "neutral"),
+      badge: postureLabel(schedulerCheck?.status || operatorStatus.status || "observed"),
+      value: operatorStatus.ready_for_unattended === false ? "Review" : "Ready",
+      detail: formatOperatorCheckDetail(
+        schedulerCheck,
+        account.auto_reconcile_enabled
+          ? "Background polling is active for this paper account."
+          : "Automatic polling is disabled for this account."
+      ),
     },
     {
       label: "Account Sync",
@@ -2306,6 +2392,32 @@ function renderReconciliationStatus() {
         account.orders_last_sync_error
       ),
     },
+    {
+      label: "Paper Mandate",
+      tone: mandate.kill_switch ? "error" : mandate.manual_pause ? "warning" : "success",
+      badge: mandate.kill_switch ? "Kill Switch" : mandate.manual_pause ? "Paused" : "Paper",
+      value: mandateStrategyCount !== null
+        ? `${mandateStrategyCount} ${mandateStrategyCount === 1 ? "Strategy" : "Strategies"}`
+        : "--",
+      detail: formatMandateDetail(mandate, operatorStatus.operator_posture_reason),
+    },
+    {
+      label: "Manual Actions",
+      tone: manualActionCount ? "error" : "success",
+      badge: manualActionCount ? "Required" : "Clear",
+      value: `${manualActionCount} Warning${manualActionCount === 1 ? "" : "s"}`,
+      detail: formatOperatorCheckDetail(
+        getOperatorCheck(operatorStatus, "lifecycle_warnings"),
+        operatorStatus.operator_posture_reason || "No strategy lifecycle manual action is currently blocking automation."
+      ),
+    },
+    {
+      label: "Advisor Last Run",
+      tone: latestAdvisorRun ? advisorRunStatusClass(latestAdvisorRun.status) : "neutral",
+      badge: latestAdvisorRun?.recorded ? "Recorded" : latestAdvisorRun ? "Observed" : "--",
+      value: latestAdvisorRun ? (latestAdvisorRun.model || latestAdvisorRun.provider || "DeepSeek") : "--",
+      detail: formatAdvisorRunCardDetail(latestAdvisorRun),
+    },
   ];
 
   els.reconciliationStrip.innerHTML = cards
@@ -2322,6 +2434,79 @@ function renderReconciliationStatus() {
       `
     )
     .join("");
+}
+
+function getOperatorCheck(operatorStatus, name) {
+  const checks = Array.isArray(operatorStatus?.checks) ? operatorStatus.checks : [];
+  return checks.find((check) => check.name === name) || null;
+}
+
+function formatOperatorCheckDetail(check, fallback) {
+  const detail = check?.detail || fallback || "";
+  const reason = check?.reason_code ? `reason ${check.reason_code}` : "";
+  return [detail, reason].filter(Boolean).join(" / ");
+}
+
+function postureTone(status) {
+  if (status === "pass" || status === "success") {
+    return "success";
+  }
+  if (status === "fail" || status === "error") {
+    return "error";
+  }
+  if (status === "warn" || status === "warning") {
+    return "warning";
+  }
+  return "neutral";
+}
+
+function postureLabel(status) {
+  if (status === "pass") {
+    return "Pass";
+  }
+  if (status === "warn") {
+    return "Warn";
+  }
+  if (status === "fail") {
+    return "Fail";
+  }
+  return formatStrategyStatusLabel(status || "--");
+}
+
+function formatBrokerName(value) {
+  return String(value || "--")
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function formatMandateDetail(mandate, fallback) {
+  const reasons = Array.isArray(mandate.reason_codes) ? mandate.reason_codes.filter(Boolean) : [];
+  const symbols = Array.isArray(mandate.symbol_universe) ? mandate.symbol_universe.slice(0, 3).join(", ") : "";
+  const caps = objectPayload(mandate.daily_caps);
+  const bullPutCap = caps.bull_put_new_spreads;
+  if (reasons.length) {
+    return `${reasons.join(", ")} / ${fallback || "Paper mandate is paused or constrained."}`;
+  }
+  if (symbols && bullPutCap !== undefined) {
+    return `${symbols} / bull put daily cap ${bullPutCap}`;
+  }
+  return fallback || "Paper mandate is derived from local strategy controls.";
+}
+
+function formatAdvisorRunCardDetail(run) {
+  if (!run) {
+    return "No DeepSeek advisor run-card is available yet.";
+  }
+  const usage = objectPayload(run.token_usage);
+  const totalTokens = usage.total_tokens ?? run.total_tokens;
+  const hash = run.context_hash ? `hash ${String(run.context_hash).slice(0, 12)}` : "";
+  const status = run.recordable_status ? `record ${formatStrategyStatusLabel(run.recordable_status)}` : "";
+  const playbook = run.playbook_id ? `playbook ${run.playbook_id}` : "";
+  const output = `${displayValue(run.proposal_count)} proposal(s), ${displayValue(run.review_count)} review(s)`;
+  return [hash, totalTokens !== undefined ? `${displayValue(totalTokens)} tokens` : "", status, playbook, output]
+    .filter(Boolean)
+    .join(" / ");
 }
 
 function renderMetrics() {
@@ -3118,11 +3303,15 @@ function renderAdvisorContextSummary(context) {
   const activity = context.covered_call_activity || {};
   const summary = objectPayload(activity.summary);
   const hardRules = Array.isArray(context.hard_rules) ? context.hard_rules : [];
+  const playbooks = Array.isArray(context.playbooks) ? context.playbooks : [];
+  const playbookIds = playbooks.map((playbook) => playbook.id).filter(Boolean).slice(0, 3);
   const items = [
     ["Account", context.external_account_id || "--", context.controls?.execution_mode || "paper"],
     ["Active CC", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s)`],
     ["Open CC", formatActivityCount(summary.executed_positions), `${formatActivityCount(summary.pending_rolls)} pending roll(s)`],
     ["Rules", String(hardRules.length), hardRules[0]?.name || "advisor_context_is_read_only"],
+    ["Playbooks", String(playbooks.length), playbookIds.join(", ") || "--"],
+    ["Boundary", "Proposal / Review", "No broker orders"],
   ];
   return `
     <div class="proposal-detail-grid">
@@ -3208,21 +3397,31 @@ function renderAdvisorRunHistory(runs) {
 }
 
 function renderAdvisorRunItem(run) {
+  const usage = objectPayload(run.token_usage);
   const tokenLine = [
-    `${displayValue(run.prompt_tokens)} prompt`,
-    `${displayValue(run.completion_tokens)} completion`,
-    `${displayValue(run.cache_hit_tokens)} cache hit`,
-    `${displayValue(run.cache_miss_tokens)} cache miss`,
+    `${displayValue(usage.prompt_tokens ?? run.prompt_tokens)} prompt`,
+    `${displayValue(usage.completion_tokens ?? run.completion_tokens)} completion`,
+    `${displayValue(usage.cache_hit_tokens ?? run.cache_hit_tokens)} cache hit`,
+    `${displayValue(usage.cache_miss_tokens ?? run.cache_miss_tokens)} cache miss`,
   ].join(" / ");
   const outputLine = `${displayValue(run.proposal_count)} proposal(s), ${displayValue(run.review_count)} review(s)`;
+  const warnings = Array.isArray(run.warnings) ? run.warnings : [];
+  const contextHash = run.context_hash ? `context ${String(run.context_hash).slice(0, 12)}` : "";
+  const guardLine = [
+    run.playbook_id ? `playbook ${run.playbook_id}` : "",
+    run.recordable_status ? `record ${formatStrategyStatusLabel(run.recordable_status)}` : "",
+    run.impact_summary || "",
+  ].filter(Boolean).join(" / ");
   return `
     <div class="advisor-draft-item">
       <div class="strategy-journal-head">
         <strong>${escapeHtml(run.model || run.provider || "deepseek")}</strong>
         <span class="pill ${advisorRunStatusClass(run.status)}">${escapeHtml(formatStrategyStatusLabel(run.status || "succeeded"))}</span>
       </div>
-      <p>${escapeHtml([tokenLine, outputLine].filter(Boolean).join(" | "))}</p>
-      <span>${escapeHtml([run.context_format, formatDateTime(run.completed_at || run.created_at), run.response_id].filter(Boolean).join(" / "))}</span>
+      <p>${escapeHtml(run.summary || [tokenLine, outputLine].filter(Boolean).join(" | "))}</p>
+      <span>${escapeHtml([run.context_format, contextHash, formatDateTime(run.completed_at || run.created_at), run.response_id].filter(Boolean).join(" / "))}</span>
+      ${guardLine ? `<span>${escapeHtml(guardLine)}</span>` : ""}
+      ${warnings.length ? `<span>${escapeHtml(warnings[0])}</span>` : ""}
       ${run.error_message ? `<span>${escapeHtml(run.error_message)}</span>` : ""}
     </div>
   `;
@@ -3485,6 +3684,10 @@ function renderMarketEvents() {
     .join("");
 }
 
+function getSpreadLifecycleWarning(spread) {
+  return window.StocksToolLifecycle?.bullPutSpreadLifecycleWarning(spread, state.orders) || null;
+}
+
 function renderSpreads() {
   const spreads = [...state.spreads].sort(
     (left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime()
@@ -3495,6 +3698,10 @@ function renderSpreads() {
   const monitoredOpenSpread = activeSpreads.find((spread) => spread.raw_payload?.monitor) || null;
   const monitoredSnapshot = monitoredOpenSpread ? monitoredOpenSpread.raw_payload.monitor : null;
   const lastMonitoredSpread = monitorableSpreads.find((spread) => spread.last_synced_at) || null;
+  const lifecycleWarnings = monitorableSpreads
+    .map((spread) => getSpreadLifecycleWarning(spread))
+    .filter(Boolean);
+  const primaryLifecycleWarning = lifecycleWarnings[0] || null;
 
   const summaryValues = [
     {
@@ -3524,8 +3731,10 @@ function renderSpreads() {
     {
       label: "Last Monitor",
       value: lastMonitoredSpread ? formatDateTime(lastMonitoredSpread.last_synced_at) : "--",
-      tone: "",
-      detail: lastMonitoredSpread
+      tone: primaryLifecycleWarning ? "error" : "",
+      detail: primaryLifecycleWarning
+        ? primaryLifecycleWarning.message
+        : lastMonitoredSpread
         ? `${lastMonitoredSpread.underlying_symbol} / ${formatSpreadStatusLabel(lastMonitoredSpread.status)}`
         : monitorableSpreads.length
           ? "Waiting for first monitor run"
@@ -3553,7 +3762,9 @@ function renderSpreads() {
   els.spreadsBody.innerHTML = spreads
     .map((spread) => {
       const monitorable = isMonitorableSpread(spread);
-      const statusTone = spreadStatusClass(spread.status);
+      const lifecycleWarning = getSpreadLifecycleWarning(spread);
+      const statusTone = lifecycleWarning ? "error" : spreadStatusClass(spread.status);
+      const statusLabel = lifecycleWarning ? "Manual Action Needed" : formatSpreadStatusLabel(spread.status);
       const monitor = spread.raw_payload?.monitor || null;
       const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
       const lastUpdatedAt = spread.last_synced_at || spread.updated_at || spread.created_at;
@@ -3579,11 +3790,23 @@ function renderSpreads() {
         : [spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--"];
       const monitorLines = monitor
         ? [
-            monitor.exit_reason ? formatSpreadExitReason(monitor.exit_reason) : "Within thresholds",
+            lifecycleWarning
+              ? lifecycleWarning.message
+              : monitor.exit_reason
+                ? formatSpreadExitReason(monitor.exit_reason)
+                : "Within thresholds",
+            ...(lifecycleWarning
+              ? [
+                  lifecycleWarning.detail,
+                  `Order ${lifecycleWarning.orderId} ${lifecycleWarning.orderStatus}`,
+                ]
+              : []),
             `Next Check ${formatDateTime(monitor.next_monitor_after)}`,
             `Updated ${formatDateTime(monitor.evaluated_at)}`,
           ]
         : [`Updated ${formatDateTime(lastUpdatedAt)}`];
+      const recoveryEligibility = objectPayload(state.recoverCloseEligibility?.[spread.id]);
+      const recoveryMarkup = renderRecoverClosePanel(spread, recoveryEligibility);
       return `
         <tr>
           <td>
@@ -3593,7 +3816,7 @@ function renderSpreads() {
             </div>
           </td>
           <td>${escapeHtml(formatSpreadDate(spread.expiration_date))}</td>
-          <td><span class="pill ${statusTone}">${escapeHtml(formatSpreadStatusLabel(spread.status))}</span></td>
+          <td><span class="pill ${statusTone}">${escapeHtml(statusLabel)}</span></td>
           <td>
             ${renderSpreadDetailCell(entryRiskLines)}
           </td>
@@ -3604,7 +3827,7 @@ function renderSpreads() {
             ${renderSpreadDetailCell(distanceLines, monitor?.estimated_pnl)}
           </td>
           <td>
-            ${renderSpreadDetailCell(monitorLines)}
+            ${renderSpreadDetailCell(monitorLines, null, lifecycleWarning ? "error" : null)}
           </td>
           <td>
             <div class="table-actions">
@@ -3617,6 +3840,7 @@ function renderSpreads() {
                   : ""
               }
             </div>
+            ${recoveryMarkup}
           </td>
         </tr>
       `;
@@ -3624,9 +3848,54 @@ function renderSpreads() {
     .join("");
 }
 
-function renderSpreadDetailCell(lines, pnlValue = null) {
+function renderRecoverClosePanel(spread, eligibility) {
+  if (!eligibility || !eligibility.spread_id) {
+    return `
+      <div class="recover-close-panel">
+        <strong>Recovery Check</strong>
+        <span>Eligibility unavailable.</span>
+      </div>
+    `;
+  }
+  const reasons = Array.isArray(eligibility.reasons) ? eligibility.reasons.filter(Boolean) : [];
+  const oldStatus = eligibility.old_short_close_order_status || "--";
+  const workingReplacement = eligibility.working_replacement_order_id || "--";
+  const hint = eligibility.max_debit_required_hint;
+  const maxDebitValue = hint !== null && hint !== undefined ? String(hint) : "";
+  const eligible = eligibility.eligible === true;
+  const toneClass = eligible ? "is-success" : reasons.includes("close_not_required") ? "is-neutral" : "is-warning";
+  const disabled = eligible ? "" : "disabled";
+  return `
+    <div class="recover-close-panel">
+      <div class="recover-close-head">
+        <strong class="${toneClass}">${eligible ? "Recovery Eligible" : "Recovery Blocked"}</strong>
+        <span>${escapeHtml(reasons.length ? reasons.join(", ") : "Ready for manual paper recovery.")}</span>
+      </div>
+      <div class="recover-close-meta">
+        <span>Old close ${escapeHtml(oldStatus)}</span>
+        <span>Working ${escapeHtml(workingReplacement)}</span>
+      </div>
+      <form class="recover-close-form" data-recover-close-form="${escapeHtml(spread.id)}">
+        <input name="actor" type="text" maxlength="80" value="local_operator" ${disabled} aria-label="Recovery actor" />
+        <input name="max_debit" type="number" min="0" step="0.01" value="${escapeHtml(maxDebitValue)}" placeholder="Max debit" ${disabled} aria-label="Recovery max debit" />
+        <input name="note" type="text" maxlength="500" value="manual recover close" ${disabled} aria-label="Recovery note" />
+        <label class="recover-confirm">
+          <input name="confirm_paper_order" type="checkbox" ${disabled} />
+          <span>Paper</span>
+        </label>
+        <button class="table-action primary" type="submit" ${disabled}>Recover</button>
+      </form>
+    </div>
+  `;
+}
+
+function renderSpreadDetailCell(lines, pnlValue = null, explicitTone = null) {
   const [primary = "--", ...secondary] = lines;
-  const toneClass = pnlValue !== null && pnlValue !== undefined ? ` is-${pnlTone(toNumber(pnlValue))}` : "";
+  const toneClass = explicitTone
+    ? ` is-${explicitTone}`
+    : pnlValue !== null && pnlValue !== undefined
+      ? ` is-${pnlTone(toNumber(pnlValue))}`
+      : "";
   return `
     <div class="spread-detail-cell">
       <strong class="${toneClass.trim()}">${escapeHtml(primary)}</strong>
@@ -5092,202 +5361,12 @@ function formatRuntimeNextAction(value) {
   return formatRuntimeScanResult(value);
 }
 
-function formatSignedCurrency(value, currency = "USD") {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  const prefix = number > 0 ? "+" : "";
-  return `${prefix}${formatCurrency(number, currency)}`;
-}
-
-function formatWeight(value, total) {
-  const amount = toNumber(value);
-  const denominator = toNumber(total);
-  if (!Number.isFinite(amount) || !Number.isFinite(denominator) || denominator <= 0) {
-    return "--";
-  }
-  return `${((amount / denominator) * 100).toFixed(1)}%`;
-}
-
-function formatPercent(value, base) {
-  const numerator = toNumber(value);
-  const denominator = toNumber(base);
-  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
-    return "--";
-  }
-  const percent = (numerator / denominator) * 100;
-  const prefix = percent > 0 ? "+" : "";
-  return `${prefix}${percent.toFixed(2)}% of book`;
-}
-
-function formatSignedPercentValue(value) {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  const prefix = number > 0 ? "+" : "";
-  return `${prefix}${number.toFixed(2)}%`;
-}
-
-function formatPercentValue(value) {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  return `${number.toFixed(2)}%`;
-}
-
-function formatSignedDecimal(value, decimals = 2) {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  const prefix = number > 0 ? "+" : "";
-  return `${prefix}${number.toFixed(decimals)}`;
-}
-
-function formatImpliedVolatility(value) {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  const percent = Math.abs(number) <= 1 ? number * 100 : number;
-  return `${percent.toFixed(1)}%`;
-}
-
-function formatPositionQuantity(value) {
-  const number = toNumber(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  return number.toLocaleString("en-US", {
-    minimumFractionDigits: Number.isInteger(number) ? 0 : 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-function toNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : Number.NaN;
-}
-
-function toFiniteNumber(value, fallback = 0) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
-
-async function fetchJson(url, options = {}) {
-  const { timeoutMs = null, signal: providedSignal, ...requestOptions } = options;
-  const controller = new AbortController();
-  const signal = mergeAbortSignals(controller.signal, providedSignal);
-  let timeoutId = null;
-  if (timeoutMs !== null && timeoutMs !== undefined) {
-    timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  }
-
-  try {
-    const response = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        ...(requestOptions.headers || {}),
-      },
-      ...requestOptions,
-      signal,
-    });
-
-    if (!response.ok) {
-      let detail = `Request failed: ${response.status}`;
-      try {
-        const payload = await response.json();
-        if (payload?.detail) {
-          detail = payload.detail;
-        }
-      } catch {
-        // ignore
-      }
-      throw new Error(detail);
-    }
-
-    return response.json();
-  } catch (error) {
-    if (error?.name === "AbortError" && timeoutMs !== null && timeoutMs !== undefined) {
-      throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)}s.`);
-    }
-    throw error;
-  } finally {
-    if (timeoutId !== null) {
-      clearTimeout(timeoutId);
-    }
-  }
-}
-
-function mergeAbortSignals(...signals) {
-  const activeSignals = signals.filter(Boolean);
-  if (activeSignals.length === 0) {
-    return undefined;
-  }
-  if (activeSignals.length === 1) {
-    return activeSignals[0];
-  }
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  for (const signal of activeSignals) {
-    if (signal.aborted) {
-      controller.abort();
-      return controller.signal;
-    }
-    signal.addEventListener("abort", abort, { once: true });
-  }
-  return controller.signal;
-}
-
 function setStatus(message, tone = "") {
   els.statusBanner.textContent = message;
   els.statusBanner.className = "status-banner";
   if (tone) {
     els.statusBanner.classList.add(tone);
   }
-}
-
-function formatCurrency(value, currency = "USD") {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency,
-    maximumFractionDigits: 2,
-  }).format(number);
-}
-
-function formatNumber(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return "--";
-  }
-  return number.toLocaleString("en-US", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
-
-function formatDateTime(value) {
-  if (!value) {
-    return "--";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString("zh-CN", {
-    hour12: false,
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 function buildOverlayStatus(kind, detail = "", reason = "") {

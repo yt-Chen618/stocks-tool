@@ -5,6 +5,12 @@ from sqlalchemy.orm import Session
 
 from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorClient
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
+from stocks_tool.ports.broker_gateway import (
+    BrokerGateway,
+    BrokerIntegrationGateway,
+    BrokerMarketDataGateway,
+    BrokerOrderGateway,
+)
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.zero_dte_lottery_strategy import (
@@ -26,6 +32,7 @@ from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.operator_status import OperatorStatusService
 from stocks_tool.application.services.strategy_advisor_intake import (
     StrategyAdvisorIntakeService,
 )
@@ -42,6 +49,8 @@ from stocks_tool.ports.repository import (
     MarketEventRepository,
     OrderRepository,
     PreOpenAssessmentRunRepository,
+    SchedulerJobRunRepository,
+    StrategyAuditEventRepository,
     StrategyExperimentRepository,
     TradePlanRepository,
     WatchlistRepository,
@@ -78,6 +87,12 @@ from stocks_tool.repositories.sqlalchemy_market_event_repository import (
 )
 from stocks_tool.repositories.sqlalchemy_pre_open_assessment_run_repository import (
     SQLAlchemyPreOpenAssessmentRunRepository,
+)
+from stocks_tool.repositories.sqlalchemy_scheduler_job_run_repository import (
+    SQLAlchemySchedulerJobRunRepository,
+)
+from stocks_tool.repositories.sqlalchemy_strategy_audit_event_repository import (
+    SQLAlchemyStrategyAuditEventRepository,
 )
 from stocks_tool.repositories.sqlalchemy_strategy_experiment_repository import (
     SQLAlchemyStrategyExperimentRepository,
@@ -187,6 +202,18 @@ def get_pre_open_assessment_run_repository(
     return SQLAlchemyPreOpenAssessmentRunRepository(session)
 
 
+def get_scheduler_job_run_repository(
+    session: Session = Depends(get_db_session),
+) -> SchedulerJobRunRepository:
+    return SQLAlchemySchedulerJobRunRepository(session)
+
+
+def get_strategy_audit_event_repository(
+    session: Session = Depends(get_db_session),
+) -> StrategyAuditEventRepository:
+    return SQLAlchemyStrategyAuditEventRepository(session)
+
+
 def get_strategy_experiment_repository(
     session: Session = Depends(get_db_session),
 ) -> StrategyExperimentRepository:
@@ -194,7 +221,7 @@ def get_strategy_experiment_repository(
 
 
 @lru_cache
-def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
+def get_longbridge_adapter() -> BrokerGateway:
     settings: Settings = get_settings()
     return LongbridgeBrokerAdapter(settings=settings)
 
@@ -202,7 +229,7 @@ def get_longbridge_adapter() -> LongbridgeBrokerAdapter:
 def get_longbridge_integration_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerIntegrationGateway = Depends(get_longbridge_adapter),
 ) -> LongbridgeIntegrationService:
     return LongbridgeIntegrationService(
         adapter=adapter,
@@ -216,7 +243,8 @@ def get_order_service(
     trade_plans: TradePlanRepository = Depends(get_trade_plan_repository),
     orders: OrderRepository = Depends(get_order_repository),
     executions: ExecutionRepository = Depends(get_execution_repository),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
+    adapter: BrokerOrderGateway = Depends(get_longbridge_adapter),
 ) -> OrderService:
     settings: Settings = get_settings()
     return OrderService(
@@ -226,6 +254,7 @@ def get_order_service(
         orders=orders,
         executions=executions,
         longbridge_adapter=adapter,
+        audit_events=audit_events,
     )
 
 
@@ -246,12 +275,14 @@ def get_journal_service(
 def get_strategy_experiment_service(
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
     settings: Settings = Depends(get_settings),
 ) -> StrategyExperimentService:
     return StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,
         settings=settings,
+        audit_events=audit_events,
     )
 
 
@@ -273,7 +304,7 @@ def get_covered_call_strategy_service(
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
     market_events: MarketEventRepository = Depends(get_market_event_repository),
     order_service: OrderService = Depends(get_order_service),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
 ) -> CoveredCallStrategyService:
     settings: Settings = get_settings()
     return CoveredCallStrategyService(
@@ -289,7 +320,7 @@ def get_covered_call_strategy_service(
 
 def get_zero_dte_lottery_strategy_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
     order_service: OrderService = Depends(get_order_service),
     experiments: StrategyExperimentRepository = Depends(get_strategy_experiment_repository),
 ) -> ZeroDteLotteryStrategyService:
@@ -310,9 +341,10 @@ def get_bull_put_strategy_service(
     runtime_states: BullPutStrategyRuntimeRepository = Depends(get_bull_put_strategy_runtime_repository),
     pre_open_runs: PreOpenAssessmentRunRepository = Depends(get_pre_open_assessment_run_repository),
     order_service: OrderService = Depends(get_order_service),
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
     risk_service: RiskService = Depends(get_risk_service),
     journal_service: JournalService = Depends(get_journal_service),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
 ) -> BullPutStrategyService:
     settings: Settings = get_settings()
     return BullPutStrategyService(
@@ -326,4 +358,25 @@ def get_bull_put_strategy_service(
         longbridge_adapter=adapter,
         risk_service=risk_service,
         journal_service=journal_service,
+        audit_events=audit_events,
+    )
+
+
+def get_operator_status_service(
+    strategy_experiments: StrategyExperimentService = Depends(get_strategy_experiment_service),
+    bull_put_strategy: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    zero_dte_lottery_strategy: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
+    order_service: OrderService = Depends(get_order_service),
+    scheduler_job_runs: SchedulerJobRunRepository = Depends(get_scheduler_job_run_repository),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
+    adapter: BrokerIntegrationGateway = Depends(get_longbridge_adapter),
+) -> OperatorStatusService:
+    return OperatorStatusService(
+        strategy_experiments=strategy_experiments,
+        bull_put_strategy=bull_put_strategy,
+        zero_dte_lottery_strategy=zero_dte_lottery_strategy,
+        order_service=order_service,
+        scheduler_job_runs=scheduler_job_runs,
+        audit_events=audit_events,
+        broker_adapter=adapter,
     )

@@ -18,6 +18,10 @@ def _asset_url(filename: str) -> str:
 @router.get("/app", response_class=HTMLResponse)
 def render_dashboard() -> HTMLResponse:
     app_css_url = _asset_url("app.css")
+    lifecycle_warning_js_url = _asset_url("lifecycle-warning.js")
+    api_client_js_url = _asset_url("api-client.js")
+    formatters_js_url = _asset_url("formatters.js")
+    state_js_url = _asset_url("state.js")
     app_js_url = _asset_url("app.js")
     return HTMLResponse(
         dedent(
@@ -903,6 +907,10 @@ def render_dashboard() -> HTMLResponse:
                   </main>
                 </div>
 
+                <script src="{lifecycle_warning_js_url}" defer></script>
+                <script src="{api_client_js_url}" defer></script>
+                <script src="{formatters_js_url}" defer></script>
+                <script src="{state_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>
               </body>
             </html>

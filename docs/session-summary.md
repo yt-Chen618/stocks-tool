@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-06-10
+Last updated: 2026-06-16
 
 ## Project
 
@@ -709,19 +709,441 @@ node --check src\stocks_tool\ui\static\app.js
 - `zero_dte_lottery_v1` preview, paper execution, manual scan, opt-in scheduler scan, runtime auto-order control, unattended script arming, and dashboard controls are implemented with a `$150` max premium cap, one-trade-per-day guard, strategy run/signal recording, and tests. Scheduler execution remains disabled by default.
 - Latest paper-loop / advisor-audit / unattended-notification code-level verification on `2026-06-10`: targeted advisor-intake and unattended tests passed with `40 passed`; full test suite passed with `200 passed in 3.72s`; `node --check src\stocks_tool\ui\static\app.js` passed; `scripts\run_regression.py mock-ui` passed and covered dashboard preview plus confirmed force scan against the mock backend; `git diff --check` reported only CRLF normalization warnings.
 
+## 2026-06-15 verification and audit
+
+- Repository baseline:
+  - branch: `main`
+  - latest commit: `86aeee3 Add advisor audit and unattended notification support`
+  - working tree was clean before this verification run generated new artifacts and this handoff update
+  - Python: `3.12.1`
+  - pytest: `8.4.2`
+  - Docker PostgreSQL service: `stocks-tool-postgres` running and healthy
+  - Alembic current revision: `20260603_0011 (head)`
+  - local API checks passed for `/health`, `/`, and `/docs`
+- Test matrix:
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - result: `200 passed in 3.48s`
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - result: passed
+  - `.venv\Scripts\python.exe -m pytest tests\test_deepseek_advisor.py tests\test_strategy_advisor_intake.py tests\test_strategy_experiments_api.py tests\test_unattended_paper_script.py -q`
+    - result: `47 passed in 0.27s`
+  - `.venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts\mock-ui-regression-20260615.json`
+    - result: `passed`
+- Real local API smoke for `LBPT10087357`:
+  - latest account snapshot loaded with `10` positions
+  - bull put runtime loaded with `1` open spread and `auto_entry_enabled=false`
+  - covered-call activity loaded with `total_proposals=2`, `active_proposals=0`, `executed_positions=0`, `pending_rolls=0`, and no lifecycle tasks
+  - advisor runs and advisor audit endpoints loaded successfully
+  - strategy controls confirmed paper mode, scheduler enabled, live trading disabled, and LLM direct execution disabled
+- DeepSeek advisor validation:
+  - This session's DeepSeek calls were run after the user explicitly authorized DeepSeek interface calls without per-call approval.
+  - `.venv\Scripts\python.exe scripts\run_regression.py advisor-intake --call-deepseek --json-output artifacts\deepseek-advisor-dry-run-20260615-1.json`
+    - result: `passed`; run `789d6561-3840-4813-9750-50d56d9603c6`; `0` proposals, `1` review; `8380` total tokens; dry-run only
+  - `.venv\Scripts\python.exe scripts\run_regression.py advisor-intake --call-deepseek --record --json-output artifacts\deepseek-advisor-record-20260615.json`
+    - result: `passed`; run `23427bce-ceb1-459e-8214-3ffa5996a92b`; status later confirmed as `recorded`; `0` proposals, `1` review; `8409` total tokens
+  - Direct dry-runs through `POST /strategies/advisor/deepseek/dry-run`:
+    - run `546719bc-912d-4c64-8855-4641ddf8961a`: `succeeded`, `0` proposals, `1` review, `8519` total tokens, `0` cache-hit tokens
+    - run `65661a35-96ca-40a9-a1f4-f8ab29172956`: `succeeded`, `0` proposals, `1` review, `9055` total tokens, `8064` cache-hit tokens
+  - Browser UI DeepSeek dry-run also succeeded from the dashboard:
+    - latest observed run `d14e4982-9f52-43dd-a08a-52d171f898e9`: `succeeded`, `0` proposals, `1` review, `9278` total tokens, `8064` cache-hit tokens
+  - `/strategies/advisor/audit` confirmed the recorded run has `record_state=recorded`, one downstream review, zero downstream proposals, and all advisor safety checks passing:
+    - `paper_mode_only`
+    - `context_format_recorded`
+    - `response_payload_recorded`
+    - `token_usage_traceable`
+    - `record_counts_match_downstream`
+    - `advisor_proposals_require_manual_approval`
+    - `advisor_metadata_blocks_direct_execution`
+- Unattended paper workflow validation:
+  - pre-check runtime state saved to `artifacts\pre-unattended-runtime-state-20260615.json`
+  - initial status:
+    - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts\unattended-paper-status-20260615-before.json --notification-channel dry-run`
+    - result: `passed`; `14` checks, `0` failures, `0` warnings
+  - arm:
+    - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper arm --json-output artifacts\unattended-paper-arm-20260615.json --notification-channel dry-run --zero-dte-lottery-auto-order off`
+    - result: `passed`; bull put auto-entry disabled; zero-DTE auto-execute disabled; `14` checks, `0` failures, `0` warnings
+  - status after arm with file notification:
+    - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts\unattended-paper-status-20260615-after-arm.json --notification-channel file --notification-file artifacts\unattended-paper-notifications-20260615.jsonl`
+    - result: `passed`; one JSONL notification written
+  - resume:
+    - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper resume --json-output artifacts\unattended-paper-resume-20260615.json --notification-channel dry-run --zero-dte-lottery-auto-order off`
+    - result: `passed`
+  - After resume verification, runtime was restored to the pre-check posture:
+    - bull put `auto_entry_enabled=false`
+    - bull put `manual_pause=false`
+    - bull put `kill_switch_active=false`
+    - zero-DTE `auto_execute_enabled=false`
+- Paper-account state audit:
+  - audit artifact: `artifacts\paper-account-audit-20260615.json`
+  - latest snapshot:
+    - account id: `LBPT10087357`
+    - captured at: `2026-06-15T13:22:23.752718Z`
+    - positions: `10`
+    - cash balance: `1795518.9500`
+    - buying power: `1845756.9600`
+    - net liquidation: `1907239.3100`
+  - bull put:
+    - total spreads: `4`
+    - open spreads: `1`
+    - open spread `f9956612-218a-4b20-94f7-66ce556a202c`
+    - underlying: `QQQ.US`
+    - expiry: `2026-06-26`
+    - long leg: `QQQ260626P705000.US`
+    - short leg: `QQQ260626P708000.US`
+    - entry net credit: `0.5200`
+    - latest monitor: `should_close=true`, `exit_reason=stop_loss`, estimated exit debit `1.63`, estimated P/L `-111.0000`
+  - P1 finding:
+    - open bull put spread `f9956612-218a-4b20-94f7-66ce556a202c` still has a stop-loss close signal after short-leg exit order `6f4bc830-fb21-424a-bc67-3e3305b64f25` was canceled
+    - local orders show that short exit order as `canceled`, while entry orders remain `filled`
+    - open orders count is `0`
+    - no follow-up paper close order was submitted during this audit
+  - covered calls:
+    - `total_proposals=2`
+    - `active_proposals=0`
+    - `executed_positions=0`
+    - `pending_rolls=0`
+    - `lifecycle_tasks=0`
+    - latest monitor action remains `hold`
+  - zero-DTE:
+    - `auto_execute_enabled=false`
+  - ledger counts:
+    - orders: `31`
+    - open orders: `0`
+    - executions: `15`
+    - journals: `50`
+    - strategy proposals: `2`
+    - strategy runs: `10`
+    - strategy signals: `10`
+    - strategy reviews: `2`
+    - DeepSeek advisor reviews: `2`
+- Dashboard QA:
+  - real local refresh:
+    - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2 --json-output artifacts\real-ui-refresh-20260615.json`
+    - result: `passed`
+    - dashboard ready: `146-441 ms`
+    - overlays settled: `158-444 ms`
+    - screenshot: `output\playwright\real-local-dashboard-refresh.png`
+  - in-app browser desktop QA:
+    - viewport `1440x900`
+    - no page-level horizontal overflow detected
+    - console error count: `0`
+    - DeepSeek UI flow loaded context and ran a dry-run; Record Output became enabled, but was not clicked in the browser QA path
+  - mobile QA:
+    - viewport `390x844`
+    - artifact: `artifacts\dashboard-qa-mobile-20260615.json`
+    - screenshot: `output\playwright\real-local-dashboard-mobile-20260615.png`
+    - no page-level horizontal overflow detected
+    - console error count: `0`
+    - key dashboard text present for account, bull put, lottery, advisor, spread monitor, and pre-open areas
+    - the bull put spread table uses an internal horizontal scroll area on mobile; this is contained within `.table-shell` and did not create page-level overflow
+- Local residue audit:
+  - artifact: `artifacts\local-residue-audit-20260615.json`
+  - watchlists: `5`
+  - duplicate watchlist name found: `core-us`
+  - one obvious test-residue watchlist name remains: `string`
+  - artifacts files: `40`
+  - output files: `23`
+  - `.playwright-cli` dump files: `19`
+  - `debug.log`: about `9306` bytes
+  - no cleanup was performed
+
+## 2026-06-15 P0 close-order drift fix
+
+- Fixed the bull put lifecycle blind spot where an open spread could still show as normal after the latest monitor said `should_close=true` but the linked short-leg close order had been canceled/rejected and no replacement working close order existed.
+- Code changes:
+  - `src\stocks_tool\application\services\bull_put_strategy.py`
+    - `refresh_spread()` now writes `raw_payload.lifecycle.warning=close_order_canceled_manual_action_needed` when it sees an open spread with a close-required monitor snapshot and a failed short-leg close order.
+    - stale lifecycle warning fields are cleared when the condition no longer applies.
+  - `scripts\run_unattended_paper.py`
+    - added blocking `bull_put_close_order_state` check.
+    - `build_payload()` now includes `monitorable_spreads[].lifecycle_warning`.
+    - the check allows recovery-in-progress states when a replacement working buy-to-close order exists for the short leg.
+  - `src\stocks_tool\ui\static\app.js`
+    - Bull Put Monitor summary strip turns error-tone when a monitorable spread has this warning.
+    - affected spread rows show `Manual Action Needed` and `Close order canceled / manual action needed`.
+    - frontend also infers the warning from the loaded orders list for older spread payloads without `raw_payload.lifecycle`.
+  - `scripts\mock_dashboard_server.py` and `scripts\mock_ui_browser_flow.js`
+    - mock regression now seeds the canceled close-order state and asserts the dashboard renders the warning before the mock monitor closes the spread.
+- Regression coverage:
+  - `tests\test_unattended_paper_script.py`
+    - open spread + `should_close=true` + canceled short exit order now fails `bull_put_close_order_state` and emits `lifecycle_warning`.
+  - `tests\test_bull_put_strategy.py`
+    - `refresh_spread()` marks the spread lifecycle warning when the linked short exit order refreshes as canceled.
+- Verification after fix:
+  - `.venv\Scripts\python.exe -m pytest tests\test_unattended_paper_script.py tests\test_bull_put_strategy.py -q`
+    - `57 passed`
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - `202 passed`
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `node --check scripts\mock_ui_browser_flow.js`
+    - passed
+  - `.venv\Scripts\python.exe -m py_compile scripts\run_unattended_paper.py scripts\mock_dashboard_server.py`
+    - passed
+  - `.venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts\mock-ui-regression-p0-close-order.json`
+    - passed; browser payload includes `lifecycleWarningRendered=true`
+  - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2 --json-output artifacts\real-ui-refresh-p0-close-order.json`
+    - passed; dashboard ready `127-431 ms`, overlays settled `142-499 ms`
+  - `.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts\bull-put-real-paper-p0-close-order.json`
+    - passed; dry-run preview smoke placed no option orders
+  - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts\unattended-paper-status-p0-close-order.json --notification-channel dry-run`
+    - failed as intended while the real open spread still had `should_close=true`; failed check was `bull_put_close_order_state` for spread `f9956612-218a-4b20-94f7-66ce556a202c`
+  - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts\unattended-paper-status-p0-close-order-after-refresh.json --notification-channel dry-run`
+    - passed after the running scheduler/monitor refreshed the same spread to `should_close=false`
+  - `artifacts\paper-account-audit-p0-close-order.json`
+    - current open spread remains `f9956612-218a-4b20-94f7-66ce556a202c`
+    - short exit order `6f4bc830-fb21-424a-bc67-3e3305b64f25` is still `canceled`
+    - latest monitor is now `should_close=false`, `exit_reason=null`, estimated exit debit `0.42`, estimated P/L `10.0000`
+    - `close_order_drift_count=0`
+- Completion audit rerun in the continuation turn:
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - `202 passed`
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `node --check scripts\mock_ui_browser_flow.js`
+    - passed
+  - `.venv\Scripts\python.exe -m py_compile scripts\run_unattended_paper.py scripts\mock_dashboard_server.py`
+    - passed
+  - `.venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts\mock-ui-regression-p0-close-order-current.json`
+    - passed; browser payload includes `lifecycleWarningRendered=true`
+  - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2 --json-output artifacts\real-ui-refresh-p0-close-order-current.json`
+    - passed; dashboard ready `174-333 ms`, overlays settled `192-335 ms`
+  - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts\unattended-paper-status-p0-close-order-current.json --notification-channel dry-run`
+    - passed; `bull_put_close_order_state=pass` because the current real monitor snapshot has `should_close=false`
+  - `.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts\bull-put-real-paper-p0-close-order-current.json`
+    - passed; dry-run preview smoke placed no option orders
+  - `artifacts\paper-account-audit-p0-close-order-current.json`
+    - open spread `f9956612-218a-4b20-94f7-66ce556a202c`
+    - short exit order `6f4bc830-fb21-424a-bc67-3e3305b64f25` is still `canceled`
+    - latest monitor is `should_close=false`, `exit_reason=null`, estimated exit debit `0.41`, estimated P/L `11.0000`
+    - `close_order_drift_count=0`
+- Current interpretation:
+  - The P0 detection gap is closed: if the canceled close-order + still-close-required condition reappears, unattended status blocks and the dashboard marks the spread as requiring manual action.
+  - The current live paper-account snapshot no longer has an active close-required monitor signal, so unattended status passes.
+
+## 2026-06-15 full-project optimization design
+
+- Added `docs\project-optimization-design.md` as the current full-project optimization design.
+- The design is based on the current running codebase rather than the older skeleton-era architecture doc.
+- Main optimization themes:
+  - update canonical architecture/runtime docs so README, architecture notes, and session handoff agree
+  - split `strategies.py` into bounded route modules without changing public paths
+  - introduce shared lifecycle invariant helpers so API, scheduler, unattended checks, and dashboard use the same safety logic
+  - decompose `BullPutStrategyService` and `CoveredCallStrategyService` behind their existing facades
+  - modularize the native dashboard JavaScript without adding a second frontend stack
+  - add scheduler/operator status visibility and durable job-run observations
+  - consolidate mock regression scenarios and keep real paper smoke gates
+- Recommended first implementation slice from the design:
+  - split `api/routes/strategies.py` into subrouters with unchanged URLs
+  - add route inventory/OpenAPI path assertions
+  - leave service behavior untouched
+  - verify with full pytest and mock-ui
+
+## 2026-06-15 optimization implementation slice
+
+- Implemented the first optimization slice from `docs\project-optimization-design.md`:
+  - refreshed durable architecture/runtime docs and added `docs\api-route-inventory.md`, `docs\runtime-operations.md`, `docs\strategy-lifecycle.md`, and `docs\regression-matrix.md`
+  - split `src\stocks_tool\api\routes\strategies.py` into strategy subrouters under `src\stocks_tool\api\routes\strategy_routes\` while preserving public `/strategies/*` paths
+  - added OpenAPI path assertions to lock the legacy strategy route inventory
+  - added shared lifecycle invariant helpers in `src\stocks_tool\application\services\strategy_lifecycle.py`
+  - wired bull put refresh and `scripts\run_unattended_paper.py` to the shared close-order manual-action invariant
+  - added a read-only operator status service and `GET /ops/unattended-status`
+  - added durable scheduler job-run observations with migration `20260615_0012_scheduler_job_runs.py`
+  - added a read-only scheduler status endpoint at `GET /ops/scheduler`
+  - added a read-only bull put dashboard view-model endpoint at `GET /strategies/bull-put/dashboard`
+  - split dashboard bull put lifecycle warning classification into `src\stocks_tool\ui\static\lifecycle-warning.js` without adding a build step
+  - extracted bull put runtime helper functions into `src\stocks_tool\application\services\bull_put\runtime.py`
+  - extracted covered-call order execution policy into `src\stocks_tool\application\services\covered_call\policy.py`
+  - added shared option snapshot planning helpers in `src\stocks_tool\application\services\option_snapshot_planner.py` and wired covered-call snapshot selection through them
+  - added normalized bull put lifecycle summary fields and indexes through migration `20260615_0013_bull_put_lifecycle_summary.py`
+  - backfilled normalized lifecycle fields from existing `raw_payload.monitor` / `raw_payload.lifecycle` JSONB data during the migration
+  - wired bull put service updates, SQLAlchemy spread persistence, operator status, bull put dashboard view models, and unattended-paper reporting to prefer normalized lifecycle fields with raw-payload fallback
+  - fixed direct execution of `scripts\run_unattended_paper.py` by adding the repository `src\` path before importing `stocks_tool`
+  - extracted bull put monitor calculations into `src\stocks_tool\application\services\bull_put\monitor.py`
+  - added scheduler job summaries to `/ops/scheduler` and recent scheduler summaries to `/ops/unattended-status`
+  - split dashboard fetch/timeout handling into `src\stocks_tool\ui\static\api-client.js`
+  - extracted common mock dashboard fixtures into `scripts\mock_dashboard_fixtures.py`
+  - added broker gateway protocols in `src\stocks_tool\ports\broker_gateway.py` and broker failure classification in `src\stocks_tool\application\services\broker_gateway.py`
+- Continued optimization implementation on `2026-06-16`:
+  - added richer scheduler summary fields (`posture`, `due_status`, `status_detail`, `last_problem_at`) and changed unattended scheduler status to derive pass/warn/fail from grouped summary posture
+  - added `src\stocks_tool\application\services\bull_put\candidate.py` for bull put expiry selection, short-put candidate filters, option-leg liquidity reasons, entry limit selection, repricing ladders, and mid-price helpers
+  - added `src\stocks_tool\application\services\bull_put\calendar.py` for U.S. options holiday/session/target-open helpers, including Memorial Day style next-session rollover
+  - added `src\stocks_tool\application\services\covered_call\candidate.py` for covered-call candidate/risk/monitor/proposal-confidence math
+  - added `src\stocks_tool\application\services\covered_call\order_lifecycle.py` for covered-call open/close/roll order request construction, order validation, filled-state checks, run grouping, decimal parsing, symbol normalization, and reference-time handling
+  - migrated service and broker-route type hints from concrete `LongbridgeBrokerAdapter` to split broker gateway protocols while leaving the concrete adapter at the dependency factory boundary
+  - added dashboard no-build modules `src\stocks_tool\ui\static\formatters.js` and `src\stocks_tool\ui\static\state.js`, both loaded before `app.js`
+- Verification for this slice:
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - latest rerun: `253 passed`
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\api-client.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\formatters.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\lifecycle-warning.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\state.js`
+    - passed
+  - `.venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_unattended_paper.py`
+    - passed
+  - `.venv\Scripts\python.exe scripts\run_regression.py mock-ui`
+    - passed; browser payload still includes `lifecycleWarningRendered=true`
+  - `.venv\Scripts\alembic.exe heads`
+    - `20260615_0013 (head)`
+  - `.venv\Scripts\alembic.exe current`
+    - `20260615_0013 (head)`
+  - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2`
+    - passed; dashboard ready `139-835 ms`, overlays settled `159-918 ms` across 2 loads
+  - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --notification-channel dry-run`
+    - passed; all strategy-loop checks passed for `LBPT10087357`; 1 monitorable bull put spread, zero covered-call lifecycle tasks, zero-DTE auto-order off
+  - `.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper`
+    - passed; dry-run preview smoke placed no option orders
+  - `git diff --check`
+    - no whitespace errors; only LF-to-CRLF working-copy warnings
+- Follow-up refinements after this implementation:
+  - continue optional fine-grained extraction of bull put entry execution, pre-open option-chain analysis, and review/journal orchestration when those areas next change
+  - continue optional fine-grained extraction of covered-call roll orchestration, lifecycle reconciliation, and activity aggregation when those areas next change
+  - add more dashboard view modules only when changing those UI surfaces; current no-build modules now cover fetch, lifecycle warnings, formatters, and state
+  - add per-endpoint broker timing summaries to JSON regression artifacts when broker-call observability becomes the next bottleneck
+
+## 2026-06-16 operator posture regression hardening
+
+- Extended the Vibe-Trading inspired operator posture slice so unattended CLI reports and mock UI regression consume the same read models as the dashboard:
+  - `scripts\run_unattended_paper.py` now collects `/ops/unattended-status`, `/ops/audit`, and `/brokers/profiles` in addition to the older strategy/order/account endpoints
+  - unattended checks now validate operator posture readiness, `paper_guard=config_declared`, paper mandate pause/kill-switch state, and audit summary availability
+  - unattended payloads now include `operator_status`, `broker_profiles`, `paper_mandate`, `audit_events`, and `operator_posture_reason`
+  - `scripts\mock_dashboard_server.py` now serves mock `/brokers/profiles`, `/ops/unattended-status`, `/ops/audit`, and `/strategies/advisor/run-cards`
+  - `scripts\mock_ui_browser_flow.js` now asserts the dashboard operator strip renders Broker Profile, Scheduler Posture, Paper Mandate, Manual Actions, Advisor Last Run, and `config_declared`
+  - `scripts\run_mock_ui_order_regression.py` now performs API seed checks for broker profile, operator status, audit, and advisor run-card before the browser flow
+- Verification after implementation:
+  - `.venv\Scripts\python.exe -m pytest tests\test_unattended_paper_script.py -q`
+    - `20 passed`
+  - `.venv\Scripts\python.exe -m pytest tests\test_unattended_paper_script.py tests\test_operator_status_api.py tests\test_broker_profiles_api.py tests\test_ui_dashboard.py -q`
+    - `30 passed`
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - `261 passed`
+  - `.venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_unattended_paper.py scripts\run_mock_ui_order_regression.py`
+    - passed
+  - `node --check scripts\mock_ui_browser_flow.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\api-client.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\formatters.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\lifecycle-warning.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\state.js`
+    - passed
+  - `.venv\Scripts\python.exe scripts\run_regression.py mock-ui`
+    - passed; browser payload includes `operator.rendered=true`, `operator_posture_seed=true`, `advisor_run_card_seed=true`, and `audit_seed=true`
+  - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2 --json-output artifacts/real-ui-refresh-operator-posture-noscheduler.json`
+    - passed against a temporary local API with `RECONCILIATION_SCHEDULER_ENABLED=false`; dashboard ready `190-601 ms`, overlays settled `192-671 ms`
+  - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --timeout-seconds 120 --notification-channel dry-run --json-output artifacts/unattended-paper-status-operator-posture-scheduler.json`
+    - passed against a temporary local API with scheduler enabled; status was `passed` with operator posture `warn` from a recent order-reconciliation backoff and `operator_audit_summary_available` warning
+  - `.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-operator-posture-noscheduler.json`
+    - passed against a temporary local API with `RECONCILIATION_SCHEDULER_ENABLED=false`; dry-run preview smoke placed no option orders
+  - `git diff --check`
+    - no whitespace errors; only LF-to-CRLF working-copy warnings
+- Verification note:
+  - A first `real-ui-refresh` attempt with scheduler enabled timed out while the background reconciliation loop was doing real Longbridge work. The UI gate passed after disabling only the temporary server's scheduler; the scheduler-on posture was still covered by the `unattended-paper status` gate.
+
+## 2026-06-16 Operator Platform Hardening V2
+
+- Implemented the long-form V2 slice while keeping the app FastAPI + SQLAlchemy + native dashboard and paper-first for `LBPT10087357`:
+  - confirmed the reconciliation scheduler runs blocking `run_once` work through `asyncio.to_thread()` and added a regression test proving the event loop still ticks while the coordinator is blocked
+  - added durable audit ledger migration `20260616_0014_strategy_audit_events.py`, SQLAlchemy repository, repository port, and `/ops/audit` filters for `external_account_id`, `mode`, `source`, `strategy`, `action`, `warning_only`, `since`, and `limit`
+  - added `event_origin=durable|synthetic` to `StrategyAuditEvent` and merged durable rows with synthetic compatibility projections in operator status
+  - added durable audit writes for proposal approve/reject, advisor proposal/run record, paper order submit/refresh/cancel, scheduler lifecycle advance, and bull put recover-close submit/reject/complete
+  - extended `PaperMandate`, `OperatorStatusCheck`, and unattended reports with reason-code/severity fields
+  - added `GET /strategies/advisor/playbooks` with static `bull_put_v1`, `covered_call_v1`, and `zero_dte_lottery_v1` playbooks
+  - extended `AdvisorRunCard` with `playbook_id`, `recordable_status`, and `impact_summary`
+  - added paper-only `POST /strategies/bull-put/spreads/{spread_id}/recover-close` with confirmation, account, latest-monitor, old-close-order, and no-working-replacement guards
+  - updated dashboard Operator Posture rendering to show reason codes and run-card V2 fields
+  - added mock dashboard scenarios for `normal`, `degraded-broker`, `paused-mandate`, `advisor-pending-record`, `manual-action-required`, and `scheduler-backoff`; `scripts\run_mock_ui_order_regression.py --scenario all` emits independent scenario evidence
+- Verification for this slice:
+  - `.venv\Scripts\python.exe -m pytest -q tests\test_strategy_audit_event_repository.py tests\test_operator_status_api.py tests\test_strategy_experiments_api.py::test_strategy_advisor_playbooks_route_lists_static_boundaries tests\test_strategy_experiments_api.py::test_strategy_advisor_run_cards_route_lists_run_card_projection tests\test_bull_put_strategy.py::test_recover_close_rejects_unconfirmed_paper_order_and_audits tests\test_bull_put_strategy.py::test_recover_close_rejects_existing_working_short_close_order_and_audits tests\test_bull_put_strategy.py::test_recover_close_submits_replacement_after_canceled_short_close_order tests\test_reconciliation_services.py::test_reconciliation_scheduler_runs_coordinator_off_event_loop`
+    - `16 passed`
+  - `.venv\Scripts\python.exe -m pytest -q tests\test_strategies_api.py::test_strategy_openapi_keeps_legacy_route_inventory tests\test_strategies_api.py::test_recover_bull_put_close_route_returns_recovered_spread tests\test_strategies_api.py::test_recover_bull_put_close_route_maps_value_error_to_400 tests\test_strategy_experiments_api.py::test_strategy_advisor_playbooks_route_lists_static_boundaries tests\test_bull_put_strategy.py::test_recover_close_rejects_unconfirmed_paper_order_and_audits tests\test_bull_put_strategy.py::test_recover_close_rejects_existing_working_short_close_order_and_audits tests\test_bull_put_strategy.py::test_recover_close_submits_replacement_after_canceled_short_close_order`
+    - `7 passed`
+  - `.venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_mock_ui_order_regression.py scripts\run_unattended_paper.py`
+    - passed
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `.venv\Scripts\python.exe scripts\run_mock_ui_order_regression.py --scenario all --timeout-seconds 30`
+    - passed; scenario matrix included normal browser flow plus degraded broker, paused mandate, advisor pending record, manual action required, and scheduler backoff evidence
+  - `.venv\Scripts\alembic.exe upgrade head`
+    - upgraded local DB from `20260615_0013` to `20260616_0014`
+  - `.venv\Scripts\alembic.exe heads`
+    - `20260616_0014 (head)`
+  - `.venv\Scripts\alembic.exe current`
+    - `20260616_0014 (head)`
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - `271 passed`
+  - `node --check src\stocks_tool\ui\static\app.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\api-client.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\formatters.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\lifecycle-warning.js`
+    - passed
+  - `node --check src\stocks_tool\ui\static\state.js`
+    - passed
+  - temporary scheduler-on local API job with:
+    - `.venv\Scripts\python.exe scripts\run_regression.py real-ui-refresh --iterations 2`
+      - passed; dashboard ready `181-550 ms`, overlays settled `194-622 ms`
+    - `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --notification-channel dry-run`
+      - passed; operator posture was `warn` from real Longbridge order-reconciliation backoff, but ready for unattended remained true
+    - `.venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper`
+      - passed; dry-run preview smoke placed no option orders
+
+## 2026-06-16 Operator Platform Hardening V3
+
+- Implemented the recovery drill and audit operations slice:
+  - added `GET /ops/audit/summary`, grouped by account, mode, source, action, strategy, warning code, and `event_origin`
+  - added audit summary route tests, bad-limit query tests, and durable-over-synthetic dedupe coverage
+  - added `BullPutRecoverCloseEligibility` plus `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility`
+  - updated the native dashboard spread table to display recovery eligibility, old short close order status, working replacement id, rejection reasons, and a gated paper recovery form
+  - extended mock dashboard support with `/ops/audit/summary`, recover-close eligibility/submit endpoints, and scenarios `recover-eligible`, `recover-rejected`, and `recover-already-working`
+  - added `scripts\run_regression.py audit-export` for read-only audit evidence export
+  - added `scripts\run_regression.py scheduler-on-long-gate` to start a temporary scheduler-enabled API and run `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, and `bull-put-real-paper`
+  - dashboard advisor context/run history now shows playbook boundaries, recordable status, and proposal/review-only impact text
+- Verification:
+  - `.venv\Scripts\python.exe -m pytest -q`
+    - `279 passed`
+  - `.venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_mock_ui_order_regression.py scripts\run_unattended_paper.py scripts\run_audit_export_regression.py scripts\run_scheduler_on_long_gate.py scripts\run_regression.py`
+    - passed
+  - `node --check` for `src\stocks_tool\ui\static\app.js`, `state.js`, `api-client.js`, `formatters.js`, and `lifecycle-warning.js`
+    - passed
+  - `.venv\Scripts\alembic.exe heads` and `.venv\Scripts\alembic.exe current`
+    - both reported `20260616_0014 (head)`
+  - `.venv\Scripts\python.exe scripts\run_mock_ui_order_regression.py --scenario all --timeout-seconds 30`
+    - passed; matrix includes normal posture scenarios plus the three recover-close drill scenarios
+  - `.venv\Scripts\python.exe scripts\run_regression.py scheduler-on-long-gate --iterations 2 --child-timeout-seconds 300 --http-timeout-seconds 180 --json-output artifacts\scheduler-on-long-gate-v3-compact.json`
+    - passed; API boot `2358 ms`, dashboard ready max `583 ms`, child gates all passed, `event_loop_stall_detected=false`; Longbridge backoff was surfaced as `warn` posture
+  - `.venv\Scripts\python.exe scripts\run_regression.py audit-export --base-url <temporary-local-api> --json-output artifacts\audit-export-v3-compact.json`
+    - passed; exported `50` events, `11` summary groups, and wrote full raw evidence to `artifacts\audit-export-v3-compact.raw-events.json`
+  - `git diff --check`
+    - passed with only Windows LF-to-CRLF working-copy warnings
+
 ## Known cleanup items
 
-- Watchlists contain duplicate and test residue data from manual API exercises.
-- `artifacts/` contains temporary screenshots from manual UI regression.
+- Watchlists contain duplicate and test residue data from manual API exercises; the `2026-06-15` audit found duplicate `core-us` entries and one `string` watchlist.
+- `artifacts/` contains temporary screenshots and JSON reports from manual UI, DeepSeek, unattended-paper, and audit verification.
 - There is no websocket push reconciliation yet.
 - The bull put workflow still coordinates two separate option orders rather than a broker-native combo order.
 - The unattended workflow now supports local dry-run/console/file notification payloads; external email/push/SMS delivery remains reserved for a later adapter.
 
 ## Recommended next steps
 
-1. Stabilize the paper-account strategy loop for `LBPT10087357`: keep the product boundary paper-first, keep covered-call auto-propose disabled unless intentionally creating a new candidate, and use the dashboard plus runtime/activity endpoints to confirm bull put spreads, covered-call lifecycle tasks, zero-DTE runtime state, orders, executions, and journals agree before leaving the app unattended.
-2. Exercise the unattended paper workflow end to end for a few real paper sessions: before leaving the app unattended overnight, run `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper arm --json-output artifacts/unattended-paper-arm.json`, optionally add `--notification-channel dry-run` first and then `file` once the payload shape is accepted, keep the FastAPI scheduler process running, inspect `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --json-output artifacts/unattended-paper-status.json` the next morning for account/order sync, open spread monitoring, lifecycle reconciliation, and zero-DTE switch state, then use `resume` only after deciding bull put auto-entry should be re-enabled.
-3. Complete controlled zero-DTE lottery validation before treating it as an unattended feature: use the dashboard `Lottery Strategy` panel or the equivalent preview endpoint, test confirmed force scan through `POST /strategies/zero-dte-lottery/runtime/LBPT10087357/scan?symbol=QQQ.US&direction=auto&mode=paper&force=true`, execute a manual paper order only with `confirm_paper_order=true`, and verify the `$150` premium cap, one-trade-per-session guard, run/signal recording, and explicit auto-order switch behavior. To arm scheduler paper auto-ordering, use the dashboard control or `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper arm --zero-dte-lottery-auto-order on --json-output artifacts/unattended-paper-lottery-on.json`; turn it back off with `.venv\Scripts\python.exe scripts\run_regression.py unattended-paper resume --zero-dte-lottery-auto-order off --json-output artifacts/unattended-paper-resume.json`.
-4. Apply `alembic upgrade head` in every environment and restart the API/dashboard so `/strategies/advisor/runs`, `/strategies/advisor/audit`, and the run-history UI are available.
-5. For the next explicitly approved DeepSeek run, confirm the run appears in history as `succeeded`, inspect `/strategies/advisor/audit` for token/cache usage, response content, record state, checks, and downstream proposal/review impact, then use Record Output only when the payload should be written locally.
-6. Add external email/push/SMS notification delivery only after the local dry-run/console/file unattended payload has been exercised for a few paper sessions and the summary shape is stable.
+1. P1: Continue monitoring open spread `f9956612-218a-4b20-94f7-66ce556a202c`. The latest monitor no longer requires a close, but the linked short-exit history still contains canceled order `6f4bc830-fb21-424a-bc67-3e3305b64f25`; if `should_close=true` returns without a working replacement order, unattended status should now block.
+2. P0: Stabilize the paper-account strategy loop for `LBPT10087357`: keep the product boundary paper-first, keep covered-call auto-propose disabled unless intentionally creating a new candidate, keep zero-DTE auto-execute disabled unless explicitly armed, and use dashboard plus runtime/activity endpoints to confirm bull put spreads, covered-call lifecycle tasks, zero-DTE runtime state, orders, executions, and journals agree before leaving the app unattended.
+3. P1: Continue exercising the unattended paper workflow for real paper sessions. Use `unattended-paper arm/status/resume` with `--notification-channel dry-run` first, then `file`, and keep restoring runtime posture deliberately when a verification run temporarily changes bull put auto-entry.
+4. P1: Continue controlled paper-only drills for `POST /strategies/bull-put/spreads/{spread_id}/recover-close`. Use it only when the latest monitor requires close, the old short close order is canceled/rejected/expired, no replacement is working, and `confirm_paper_order=true`.
+5. P1: Complete controlled zero-DTE lottery validation before treating it as an unattended feature: use the dashboard `Lottery Strategy` panel or the equivalent preview endpoint, test confirmed force scan through `POST /strategies/zero-dte-lottery/runtime/LBPT10087357/scan?symbol=QQQ.US&direction=auto&mode=paper&force=true`, execute a manual paper order only with `confirm_paper_order=true`, and verify the `$150` premium cap, one-trade-per-session guard, run/signal recording, and explicit auto-order switch behavior.
+6. P1: Keep using `/strategies/advisor/audit` and dashboard run history to compare DeepSeek response quality, token/cache usage, record state, checks, and downstream proposal/review impact. Record Output should remain an explicit local ledger action and must not touch broker order paths.
+7. P2: Clean up local residue after the verification artifacts are no longer needed: duplicate/test watchlists, old `artifacts/` reports, old `output/playwright/` screenshots, `.playwright-cli` dumps, and `debug.log`.
+8. P2: Add external email/push/SMS notification delivery only after the local dry-run/console/file unattended payload has been exercised for a few paper sessions and the summary shape is stable.

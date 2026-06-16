@@ -4,9 +4,19 @@ from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
-from stocks_tool.api.dependencies import get_bull_put_strategy_service
-from stocks_tool.domain.enums import BrokerName, ExecutionMode, SpreadStatus
+from stocks_tool.api.dependencies import get_bull_put_strategy_service, get_order_service
+from stocks_tool.domain.enums import (
+    AssetType,
+    BrokerName,
+    ExecutionMode,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+    SpreadStatus,
+    TimeInForce,
+)
 from stocks_tool.domain.models import (
+    BullPutRecoverCloseEligibility,
     BullPutSpread,
     BullPutSpreadMonitorResult,
     BullPutSpreadScanResult,
@@ -25,8 +35,65 @@ from stocks_tool.domain.models import (
     BullPutStrategyReviewResult,
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
+    Order,
 )
 from stocks_tool.main import app
+
+
+def test_strategy_openapi_keeps_legacy_route_inventory() -> None:
+    paths = set(app.openapi()["paths"])
+    expected_paths = {
+        "/strategies/zero-dte-lottery/preview",
+        "/strategies/zero-dte-lottery/execute",
+        "/strategies/zero-dte-lottery/runtime",
+        "/strategies/zero-dte-lottery/runtime/{external_account_id}",
+        "/strategies/zero-dte-lottery/runtime/{external_account_id}/scan",
+        "/strategies/covered-call/preview",
+        "/strategies/covered-call/propose",
+        "/strategies/covered-call/proposals/{proposal_id}/execute",
+        "/strategies/covered-call/proposals/{proposal_id}/monitor",
+        "/strategies/covered-call/proposals/{proposal_id}/roll-propose",
+        "/strategies/covered-call/proposals/{proposal_id}/roll-execute",
+        "/strategies/covered-call/proposals/{proposal_id}/roll-continue",
+        "/strategies/covered-call/proposals/{proposal_id}/close",
+        "/strategies/covered-call/activity",
+        "/strategies/covered-call/lifecycle/{external_account_id}/reconcile",
+        "/strategies/experiment",
+        "/strategies/controls",
+        "/strategies/advisor-context",
+        "/strategies/advisor/deepseek/dry-run",
+        "/strategies/advisor/audit",
+        "/strategies/advisor/runs",
+        "/strategies/advisor/run-cards",
+        "/strategies/advisor/playbooks",
+        "/strategies/advisor/responses",
+        "/strategies/proposals",
+        "/strategies/proposals/{proposal_id}/approve",
+        "/strategies/proposals/{proposal_id}/reject",
+        "/strategies/runs",
+        "/strategies/signals",
+        "/strategies/reviews",
+        "/strategies/pre-open-risk",
+        "/strategies/pre-open-runs",
+        "/strategies/pre-open-runs/{external_account_id}/capture",
+        "/strategies/pre-open-runs/{external_account_id}/review",
+        "/strategies/bull-put/preview",
+        "/strategies/bull-put/readiness",
+        "/strategies/bull-put/spreads",
+        "/strategies/bull-put/spreads/{spread_id}",
+        "/strategies/bull-put/dashboard",
+        "/strategies/bull-put/runtime",
+        "/strategies/bull-put/runtime/{external_account_id}",
+        "/strategies/bull-put/runtime/{external_account_id}/scan",
+        "/strategies/bull-put/runtime/{external_account_id}/review",
+        "/strategies/bull-put/execute",
+        "/strategies/bull-put/spreads/{spread_id}/refresh",
+        "/strategies/bull-put/spreads/{spread_id}/recover-close",
+        "/strategies/bull-put/spreads/{spread_id}/recover-close/eligibility",
+        "/strategies/bull-put/spreads/{spread_id}/monitor",
+    }
+
+    assert expected_paths <= paths
 
 
 def with_strategy_service(service: Mock) -> TestClient:
@@ -431,6 +498,113 @@ def test_execute_bull_put_strategy_maps_value_error_to_400() -> None:
     )
 
 
+def test_recover_bull_put_close_route_returns_recovered_spread() -> None:
+    service = Mock()
+    service.recover_close.return_value = BullPutSpread(
+        id="spread-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        underlying_symbol="QQQ.US",
+        expiration_date=datetime(2026, 6, 19, tzinfo=timezone.utc).date(),
+        contracts=1,
+        width=Decimal("3"),
+        long_symbol="QQQ260619P467000.US",
+        long_strike=Decimal("467"),
+        short_symbol="QQQ260619P470000.US",
+        short_strike=Decimal("470"),
+        status=SpreadStatus.EXIT_PENDING_SHORT,
+        short_exit_order_id="short-exit-replacement",
+        latest_monitor_should_close=True,
+        latest_close_order_status="submitted",
+        created_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 5, 22, 14, 46, tzinfo=timezone.utc),
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/spreads/spread-1/recover-close",
+            json={
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "confirm_paper_order": True,
+                "max_debit": "3.00",
+                "actor": "operator-a",
+                "note": "manual recovery",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["short_exit_order_id"] == "short-exit-replacement"
+    request = service.recover_close.call_args.args[1]
+    assert service.recover_close.call_args.args[0] == "spread-1"
+    assert request.external_account_id == "LBPT10087357"
+    assert request.confirm_paper_order is True
+    assert request.max_debit == Decimal("3.00")
+    assert request.actor == "operator-a"
+
+
+def test_recover_bull_put_close_route_maps_value_error_to_400() -> None:
+    service = Mock()
+    service.recover_close.side_effect = ValueError("Bull put close recovery is paper-only.")
+
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/spreads/spread-1/recover-close",
+            json={
+                "external_account_id": "LBPT10087357",
+                "mode": "live",
+                "confirm_paper_order": True,
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Bull put close recovery is paper-only."
+
+
+def test_recover_bull_put_close_eligibility_route_returns_read_model() -> None:
+    service = Mock()
+    service.get_recover_close_eligibility.return_value = BullPutRecoverCloseEligibility(
+        spread_id="spread-1",
+        eligible=True,
+        reasons=[],
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        latest_should_close=True,
+        old_short_close_order_id="short-exit",
+        old_short_close_order_status="canceled",
+        working_replacement_order_id=None,
+        max_debit_required_hint=Decimal("2.35"),
+    )
+
+    client = with_strategy_service(service)
+    try:
+        response = client.get(
+            "/strategies/bull-put/spreads/spread-1/recover-close/eligibility",
+            params={"external_account_id": "LBPT10087357", "mode": "paper"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["eligible"] is True
+    assert body["old_short_close_order_status"] == "canceled"
+    assert body["max_debit_required_hint"] == "2.35"
+    service.get_recover_close_eligibility.assert_called_once_with(
+        "spread-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+
+
 def test_get_bull_put_runtime_state_returns_runtime_state() -> None:
     service = Mock()
     service.get_runtime_state.return_value = BullPutStrategyRuntimeState(
@@ -474,6 +648,77 @@ def test_get_bull_put_runtime_state_returns_runtime_state() -> None:
     assert body["holding_open_position"] is True
     assert body["daily_entry_cap_reached"] is True
     assert body["next_action"] == "monitor_open_spread"
+
+
+def test_get_bull_put_dashboard_snapshot_returns_lifecycle_warnings() -> None:
+    service = Mock()
+    order_service = Mock()
+    service.get_runtime_state.return_value = BullPutStrategyRuntimeState(
+        id="runtime-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        auto_entry_enabled=False,
+        next_action="monitor_open_spread",
+    )
+    service.list_spreads.return_value = [
+        BullPutSpread(
+            id="spread-1",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            underlying_symbol="QQQ.US",
+            expiration_date=datetime(2026, 6, 19, tzinfo=timezone.utc).date(),
+            contracts=1,
+            width=Decimal("2"),
+            long_symbol="QQQ260619P448000.US",
+            long_strike=Decimal("448"),
+            short_symbol="QQQ260619P450000.US",
+            short_strike=Decimal("450"),
+            status=SpreadStatus.OPEN,
+            short_exit_order_id="short-exit",
+            raw_payload={"monitor": {"should_close": True, "exit_reason": "stop_loss"}},
+            created_at=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+        )
+    ]
+    order_service.list_orders.return_value = [
+        Order(
+            id="short-exit",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-short-exit",
+            client_order_id="client-short-exit",
+            symbol="QQQ260619P450000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.CANCELED,
+            limit_price=Decimal("1.20"),
+            created_at=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+        )
+    ]
+    app.dependency_overrides[get_bull_put_strategy_service] = lambda: service
+    app.dependency_overrides[get_order_service] = lambda: order_service
+    client = TestClient(app)
+    try:
+        response = client.get(
+            "/strategies/bull-put/dashboard",
+            params={"external_account_id": "LBPT10087357", "mode": "paper"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["external_account_id"] == "LBPT10087357"
+    assert body["active_spread_count"] == 1
+    assert body["open_order_count"] == 0
+    assert body["lifecycle_warnings"][0]["code"] == "close_order_canceled_manual_action_needed"
+    assert body["lifecycle_warnings"][0]["record_id"] == "spread-1"
 
 
 def test_run_bull_put_runtime_scan_returns_scan_result() -> None:

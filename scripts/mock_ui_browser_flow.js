@@ -18,6 +18,8 @@ async function main() {
   let lotteryScanText = "";
   let preOpenAssessmentText = "";
   let preOpenRunText = "";
+  let lifecycleWarningText = "";
+  let operatorPostureText = "";
 
   try {
     await page.goto(baseUrl, { waitUntil: "load" });
@@ -40,6 +42,15 @@ async function main() {
     await expectText(page.locator("body"), "QQQ / SPY Put Check");
     await expectText(page.locator("body"), "Stored Opening Follow-through");
     await expectText(page.locator("body"), "Bull Put Strategy");
+    await expectText(page.locator("#reconciliation-strip"), "Broker Profile");
+    await expectText(page.locator("#reconciliation-strip"), "CONFIG_DECLARED");
+    await expectText(page.locator("#reconciliation-strip"), "Scheduler Posture");
+    await expectText(page.locator("#reconciliation-strip"), "Paper Mandate");
+    await expectText(page.locator("#reconciliation-strip"), "3 Strategies");
+    await expectText(page.locator("#reconciliation-strip"), "Manual Actions");
+    await expectText(page.locator("#reconciliation-strip"), "Advisor Last Run");
+    await expectText(page.locator("#reconciliation-strip"), "1 Warning");
+    operatorPostureText = await page.locator("#reconciliation-strip").innerText();
     await expectText(page.locator("body"), "Lottery Strategy");
     await expectText(page.locator("body"), "Bull Put Monitor");
     await expectText(page.locator("body"), "Execution Desk");
@@ -49,6 +60,10 @@ async function main() {
     await expectText(page.locator("#covered-call-activity-card"), "No covered-call activity yet.");
     await expectText(page.locator("#market-events-card"), "UNH earnings window");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
+    await expectText(page.locator("#spread-summary-strip"), "Close order canceled / manual action needed");
+    await expectText(page.locator("#spreads-body"), "MANUAL ACTION NEEDED");
+    await expectText(page.locator("#spreads-body"), "Review close workflow before leaving unattended.");
+    lifecycleWarningText = await page.locator("#spreads-body").innerText();
     await page.click("#preview-zero-dte-lottery");
     await page.waitForFunction(
       () => document.getElementById("zero-dte-lottery-result-card")?.innerText?.includes("Eligible Lottery Candidate"),
@@ -168,6 +183,15 @@ async function main() {
             monitorTriggered:
               summary.statusBanner.includes("canceled") || summary.spreadTable.toLowerCase().includes("closed"),
             tableRow: summary.spreadTable,
+            lifecycleWarningRendered: lifecycleWarningText.toLowerCase().includes("manual action needed"),
+            lifecycleWarning: lifecycleWarningText,
+          },
+          operator: {
+            rendered:
+              operatorPostureText.includes("Broker Profile") &&
+              operatorPostureText.includes("Paper Mandate") &&
+              operatorPostureText.includes("Advisor Last Run"),
+            summary: operatorPostureText,
           },
           strategy: {
             manualPauseRendered: strategySkipText.toLowerCase().includes("manually paused"),

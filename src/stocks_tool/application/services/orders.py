@@ -1,11 +1,12 @@
+import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import AssetType, BrokerName, ExecutionMode, ReconciliationStatus
 from stocks_tool.domain.models import (
     BrokerOrderSnapshot,
+    CreateStrategyAuditEventRequest,
     CreateOrderRequest,
     Execution,
     Order,
@@ -16,8 +17,13 @@ from stocks_tool.ports.repository import (
     BrokerAccountRepository,
     ExecutionRepository,
     OrderRepository,
+    StrategyAuditEventRepository,
     TradePlanRepository,
 )
+from stocks_tool.ports.broker_gateway import BrokerOrderGateway
+
+
+logger = logging.getLogger(__name__)
 
 
 class OrderService:
@@ -28,7 +34,8 @@ class OrderService:
         trade_plans: TradePlanRepository,
         orders: OrderRepository,
         executions: ExecutionRepository,
-        longbridge_adapter: LongbridgeBrokerAdapter,
+        longbridge_adapter: BrokerOrderGateway,
+        audit_events: StrategyAuditEventRepository | None = None,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
@@ -36,6 +43,7 @@ class OrderService:
         self.orders = orders
         self.executions = executions
         self.longbridge_adapter = longbridge_adapter
+        self.audit_events = audit_events
 
     def list_orders(
         self,
@@ -97,6 +105,13 @@ class OrderService:
         )
         persisted_order = self.orders.create_order(order)
         self._sync_execution_from_snapshot(persisted_order, remote_snapshot)
+        self._append_order_audit_event(
+            persisted_order,
+            action="paper_order_submitted",
+            before=None,
+            after={"status": persisted_order.status.value},
+            summary=f"{persisted_order.symbol} {persisted_order.side.value} paper order submitted.",
+        )
         return persisted_order
 
     def refresh_order(self, order_id: str) -> Order:
@@ -110,7 +125,15 @@ class OrderService:
             external_order_id=order.external_order_id,
             mode=order.mode,
         )
-        return self._merge_remote_snapshot(order, remote_snapshot)
+        refreshed = self._merge_remote_snapshot(order, remote_snapshot)
+        self._append_order_audit_event(
+            refreshed,
+            action="paper_order_refreshed",
+            before={"status": order.status.value},
+            after={"status": refreshed.status.value},
+            summary=f"{refreshed.symbol} {refreshed.side.value} paper order refreshed.",
+        )
+        return refreshed
 
     def cancel_order(self, order_id: str) -> Order:
         order = self._get_order_or_raise(order_id)
@@ -123,7 +146,15 @@ class OrderService:
             external_order_id=order.external_order_id,
             mode=order.mode,
         )
-        return self._merge_remote_snapshot(order, remote_snapshot)
+        canceled = self._merge_remote_snapshot(order, remote_snapshot)
+        self._append_order_audit_event(
+            canceled,
+            action="paper_order_canceled",
+            before={"status": order.status.value},
+            after={"status": canceled.status.value},
+            summary=f"{canceled.symbol} {canceled.side.value} paper order cancel requested.",
+        )
+        return canceled
 
     def replace_order(self, order_id: str, request: ReplaceOrderRequest) -> Order:
         order = self._get_order_or_raise(order_id)
@@ -328,3 +359,44 @@ class OrderService:
             updated_at=now,
         )
         self.executions.upsert_execution(execution)
+
+    def _append_order_audit_event(
+        self,
+        order: Order,
+        *,
+        action: str,
+        before: dict | None,
+        after: dict | None,
+        summary: str,
+    ) -> None:
+        if self.audit_events is None or order.mode != ExecutionMode.PAPER:
+            return
+        warning_code = (
+            f"order_{order.status.value}"
+            if order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}
+            else None
+        )
+        try:
+            self.audit_events.create_event(
+                CreateStrategyAuditEventRequest(
+                    external_account_id=order.external_account_id,
+                    mode=order.mode,
+                    actor="broker_gateway",
+                    source="orders",
+                    strategy="paper_order",
+                    action=action,
+                    before=before,
+                    after=after,
+                    order_ids=[order.id],
+                    warning_code=warning_code,
+                    summary=summary,
+                    payload={
+                        "symbol": order.symbol,
+                        "side": order.side.value,
+                        "status": order.status.value,
+                        "external_order_id": order.external_order_id,
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("Failed to append order audit event '%s'.", action)

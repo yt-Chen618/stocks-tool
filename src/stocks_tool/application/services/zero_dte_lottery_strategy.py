@@ -4,7 +4,6 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -37,6 +36,7 @@ from stocks_tool.domain.models import (
     ZeroDteLotteryScanResult,
 )
 from stocks_tool.ports.repository import BrokerAccountRepository, StrategyExperimentRepository
+from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
 
 
 class ZeroDteLotteryStrategyService:
@@ -47,7 +47,7 @@ class ZeroDteLotteryStrategyService:
         *,
         settings: Settings,
         broker_accounts: BrokerAccountRepository,
-        longbridge_adapter: LongbridgeBrokerAdapter,
+        longbridge_adapter: BrokerMarketDataGateway,
         order_service: OrderService | None = None,
         experiments: StrategyExperimentRepository | None = None,
     ) -> None:

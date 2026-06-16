@@ -1,5 +1,8 @@
+import asyncio
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call
 
 import stocks_tool.application.services.reconciliation as reconciliation_module
@@ -8,7 +11,7 @@ from stocks_tool.application.services.longbridge_integration import (
     LongbridgeIntegrationService,
 )
 from stocks_tool.application.services.orders import OrderService
-from stocks_tool.application.services.reconciliation import ReconciliationCoordinator
+from stocks_tool.application.services.reconciliation import ReconciliationCoordinator, ReconciliationScheduler
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -20,6 +23,7 @@ from stocks_tool.domain.enums import (
     OrderStatus,
     OrderType,
     ReconciliationStatus,
+    SchedulerJobRunStatus,
     SpreadStatus,
     StrategyProposalStatus,
     TimeInForce,
@@ -33,7 +37,20 @@ from stocks_tool.domain.models import (
     MarketEvent,
     MarketEventImportResult,
     PositionSnapshot,
+    SchedulerJobRun,
 )
+
+
+class FakeSchedulerJobRunRepository:
+    def __init__(self) -> None:
+        self.runs: list[SchedulerJobRun] = []
+
+    def create_run(self, run: SchedulerJobRun) -> SchedulerJobRun:
+        self.runs.append(run)
+        return run
+
+    def list_runs(self, **kwargs) -> list[SchedulerJobRun]:
+        return self.runs
 
 
 def build_broker_account() -> BrokerAccount:
@@ -128,6 +145,99 @@ def build_open_spread(*, last_synced_at: datetime | None = None) -> BullPutSprea
         created_at=now,
         updated_at=now,
     )
+
+
+def test_reconciliation_scheduler_runs_coordinator_off_event_loop() -> None:
+    class BlockingCoordinator:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def run_once(self) -> None:
+            self.started.set()
+            self.release.wait(timeout=2)
+
+    async def exercise() -> None:
+        coordinator = BlockingCoordinator()
+        scheduler = ReconciliationScheduler(
+            coordinator=coordinator,
+            poll_interval_seconds=60,
+        )
+        task = asyncio.create_task(scheduler.run())
+        assert await asyncio.to_thread(coordinator.started.wait, 1)
+
+        loop = asyncio.get_running_loop()
+        ticked = asyncio.Event()
+        loop.call_soon(ticked.set)
+        await asyncio.wait_for(ticked.wait(), timeout=0.2)
+
+        await scheduler.stop()
+        coordinator.release.set()
+        await asyncio.wait_for(task, timeout=2)
+
+    asyncio.run(exercise())
+
+
+def test_reconciliation_coordinator_records_successful_scheduler_job_run() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+
+    coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="account-sync",
+        task_label="account reconciliation",
+        now=now,
+        callback=lambda: SimpleNamespace(positions_synced=3),
+    )
+
+    assert len(scheduler_runs.runs) == 1
+    run = scheduler_runs.runs[0]
+    assert run.external_account_id == "LBPT10087357"
+    assert run.job_key == "account-sync"
+    assert run.status == SchedulerJobRunStatus.SUCCEEDED
+    assert run.raw_payload == {"result_type": "SimpleNamespace", "positions_synced": 3}
+
+
+def test_reconciliation_coordinator_records_backoff_and_skip_scheduler_job_runs() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(reconciliation_poll_interval_seconds=30, longbridge_circuit_breaker_seconds=30),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+
+    coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="orders-sync",
+        task_label="order reconciliation",
+        now=now,
+        callback=lambda: (_ for _ in ()).throw(LongbridgeIntegrationError("timed out")),
+    )
+    coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="orders-sync",
+        task_label="order reconciliation",
+        now=now,
+        callback=lambda: None,
+    )
+
+    assert [run.status for run in scheduler_runs.runs] == [
+        SchedulerJobRunStatus.BACKOFF,
+        SchedulerJobRunStatus.SKIPPED,
+    ]
+    backoff_run = scheduler_runs.runs[0]
+    skipped_run = scheduler_runs.runs[1]
+    assert backoff_run.backoff_seconds == 30
+    assert backoff_run.next_attempt_at == datetime(2026, 6, 15, 14, 30, 30, tzinfo=timezone.utc)
+    assert skipped_run.next_attempt_at == backoff_run.next_attempt_at
 
 
 def patch_covered_call_reconciliation_dependencies(

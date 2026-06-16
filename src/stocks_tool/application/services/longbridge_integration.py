@@ -1,15 +1,15 @@
 from datetime import datetime, timezone
 
-from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, ReconciliationStatus
 from stocks_tool.domain.models import BrokerAccountSyncResult, SecurityQuoteSnapshot
+from stocks_tool.ports.broker_gateway import BrokerIntegrationGateway
 from stocks_tool.ports.repository import AccountSnapshotRepository, BrokerAccountRepository
 
 
 class LongbridgeIntegrationService:
     def __init__(
         self,
-        adapter: LongbridgeBrokerAdapter,
+        adapter: BrokerIntegrationGateway,
         broker_accounts: BrokerAccountRepository,
         account_snapshots: AccountSnapshotRepository,
     ) -> None:

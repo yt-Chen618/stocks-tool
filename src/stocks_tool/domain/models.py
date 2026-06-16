@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -23,6 +24,7 @@ from stocks_tool.domain.enums import (
     ReconciliationStatus,
     RiskStatus,
     SpreadStatus,
+    SchedulerJobRunStatus,
     StrategyAdvisorRunStatus,
     StrategyProposalStatus,
     StrategyReviewStatus,
@@ -562,6 +564,20 @@ class StrategyPermissionBoundary(BaseModel):
     detail: str
 
 
+class PaperMandate(BaseModel):
+    external_account_id: str | None = None
+    enabled_strategies: list[str] = Field(default_factory=list)
+    symbol_universe: list[str] = Field(default_factory=list)
+    daily_caps: dict[str, Any] = Field(default_factory=dict)
+    risk_caps: dict[str, Any] = Field(default_factory=dict)
+    auto_switches: dict[str, bool] = Field(default_factory=dict)
+    manual_pause: bool | None = None
+    kill_switch: bool | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    severity: str | None = None
+    expires_at: datetime | None = None
+
+
 class StrategyControlSnapshot(BaseModel):
     external_account_id: str | None = None
     execution_mode: ExecutionMode
@@ -573,6 +589,7 @@ class StrategyControlSnapshot(BaseModel):
     live_execution_allowed: bool = False
     automation_controls: list[StrategyAutomationControl] = Field(default_factory=list)
     permission_boundaries: list[StrategyPermissionBoundary] = Field(default_factory=list)
+    paper_mandate: PaperMandate | None = None
 
 
 class CoveredCallLifecycleTask(BaseModel):
@@ -639,6 +656,15 @@ class CoveredCallActivitySnapshot(BaseModel):
     reviews: list[StrategyReview] = Field(default_factory=list)
 
 
+class AdvisorPlaybook(BaseModel):
+    id: str
+    strategy_id: str
+    title: str
+    summary: str
+    allowed_outputs: list[str] = Field(default_factory=list)
+    hard_limits: list[str] = Field(default_factory=list)
+
+
 class StrategyAdvisorContext(BaseModel):
     external_account_id: str | None = None
     controls: StrategyControlSnapshot
@@ -646,6 +672,7 @@ class StrategyAdvisorContext(BaseModel):
     covered_call_activity: CoveredCallActivitySnapshot
     advisor_sources: list[str] = Field(default_factory=list)
     hard_rules: list[StrategyPermissionBoundary] = Field(default_factory=list)
+    playbooks: list[AdvisorPlaybook] = Field(default_factory=list)
 
 
 class StrategyAdvisorProposalDraft(BaseModel):
@@ -777,6 +804,31 @@ class StrategyAdvisorAuditSnapshot(BaseModel):
     runs: list[StrategyAdvisorRunAudit] = Field(default_factory=list)
 
 
+class AdvisorRunCard(BaseModel):
+    run_id: str
+    external_account_id: str
+    source: str
+    provider: str | None = None
+    model: str | None = None
+    status: StrategyAdvisorRunStatus
+    playbook_id: str | None = None
+    context_format: str | None = None
+    context_hash: str
+    token_usage: dict[str, int | None] = Field(default_factory=dict)
+    summary: str | None = None
+    recorded: bool = False
+    recordable_status: str | None = None
+    impact_summary: str | None = None
+    proposal_count: int = 0
+    review_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    downstream_proposal_ids: list[str] = Field(default_factory=list)
+    downstream_review_ids: list[str] = Field(default_factory=list)
+    completed_at: datetime | None = None
+    recorded_at: datetime | None = None
+    created_at: datetime
+
+
 class RecordStrategyAdvisorResponseRequest(BaseModel):
     external_account_id: str
     source: str = Field(default="deepseek", min_length=1, max_length=64)
@@ -823,9 +875,18 @@ class BrokerCapability(BaseModel):
 
 
 class BrokerProfile(BaseModel):
-    name: BrokerName
-    supported_modes: list[ExecutionMode]
-    capabilities: list[BrokerCapability]
+    id: str = "longbridge-paper"
+    broker: BrokerName = BrokerName.LONGBRIDGE
+    name: BrokerName = BrokerName.LONGBRIDGE
+    external_account_id: str | None = None
+    mode: ExecutionMode = ExecutionMode.PAPER
+    supported_modes: list[ExecutionMode] = Field(default_factory=list)
+    capabilities: list[BrokerCapability] = Field(default_factory=list)
+    readonly: bool = False
+    paper_guard: str = "config_declared"
+    configured: bool = False
+    credential_status: str = "unknown"
+    notes: list[str] = Field(default_factory=list)
 
 
 class BrokerConfigurationStatus(BaseModel):
@@ -1272,6 +1333,15 @@ class ExecuteBullPutSpreadRequest(BaseModel):
     remark: str | None = Field(default=None, max_length=64)
 
 
+class RecoverBullPutCloseRequest(BaseModel):
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    confirm_paper_order: bool = False
+    max_debit: Decimal | None = Field(default=None, gt=0)
+    actor: str = Field(default="local_operator", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
+
+
 class BullPutSpread(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid4()))
     strategy_id: str = "paper_bull_put_v1"
@@ -1299,6 +1369,11 @@ class BullPutSpread(BaseModel):
     break_even: Decimal | None = None
     account_risk_pct: Decimal | None = None
     exit_reason: str | None = None
+    lifecycle_warning_code: str | None = None
+    manual_action_required: bool = False
+    latest_monitor_should_close: bool | None = None
+    latest_close_order_status: str | None = None
+    next_monitor_after: datetime | None = None
     raw_payload: dict | None = None
     entry_started_at: datetime | None = None
     opened_at: datetime | None = None
@@ -1545,3 +1620,178 @@ class BrokerAccountSyncResult(BaseModel):
     snapshot_id: str | None = None
     positions_synced: int
     account_snapshot: AccountSnapshot
+
+
+class OperatorStatusCheck(BaseModel):
+    name: str
+    status: str
+    detail: str
+    reason_code: str | None = None
+    severity: str | None = None
+
+
+class OperatorLifecycleWarning(BaseModel):
+    strategy_id: str
+    code: str
+    message: str
+    manual_action_required: bool = False
+    detail: str | None = None
+    record_id: str | None = None
+    context: dict = Field(default_factory=dict)
+
+
+class SchedulerJobRun(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    job_key: str
+    job_label: str | None = None
+    external_account_id: str | None = None
+    status: SchedulerJobRunStatus
+    started_at: datetime
+    completed_at: datetime | None = None
+    duration_ms: int | None = None
+    next_attempt_at: datetime | None = None
+    backoff_seconds: int | None = None
+    consecutive_failures: int = 0
+    error_message: str | None = None
+    detail: str | None = None
+    raw_payload: dict | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SchedulerJobSummary(BaseModel):
+    job_key: str
+    job_label: str | None = None
+    external_account_id: str | None = None
+    posture: str = "pass"
+    due_status: str = "observed"
+    status_detail: str | None = None
+    last_status: SchedulerJobRunStatus
+    last_started_at: datetime
+    last_completed_at: datetime | None = None
+    next_attempt_at: datetime | None = None
+    backoff_seconds: int | None = None
+    consecutive_failures: int = 0
+    error_message: str | None = None
+    detail: str | None = None
+    last_problem_at: datetime | None = None
+    recent_run_count: int = 0
+    recent_problem_count: int = 0
+
+
+class SchedulerStatusSnapshot(BaseModel):
+    generated_at: datetime
+    external_account_id: str | None = None
+    runs: list[SchedulerJobRun] = Field(default_factory=list)
+    summaries: list[SchedulerJobSummary] = Field(default_factory=list)
+
+
+class StrategyAuditEvent(BaseModel):
+    id: str
+    emitted_at: datetime
+    external_account_id: str | None = None
+    mode: ExecutionMode | None = None
+    actor: str | None = None
+    source: str | None = None
+    strategy: str | None = None
+    action: str
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    order_ids: list[str] = Field(default_factory=list)
+    proposal_id: str | None = None
+    run_id: str | None = None
+    warning_code: str | None = None
+    summary: str | None = None
+    detail: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    event_origin: str | None = "synthetic"
+
+
+class StrategyAuditSummaryGroup(BaseModel):
+    external_account_id: str | None = None
+    mode: ExecutionMode | None = None
+    source: str | None = None
+    action: str
+    strategy: str | None = None
+    warning_code: str | None = None
+    event_origin: str | None = None
+    count: int
+    latest_emitted_at: datetime
+
+
+class StrategyAuditSummary(BaseModel):
+    generated_at: datetime
+    external_account_id: str | None = None
+    mode: ExecutionMode | None = None
+    since: datetime | None = None
+    limit: int
+    event_count: int
+    warning_count: int
+    groups: list[StrategyAuditSummaryGroup] = Field(default_factory=list)
+
+
+class CreateStrategyAuditEventRequest(BaseModel):
+    id: str | None = None
+    emitted_at: datetime | None = None
+    external_account_id: str | None = None
+    mode: ExecutionMode | None = None
+    actor: str | None = None
+    source: str | None = None
+    strategy: str | None = None
+    action: str
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    order_ids: list[str] = Field(default_factory=list)
+    proposal_id: str | None = None
+    run_id: str | None = None
+    warning_code: str | None = None
+    summary: str | None = None
+    detail: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    event_origin: str = "durable"
+
+
+class BullPutRecoverCloseEligibility(BaseModel):
+    spread_id: str
+    eligible: bool
+    reasons: list[str] = Field(default_factory=list)
+    external_account_id: str
+    mode: ExecutionMode
+    latest_should_close: bool
+    old_short_close_order_id: str | None = None
+    old_short_close_order_status: str | None = None
+    working_replacement_order_id: str | None = None
+    max_debit_required_hint: Decimal | None = None
+
+
+class OperatorStatusSnapshot(BaseModel):
+    external_account_id: str
+    mode: ExecutionMode
+    generated_at: datetime
+    status: str
+    ready_for_unattended: bool
+    operator_posture_reason: str | None = None
+    checks: list[OperatorStatusCheck] = Field(default_factory=list)
+    controls: StrategyControlSnapshot
+    broker_profiles: list[BrokerProfile] = Field(default_factory=list)
+    paper_mandate: PaperMandate | None = None
+    audit_events: list[StrategyAuditEvent] = Field(default_factory=list)
+    audit_summary: dict[str, Any] = Field(default_factory=dict)
+    bull_put_runtime: BullPutStrategyRuntimeState | None = None
+    zero_dte_lottery_runtime: ZeroDteLotteryRuntimeState | None = None
+    active_bull_put_spread_count: int = 0
+    open_order_count: int = 0
+    lifecycle_warnings: list[OperatorLifecycleWarning] = Field(default_factory=list)
+    recent_scheduler_runs: list[SchedulerJobRun] = Field(default_factory=list)
+    recent_scheduler_summaries: list[SchedulerJobSummary] = Field(default_factory=list)
+
+
+class BullPutDashboardSnapshot(BaseModel):
+    external_account_id: str
+    mode: ExecutionMode
+    generated_at: datetime
+    runtime: BullPutStrategyRuntimeState
+    spreads: list[BullPutSpread] = Field(default_factory=list)
+    active_spread_count: int = 0
+    open_order_count: int = 0
+    lifecycle_warnings: list[OperatorLifecycleWarning] = Field(default_factory=list)

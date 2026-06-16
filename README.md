@@ -28,9 +28,10 @@ This repository currently contains:
 - a local market-event calendar for earnings and macro risk windows, including CSV import and a first FMP provider adapter
 - a pre-open downside board with SPY / QQQ option-chain analysis for directional long-put checks
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
+- a read-only operator status endpoint for unattended paper posture and lifecycle warnings
 - an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
-- architecture documentation for the next build phases
+- current architecture, route inventory, runtime operations, lifecycle, regression, and optimization design docs under `docs/`
 
 ## Repository layout
 
@@ -93,6 +94,7 @@ Then open:
 - `POST /research/rank`
 - `POST /plans/draft`
 - `POST /plans/validate`
+- `GET /brokers/profiles`
 - `GET /brokers/longbridge/profile`
 - `GET /brokers/longbridge/quote?symbol=AAPL.US&mode=paper`
 - `POST /brokers/longbridge/account-sync/{external_account_id}?mode=paper`
@@ -112,6 +114,8 @@ Then open:
 - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
 - `POST /strategies/bull-put/execute`
 - `POST /strategies/bull-put/spreads/{spread_id}/refresh`
+- `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility`
+- `POST /strategies/bull-put/spreads/{spread_id}/recover-close`
 - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
 - `POST /strategies/bull-put/runtime/{external_account_id}`
 - `POST /strategies/bull-put/runtime/{external_account_id}/scan`
@@ -137,7 +141,13 @@ Then open:
 - `POST /strategies/advisor/deepseek/dry-run`
 - `POST /strategies/advisor/responses`
 - `GET /strategies/advisor/runs`
+- `GET /strategies/advisor/run-cards`
+- `GET /strategies/advisor/playbooks`
 - `GET /strategies/advisor/audit`
+- `GET /ops/unattended-status?external_account_id=LBPT10087357&mode=paper`
+- `GET /ops/scheduler?external_account_id=LBPT10087357`
+- `GET /ops/audit?external_account_id=LBPT10087357`
+- `GET /ops/audit/summary?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/proposals`
 - `POST /strategies/proposals`
 - `POST /strategies/proposals/{proposal_id}/approve`
@@ -248,11 +258,13 @@ Available workflows:
 - `bull-put-readiness`: runs the read-only bull put opening readiness check against an already running local API session; it defaults to `QQQ.US` so the check avoids scanning the full universe before the open
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
 - `advisor-intake`: fetches `/strategies/advisor-context` from an already running local API session, can call DeepSeek with `--call-deepseek` through the same `/strategies/advisor/deepseek/dry-run` API path used by the dashboard, includes the local `/strategies/advisor/audit` snapshot when available, and can record a provided or generated advisor response into `/strategies/advisor/responses` only when `--record` is explicitly supplied
+- `audit-export`: exports read-only `/ops/audit` and `/ops/audit/summary` evidence from an already running local API session
 - `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 - `real-preopen-board`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, clicks `Load Live Macro`, and verifies the response is live fast-path data for the expected U.S. session date instead of a stored fallback
 - `real-ui-refresh`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, reloads it repeatedly, and reports dashboard-ready plus overlay-settled timings for the warm real instance
 - `unattended-paper`: arms, inspects, or resumes the local paper unattended workflow. `arm` disables new bull put entries while keeping existing spread monitoring and lifecycle reconciliation under the running FastAPI scheduler; add `--zero-dte-lottery-auto-order on` to explicitly arm paper zero-DTE lottery auto-ordering, or `off` to turn it back off; `status` prints a morning/evening summary with `strategy_loop_checks` covering paper-first controls, covered-call auto-propose, bull put runtime state, linked spread/lifecycle orders, executions, journals, and zero-DTE cap/one-trade guard; `resume` re-enables bull put auto-entry. Optional `--notification-channel dry-run|console|file` emits a local notification payload for arm/status/resume, failures, warning checks, zero-DTE auto-order state, and strategy-loop drift; email/push/SMS are reserved but not active.
+- `scheduler-on-long-gate`: starts a temporary scheduler-enabled API on an available local port, then runs `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, and `bull-put-real-paper` against the same process
 
 All workflow scripts emit the same JSON envelope shape:
 
@@ -272,6 +284,7 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness --symbol QQQ.US --json-output artifacts/bull-put-readiness.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py advisor-intake --json-output artifacts/advisor-intake-context.json
+.venv\Scripts\python.exe scripts\run_regression.py audit-export --json-output artifacts/audit-export.json
 .venv\Scripts\python.exe scripts\run_regression.py advisor-intake --call-deepseek --json-output artifacts/deepseek-advisor-dry-run.json
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui --json-output artifacts/mock-ui-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py real-paper --json-output artifacts/real-paper-dry-run.json
@@ -284,6 +297,7 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --notification-channel dry-run --json-output artifacts/unattended-paper-status-notify.json
 .venv\Scripts\python.exe scripts\run_regression.py unattended-paper status --notification-channel file --notification-file artifacts/unattended-paper-notifications.jsonl --json-output artifacts/unattended-paper-status.json
 .venv\Scripts\python.exe scripts\run_regression.py unattended-paper resume --zero-dte-lottery-auto-order off --json-output artifacts/unattended-paper-resume.json
+.venv\Scripts\python.exe scripts\run_regression.py scheduler-on-long-gate --iterations 2 --json-output artifacts/scheduler-on-long-gate.json
 ```
 
 Market events can also be imported from a local CSV. The importer posts one batch to `/market-events/import`, so reruns skip events already present with the same symbol, type, title, and scheduled time.

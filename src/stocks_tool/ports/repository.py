@@ -17,6 +17,7 @@ from stocks_tool.domain.models import (
     PreOpenAssessmentRun,
     BullPutSpread,
     BullPutStrategyRuntimeState,
+    CreateStrategyAuditEventRequest,
     CreateStrategyProposalRequest,
     CreateStrategyReviewRequest,
     CreateStrategyRunRequest,
@@ -28,7 +29,9 @@ from stocks_tool.domain.models import (
     JournalEntry,
     MarketEvent,
     Order,
+    SchedulerJobRun,
     StrategyAdvisorRun,
+    StrategyAuditEvent,
     StrategyProposal,
     StrategyReview,
     StrategyRun,
@@ -278,6 +281,43 @@ class PreOpenAssessmentRunRepository(ABC):
         self,
         run: PreOpenAssessmentRun,
     ) -> PreOpenAssessmentRun:
+        raise NotImplementedError
+
+
+class SchedulerJobRunRepository(ABC):
+    @abstractmethod
+    def create_run(self, run: SchedulerJobRun) -> SchedulerJobRun:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        job_key: str | None = None,
+        limit: int = 50,
+    ) -> list[SchedulerJobRun]:
+        raise NotImplementedError
+
+
+class StrategyAuditEventRepository(ABC):
+    @abstractmethod
+    def create_event(self, request: CreateStrategyAuditEventRequest) -> StrategyAuditEvent:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_events(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: str | None = None,
+        source: str | None = None,
+        strategy: str | None = None,
+        action: str | None = None,
+        warning_only: bool = False,
+        since: datetime | None = None,
+        limit: int = 50,
+    ) -> list[StrategyAuditEvent]:
         raise NotImplementedError
 
 

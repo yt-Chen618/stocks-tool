@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from stocks_tool.adapters.brokers.longbridge import (
-    LongbridgeBrokerAdapter,
     LongbridgeConfigurationError,
     LongbridgeDependencyError,
     LongbridgeIntegrationError,
@@ -20,20 +19,28 @@ from stocks_tool.domain.models import (
     BrokerProfile,
     SecurityQuoteSnapshot,
 )
+from stocks_tool.ports.broker_gateway import BrokerAccountGateway
 
 router = APIRouter(prefix="/brokers", tags=["brokers"])
 
 
+@router.get("/profiles", response_model=list[BrokerProfile])
+def list_broker_profiles(
+    adapter: BrokerAccountGateway = Depends(get_longbridge_adapter),
+) -> list[BrokerProfile]:
+    return [adapter.get_profile()]
+
+
 @router.get("/longbridge/profile", response_model=BrokerProfile)
 def get_longbridge_profile(
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerAccountGateway = Depends(get_longbridge_adapter),
 ) -> BrokerProfile:
     return adapter.get_profile()
 
 
 @router.get("/longbridge/configuration", response_model=BrokerConfigurationStatus)
 def get_longbridge_configuration(
-    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+    adapter: BrokerAccountGateway = Depends(get_longbridge_adapter),
 ) -> BrokerConfigurationStatus:
     return adapter.get_configuration_status()
 

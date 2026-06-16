@@ -29,6 +29,7 @@ from stocks_tool.domain.models import (
     OptionChainEntry,
     OptionMarketSnapshot,
     Order,
+    RecoverBullPutCloseRequest,
     SecurityQuoteSnapshot,
     UpdateBullPutStrategyRuntimeRequest,
 )
@@ -1709,6 +1710,234 @@ def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:
     assert service.journal_service.create_entry.call_count >= 1
 
 
+def test_refresh_spread_marks_canceled_stop_loss_close_order_for_manual_action() -> None:
+    service, _, spreads, order_service = build_service()
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "exit_reason": "stop_loss",
+            "raw_payload": {
+                "monitor": {
+                    "should_close": True,
+                    "exit_reason": "stop_loss",
+                }
+            },
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="short-exit",
+        symbol=spread.short_symbol,
+        side=OrderSide.BUY,
+        status=OrderStatus.CANCELED,
+        limit_price=Decimal("1.63"),
+    )
+
+    result = service.refresh_spread("spread-1")
+
+    assert result.status == SpreadStatus.OPEN
+    assert result.raw_payload is not None
+    lifecycle = result.raw_payload["lifecycle"]
+    assert lifecycle["warning"] == "close_order_canceled_manual_action_needed"
+    assert lifecycle["manual_action_required"] is True
+    assert lifecycle["close_order_id"] == "short-exit"
+    assert lifecycle["close_order_state"] == "canceled"
+    assert lifecycle["exit_reason"] == "stop_loss"
+    assert result.lifecycle_warning_code == "close_order_canceled_manual_action_needed"
+    assert result.manual_action_required is True
+    assert result.latest_monitor_should_close is True
+    assert result.latest_close_order_status == "canceled"
+
+
+def test_recover_close_rejects_unconfirmed_paper_order_and_audits() -> None:
+    service, _, spreads, order_service = build_service()
+    audit_events = Mock()
+    service.audit_events = audit_events
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "canceled",
+        }
+    )
+    spreads.get_spread.return_value = spread
+
+    with pytest.raises(ValueError, match="confirm_paper_order=true"):
+        service.recover_close(
+            "spread-1",
+            RecoverBullPutCloseRequest(
+                external_account_id="LBPT10087357",
+                confirm_paper_order=False,
+            ),
+        )
+
+    order_service.submit_order.assert_not_called()
+    audit_request = audit_events.create_event.call_args.args[0]
+    assert audit_request.action == "bull_put_recover_close_rejected"
+    assert audit_request.warning_code == "paper_order_not_confirmed"
+
+
+def test_recover_close_rejects_existing_working_short_close_order_and_audits() -> None:
+    service, _, spreads, order_service = build_service()
+    audit_events = Mock()
+    service.audit_events = audit_events
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "submitted",
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="short-exit",
+        symbol=spread.short_symbol,
+        side=OrderSide.BUY,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.63"),
+    )
+
+    with pytest.raises(ValueError, match="still working"):
+        service.recover_close(
+            "spread-1",
+            RecoverBullPutCloseRequest(
+                external_account_id="LBPT10087357",
+                confirm_paper_order=True,
+            ),
+        )
+
+    order_service.submit_order.assert_not_called()
+    audit_request = audit_events.create_event.call_args.args[0]
+    assert audit_request.action == "bull_put_recover_close_rejected"
+    assert audit_request.warning_code == "working_replacement_exists"
+
+
+def test_recover_close_eligibility_reports_canceled_short_close_order() -> None:
+    service, _, spreads, order_service = build_service()
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "canceled",
+            "raw_payload": {"monitor": {"should_close": True, "estimated_exit_debit": "2.35"}},
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.get_order.return_value = build_option_order(
+        order_id="short-exit",
+        symbol=spread.short_symbol,
+        side=OrderSide.BUY,
+        status=OrderStatus.CANCELED,
+        limit_price=Decimal("1.63"),
+    )
+
+    eligibility = service.get_recover_close_eligibility(
+        "spread-1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert eligibility.eligible is True
+    assert eligibility.reasons == []
+    assert eligibility.latest_should_close is True
+    assert eligibility.old_short_close_order_status == "canceled"
+    assert eligibility.working_replacement_order_id is None
+    assert eligibility.max_debit_required_hint == Decimal("2.35")
+    order_service.refresh_order.assert_not_called()
+
+
+def test_recover_close_eligibility_reports_account_mismatch_and_working_order() -> None:
+    service, _, spreads, order_service = build_service()
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "submitted",
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.get_order.return_value = build_option_order(
+        order_id="short-exit",
+        symbol=spread.short_symbol,
+        side=OrderSide.BUY,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.63"),
+    )
+
+    eligibility = service.get_recover_close_eligibility(
+        "spread-1",
+        external_account_id="other-account",
+        mode=ExecutionMode.LIVE,
+    )
+
+    assert eligibility.eligible is False
+    assert "mode_not_paper" in eligibility.reasons
+    assert "account_mismatch" in eligibility.reasons
+    assert "working_replacement_exists" in eligibility.reasons
+    assert eligibility.old_short_close_order_status == "submitted"
+    assert eligibility.working_replacement_order_id == "short-exit"
+
+
+def test_recover_close_submits_replacement_after_canceled_short_close_order() -> None:
+    service, adapter, spreads, order_service = build_service()
+    audit_events = Mock()
+    service.audit_events = audit_events
+    spread = build_open_spread().model_copy(
+        update={
+            "short_exit_order_id": "short-exit",
+            "exit_reason": "stop_loss",
+            "latest_monitor_should_close": True,
+            "latest_close_order_status": "canceled",
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="short-exit",
+        symbol=spread.short_symbol,
+        side=OrderSide.BUY,
+        status=OrderStatus.CANCELED,
+        limit_price=Decimal("1.63"),
+    )
+    adapter.get_best_bid_ask.side_effect = lambda symbol, mode: {
+        "QQQ260619P470000.US": (Decimal("2.40"), Decimal("2.60")),
+        "QQQ260619P467000.US": (Decimal("1.00"), Decimal("1.10")),
+    }[symbol]
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="short-exit-replacement",
+            symbol=spread.short_symbol,
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.60"),
+        ),
+        build_option_order(
+            order_id="long-exit",
+            symbol=spread.long_symbol,
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=None,
+        ),
+    ]
+
+    result = service.recover_close(
+        "spread-1",
+        RecoverBullPutCloseRequest(
+            external_account_id="LBPT10087357",
+            confirm_paper_order=True,
+            max_debit=Decimal("3.00"),
+            actor="operator-a",
+            note="manual stop-loss recovery",
+        ),
+    )
+
+    assert result.status == SpreadStatus.CLOSED
+    assert result.short_exit_order_id == "short-exit-replacement"
+    assert result.long_exit_order_id == "long-exit"
+    assert order_service.submit_order.call_count == 2
+    actions = [call_args.args[0].action for call_args in audit_events.create_event.call_args_list]
+    assert actions == ["bull_put_recover_close_submitted", "bull_put_recover_close_completed"]
+
+
 def test_monitor_spread_keeps_open_position_without_exit_trigger() -> None:
     service, _, spreads, _ = build_service()
     spreads.get_spread.return_value = build_open_spread()
@@ -1730,6 +1959,8 @@ def test_monitor_spread_keeps_open_position_without_exit_trigger() -> None:
     assert result.spread.raw_payload["monitor"]["take_profit_debit"] == "0.6500"
     assert result.spread.raw_payload["monitor"]["stop_loss_debit"] == "2.6000"
     assert result.spread.raw_payload["monitor"]["should_close"] is False
+    assert result.spread.latest_monitor_should_close is False
+    assert result.spread.next_monitor_after == datetime(2026, 5, 23, 14, 50, tzinfo=timezone.utc)
 
 
 def test_monitor_spread_closes_position_on_take_profit() -> None:

@@ -8,11 +8,22 @@ import pytest
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeBrokerAdapter,
+    LongbridgeConfigurationError,
+    LongbridgeDependencyError,
     LongbridgeIntegrationError,
+)
+from stocks_tool.application.services.broker_gateway import (
+    BrokerGatewayFailureKind,
+    classify_broker_exception,
 )
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import ExecutionMode
 from stocks_tool.domain.models import AccountSnapshot, SecurityQuoteSnapshot
+from stocks_tool.ports.broker_gateway import (
+    BrokerAccountGateway,
+    BrokerMarketDataGateway,
+    BrokerOrderGateway,
+)
 
 
 def build_adapter(**overrides) -> LongbridgeBrokerAdapter:
@@ -29,6 +40,30 @@ def test_default_longbridge_timeout_allows_slow_background_loads() -> None:
     settings = Settings()
 
     assert settings.longbridge_request_timeout_seconds == 20
+
+
+def test_longbridge_adapter_satisfies_split_gateway_protocols() -> None:
+    adapter = build_adapter()
+
+    assert isinstance(adapter, BrokerMarketDataGateway)
+    assert isinstance(adapter, BrokerOrderGateway)
+    assert isinstance(adapter, BrokerAccountGateway)
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_broker_gateway_failure_classifier_maps_common_longbridge_errors() -> None:
+    assert classify_broker_exception(LongbridgeConfigurationError("missing token")).kind == (
+        BrokerGatewayFailureKind.CONFIGURATION
+    )
+    assert classify_broker_exception(LongbridgeDependencyError("sdk missing")).retryable is False
+
+    timeout = classify_broker_exception(LongbridgeIntegrationError("Longbridge action timed out after 20s."))
+    assert timeout.kind == BrokerGatewayFailureKind.TIMEOUT
+    assert timeout.retryable is True
+
+    rejection = classify_broker_exception(LongbridgeIntegrationError("Broker rejected the order."))
+    assert rejection.kind == BrokerGatewayFailureKind.BROKER_REJECTION
+    assert rejection.retryable is False
 
 
 def test_run_sdk_action_times_out_and_opens_circuit() -> None:
