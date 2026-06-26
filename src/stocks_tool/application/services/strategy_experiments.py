@@ -75,6 +75,7 @@ class StrategyExperimentService:
             allowed_outputs=["proposal", "review"],
             hard_limits=[
                 "Advisor output is advisory only.",
+                "Cannot submit, cancel, replace, or recover broker orders.",
                 "Opening, closing, and rolling require local policy checks.",
                 "Manual approval remains required before execution flows inspect a proposal.",
             ],
@@ -87,6 +88,7 @@ class StrategyExperimentService:
             allowed_outputs=["review"],
             hard_limits=[
                 "No direct order placement.",
+                "Cannot submit, cancel, replace, or recover broker orders.",
                 "Auto-execute posture must remain visible in operator controls.",
                 "Reviews must keep premium and daily trade caps explicit.",
             ],

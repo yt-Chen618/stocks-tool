@@ -9,6 +9,9 @@ build/
 *.pyo
 *.pyd
 .env
+debug.log
+.vscode/PythonImportHelper-v2-Completion.json
 artifacts/
+output/*.log
 output/playwright/
 .playwright-cli/

@@ -67,5 +67,6 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert '/static/lifecycle-warning.js?v=' in response.text
     assert '/static/api-client.js?v=' in response.text
     assert '/static/formatters.js?v=' in response.text
+    assert '/static/i18n.js?v=' in response.text
     assert '/static/state.js?v=' in response.text
     assert '/static/app.js?v=' in response.text

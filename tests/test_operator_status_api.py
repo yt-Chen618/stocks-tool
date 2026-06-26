@@ -30,6 +30,7 @@ from stocks_tool.domain.models import (
     SchedulerJobSummary,
     SchedulerJobRun,
     SchedulerStatusSnapshot,
+    SchedulerTaskState,
     StrategyAuditEvent,
     StrategyAuditSummary,
     StrategyAuditSummaryGroup,
@@ -211,6 +212,61 @@ def test_scheduler_job_summaries_group_recent_runs_by_job_and_account() -> None:
     assert summaries[0].recent_problem_count == 1
     assert summaries[0].last_problem_at == datetime(2026, 6, 15, 14, 45, tzinfo=timezone.utc)
     assert summaries[0].next_attempt_at == datetime(2026, 6, 15, 15, 0, tzinfo=timezone.utc)
+
+
+def test_scheduler_job_summaries_overlay_durable_task_state_lease() -> None:
+    runs = [
+        SchedulerJobRun(
+            job_key="orders-sync",
+            job_label="order sync",
+            external_account_id="LBPT10087357",
+            status=SchedulerJobRunStatus.SUCCEEDED,
+            started_at=NOW,
+            completed_at=NOW,
+        )
+    ]
+    states = [
+        SchedulerTaskState(
+            external_account_id="LBPT10087357",
+            job_key="orders-sync",
+            job_label="order sync",
+            last_status=SchedulerJobRunStatus.SUCCEEDED,
+            last_started_at=NOW,
+            last_completed_at=NOW,
+            lease_owner="worker-1",
+            lease_acquired_at=NOW,
+            lease_expires_at=datetime(2026, 6, 15, 14, 35, tzinfo=timezone.utc),
+        )
+    ]
+
+    summaries = scheduler_job_summaries(runs, states, now=NOW)
+
+    assert summaries[0].lease_status == "active"
+    assert summaries[0].due_status == "lease_active"
+    assert summaries[0].next_attempt_source == "lease"
+
+
+def test_scheduler_job_summaries_use_state_without_recent_run() -> None:
+    states = [
+        SchedulerTaskState(
+            external_account_id="LBPT10087357",
+            job_key="orders-sync",
+            job_label="order sync",
+            last_status=SchedulerJobRunStatus.BACKOFF,
+            last_started_at=NOW,
+            next_attempt_at=datetime(2026, 6, 15, 14, 45, tzinfo=timezone.utc),
+            backoff_seconds=900,
+            consecutive_failures=3,
+            detail="Broker timeout.",
+        )
+    ]
+
+    summaries = scheduler_job_summaries([], states, now=NOW)
+
+    assert summaries[0].job_key == "orders-sync"
+    assert summaries[0].due_status == "backoff"
+    assert summaries[0].next_attempt_source == "backoff"
+    assert summaries[0].consecutive_failures == 3
 
 
 def test_scheduler_job_summaries_report_failure_and_recovered_postures() -> None:
@@ -543,12 +599,63 @@ def test_operator_status_service_prefers_durable_audit_events_when_deduping() ->
 
 
 def test_operator_reason_code_catalog_covers_v3_codes() -> None:
-    assert OperatorStatusService.reason_code_detail("scheduler_backoff")
-    assert OperatorStatusService.reason_code_detail("manual_pause")
-    assert OperatorStatusService.reason_code_detail("kill_switch")
-    assert OperatorStatusService.reason_code_detail("advisor_pending_record")
-    assert OperatorStatusService.reason_code_detail("manual_action_required")
-    assert OperatorStatusService.reason_code_detail("operator_audit_summary_unavailable")
+    emitted_codes = {
+        "paper_first_controls_ok",
+        "live_boundary_not_blocked",
+        "scheduler_no_observations",
+        "scheduler_disabled",
+        "scheduler_backoff",
+        "scheduler_failed",
+        "scheduler_degraded",
+        "scheduler_recent_runs_healthy",
+        "advisor_read_only",
+        "advisor_direct_execution_enabled",
+        "scheduler_enabled",
+        "kill_switch",
+        "manual_pause",
+        "bull_put_auto_entry_disabled",
+        "bull_put_runtime_ready",
+        "bull_put_runtime_missing",
+        "zero_dte_auto_execute_disabled",
+        "zero_dte_auto_execute_armed",
+        "zero_dte_runtime_missing",
+        "bull_put_spreads_unavailable",
+        "manual_action_required",
+        "no_manual_action_required",
+        "operator_audit_summary_available",
+        "operator_audit_summary_unavailable",
+        "advisor_pending_record",
+        "degraded_broker",
+    }
+    missing = [code for code in sorted(emitted_codes) if not OperatorStatusService.reason_code_detail(code)]
+    assert missing == []
+
+
+def test_operator_status_checks_include_reason_details() -> None:
+    checks = []
+
+    OperatorStatusService._add_check(
+        checks,
+        name="scheduler_recent_runs",
+        status="warn",
+        detail="Backoff active.",
+        reason_code="scheduler_backoff",
+        severity="warning",
+    )
+
+    assert checks[0].reason_code == "scheduler_backoff"
+    assert checks[0].reason_detail == OperatorStatusService.reason_code_detail("scheduler_backoff")
+
+
+def test_ops_reason_codes_route_returns_catalog() -> None:
+    client = TestClient(app)
+
+    response = client.get("/ops/reason-codes")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scheduler_backoff"] == OperatorStatusService.reason_code_detail("scheduler_backoff")
+    assert body["advisor_read_only"] == OperatorStatusService.reason_code_detail("advisor_read_only")
 
 
 def test_ops_audit_summary_route_returns_grouped_summary() -> None:

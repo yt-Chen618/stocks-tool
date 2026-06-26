@@ -42,6 +42,10 @@ MOCK_SCENARIOS = {
     "recover-eligible",
     "recover-rejected",
     "recover-already-working",
+    "ledger-mismatch",
+    "repair-available",
+    "quote-cache-fallback",
+    "scheduler-lease-active",
 }
 
 
@@ -731,6 +735,11 @@ class MockDashboardState:
                 spread["raw_payload"] = raw_payload
                 spread["latest_close_order_status"] = "submitted"
                 spread["last_synced_at"] = "2026-05-21T02:14:54Z"
+        elif self.scenario in {"ledger-mismatch", "repair-available", "quote-cache-fallback", "scheduler-lease-active"}:
+            self.runtime["auto_entry_enabled"] = False
+            if self.scenario == "quote-cache-fallback":
+                self.account["account_sync_status"] = "success"
+                self.account["orders_sync_status"] = "success"
 
     def _clear_manual_action_seed(self) -> None:
         for spread in self.spreads:
@@ -879,27 +888,160 @@ class MockDashboardState:
             "groups": sorted(groups.values(), key=lambda item: item["latest_emitted_at"], reverse=True),
         }
 
+    def consistency_summary(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: str = "paper",
+        strategy: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        generated_at = iso_now()
+        checks = [
+            {
+                "id": "zero_dte_lottery_v1:zero_dte_manual_scan_ledger_clean",
+                "checked_at": generated_at,
+                "external_account_id": self.account_id,
+                "mode": mode,
+                "strategy": "zero_dte_lottery_v1",
+                "status": "pass",
+                "reason_code": "zero_dte_manual_scan_ledger_clean",
+                "summary": "No zero-DTE manual-scan paper order requires local ledger repair.",
+                "detail": None,
+                "repair_available": False,
+                "repair_id": None,
+                "related_order_ids": [],
+                "related_run_ids": [],
+                "related_signal_ids": [],
+                "related_proposal_ids": [],
+                "related_spread_ids": [],
+                "recommended_action": "No operator action required.",
+                "payload": {},
+            },
+            {
+                "id": "covered_call_v1:covered_call_order_linkage_clean",
+                "checked_at": generated_at,
+                "external_account_id": self.account_id,
+                "mode": mode,
+                "strategy": "covered_call_v1",
+                "status": "pass",
+                "reason_code": "covered_call_order_linkage_clean",
+                "summary": "Covered-call executed proposals have observable order linkage.",
+                "detail": None,
+                "repair_available": False,
+                "repair_id": None,
+                "related_order_ids": [],
+                "related_run_ids": [],
+                "related_signal_ids": [],
+                "related_proposal_ids": [],
+                "related_spread_ids": [],
+                "recommended_action": "No operator action required.",
+                "payload": {},
+            },
+            {
+                "id": "paper_bull_put_v1:bull_put_lifecycle_warning_clean",
+                "checked_at": generated_at,
+                "external_account_id": self.account_id,
+                "mode": mode,
+                "strategy": "paper_bull_put_v1",
+                "status": "pass",
+                "reason_code": "bull_put_lifecycle_warning_clean",
+                "summary": "Bull put close-order lifecycle warnings are consistent with linked order state.",
+                "detail": None,
+                "repair_available": False,
+                "repair_id": None,
+                "related_order_ids": [],
+                "related_run_ids": [],
+                "related_signal_ids": [],
+                "related_proposal_ids": [],
+                "related_spread_ids": [],
+                "recommended_action": "No operator action required.",
+                "payload": {},
+            },
+        ]
+        if self.scenario == "ledger-mismatch":
+            checks[1].update(
+                {
+                    "status": "warn",
+                    "reason_code": "covered_call_order_linkage_missing",
+                    "summary": "Covered-call proposal mock-proposal-0001 is executed but has no local order linkage.",
+                    "detail": "Mock ledger mismatch for operator console regression.",
+                    "related_proposal_ids": ["mock-proposal-0001"],
+                    "recommended_action": "Inspect covered-call activity and related strategy runs.",
+                }
+            )
+        elif self.scenario == "repair-available":
+            checks[0].update(
+                {
+                    "status": "fail",
+                    "reason_code": "zero_dte_strategy_recording_missing",
+                    "summary": "Zero-DTE manual-scan paper order mock-zero-order is missing local run/signal evidence.",
+                    "detail": "Mock repair-available scenario; repair remains guarded and local-only.",
+                    "repair_available": True,
+                    "repair_id": "zero-dte-ledger:mock-zero-order",
+                    "related_order_ids": ["mock-zero-order"],
+                    "recommended_action": "Run the guarded local repair only after operator confirmation.",
+                    "payload": {"missing": ["run", "signal"]},
+                }
+            )
+        filtered = [check for check in checks if strategy is None or check["strategy"] == strategy][:limit]
+        fail_count = len([check for check in filtered if check["status"] == "fail"])
+        warn_count = len([check for check in filtered if check["status"] == "warn"])
+        return {
+            "generated_at": generated_at,
+            "external_account_id": external_account_id or self.account_id,
+            "mode": mode,
+            "strategy": strategy,
+            "limit": limit,
+            "status": "fail" if fail_count else "warn" if warn_count else "pass",
+            "check_count": len(filtered),
+            "pass_count": len([check for check in filtered if check["status"] == "pass"]),
+            "warn_count": warn_count,
+            "fail_count": fail_count,
+            "repair_available_count": len([check for check in filtered if check.get("repair_available")]),
+            "checks": deepcopy(filtered),
+        }
+
     def operator_status_snapshot(self) -> dict[str, Any]:
         lifecycle_warnings = self.lifecycle_warnings()
         audit_events = self.audit_events()
         warning_count = sum(1 for event in audit_events if event.get("warning_code"))
         scheduler_backoff = self.scenario == "scheduler-backoff"
+        scheduler_lease_active = self.scenario == "scheduler-lease-active"
         degraded_broker = self.scenario == "degraded-broker"
         advisor_pending = self.scenario == "advisor-pending-record"
+        quote_cache_fallback = self.scenario == "quote-cache-fallback"
+        consistency = self.consistency_summary(external_account_id=self.account_id, mode="paper")
+        consistency_problem = consistency["status"] in {"warn", "fail"}
         status_value = (
             "fail"
-            if lifecycle_warnings
+            if lifecycle_warnings or consistency["status"] == "fail"
             else "warn"
-            if scheduler_backoff or degraded_broker or advisor_pending or self.runtime.get("manual_pause") or self.runtime.get("auto_entry_enabled")
+            if scheduler_backoff
+            or scheduler_lease_active
+            or degraded_broker
+            or advisor_pending
+            or quote_cache_fallback
+            or consistency_problem
+            or self.runtime.get("manual_pause")
+            or self.runtime.get("auto_entry_enabled")
             else "pass"
         )
         reason = (
             f"{len(lifecycle_warnings)} strategy lifecycle warning(s) require operator review."
             if lifecycle_warnings
+            else "A guarded local ledger repair is available in the mock scenario."
+            if consistency.get("repair_available_count")
+            else "Local ledger consistency warning is active in the mock scenario."
+            if consistency_problem
             else "Scheduler backoff is active for mock order reconciliation."
             if scheduler_backoff
+            else "Scheduler lease is active for mock order reconciliation."
+            if scheduler_lease_active
             else "Broker profile is degraded in the mock scenario."
             if degraded_broker
+            else "Read-only quote cache fallback is active for the mock scenario."
+            if quote_cache_fallback
             else "Advisor output is pending explicit Record Output."
             if advisor_pending
             else "Manual pause is active for the paper mandate."
@@ -908,7 +1050,50 @@ class MockDashboardState:
             if self.runtime.get("auto_entry_enabled")
             else "All operator posture checks passed."
         )
-        scheduler_summary = self._scheduler_summary(backoff=scheduler_backoff)
+        scheduler_summary = self._scheduler_summary(backoff=scheduler_backoff, lease_active=scheduler_lease_active)
+        checks = [
+            {
+                "name": "scheduler_recent_runs",
+                "status": "warn" if scheduler_backoff else "pass",
+                "detail": scheduler_summary["status_detail"],
+                "reason_code": "scheduler_backoff" if scheduler_backoff else "scheduler_recent_runs_healthy",
+                "severity": "warning" if scheduler_backoff else "info",
+            },
+            {
+                "name": "lifecycle_warnings",
+                "status": "fail" if lifecycle_warnings else "pass",
+                "detail": reason,
+                "reason_code": "manual_action_required" if lifecycle_warnings else "no_manual_action_required",
+                "severity": "critical" if lifecycle_warnings else "info",
+            },
+            {
+                "name": "ledger_consistency",
+                "status": consistency["status"],
+                "detail": "Local consistency report is available.",
+                "reason_code": (
+                    "local_repair_available"
+                    if consistency.get("repair_available_count")
+                    else "consistency_report_warn"
+                    if consistency["status"] == "warn"
+                    else "consistency_report_clean"
+                ),
+                "severity": "critical"
+                if consistency["status"] == "fail"
+                else "warning"
+                if consistency["status"] == "warn"
+                else "info",
+            },
+        ]
+        if quote_cache_fallback:
+            checks.append(
+                {
+                    "name": "market_data",
+                    "status": "warn",
+                    "detail": "Read-only quote cache fallback is active; order submission must refresh live data.",
+                    "reason_code": "quote_cache_fallback",
+                    "severity": "warning",
+                }
+            )
         return {
             "external_account_id": self.account_id,
             "mode": "paper",
@@ -916,22 +1101,7 @@ class MockDashboardState:
             "status": status_value,
             "ready_for_unattended": status_value != "fail",
             "operator_posture_reason": reason,
-            "checks": [
-                {
-                    "name": "scheduler_recent_runs",
-                    "status": "warn" if scheduler_backoff else "pass",
-                    "detail": scheduler_summary["status_detail"],
-                    "reason_code": "scheduler_backoff" if scheduler_backoff else "scheduler_recent_runs_healthy",
-                    "severity": "warning" if scheduler_backoff else "info",
-                },
-                {
-                    "name": "lifecycle_warnings",
-                    "status": "fail" if lifecycle_warnings else "pass",
-                    "detail": reason,
-                    "reason_code": "manual_action_required" if lifecycle_warnings else "no_manual_action_required",
-                    "severity": "critical" if lifecycle_warnings else "info",
-                },
-            ],
+            "checks": checks,
             "controls": {
                 "external_account_id": self.account_id,
                 "execution_mode": "paper",
@@ -956,6 +1126,11 @@ class MockDashboardState:
                     "manual_action_warning": warning_count,
                 },
             },
+            "consistency_summary": consistency,
+            "primary_blocker": next((check["reason_code"] for check in checks if check["status"] == "fail"), None)
+            or next((check["reason_code"] for check in checks if check["status"] == "warn"), None),
+            "local_repair_available": bool(consistency.get("repair_available_count")),
+            "latest_evidence_at": iso_now(),
             "bull_put_runtime": self._runtime_with_computed_fields(),
             "zero_dte_lottery_runtime": self.get_zero_dte_lottery_runtime(self.account_id),
             "active_bull_put_spread_count": len(
@@ -967,7 +1142,7 @@ class MockDashboardState:
             "recent_scheduler_summaries": [scheduler_summary],
         }
 
-    def _scheduler_summary(self, *, backoff: bool = False) -> dict[str, Any]:
+    def _scheduler_summary(self, *, backoff: bool = False, lease_active: bool = False) -> dict[str, Any]:
         if backoff:
             return {
                 "job_key": "orders-sync",
@@ -987,6 +1162,32 @@ class MockDashboardState:
                 "last_problem_at": "2026-05-21T02:14:54Z",
                 "recent_run_count": 2,
                 "recent_problem_count": 2,
+                "lease_status": None,
+                "lease_expires_at": None,
+                "next_attempt_source": "backoff",
+            }
+        if lease_active:
+            return {
+                "job_key": "orders-sync",
+                "job_label": "order reconciliation",
+                "external_account_id": self.account_id,
+                "posture": "warn",
+                "due_status": "lease_active",
+                "status_detail": "Single-flight lease is active for mock order reconciliation.",
+                "last_status": "succeeded",
+                "last_started_at": "2026-05-21T02:14:54Z",
+                "last_completed_at": "2026-05-21T02:14:55Z",
+                "next_attempt_at": "2026-05-21T02:19:55Z",
+                "backoff_seconds": None,
+                "consecutive_failures": 0,
+                "error_message": None,
+                "detail": "Mock scheduler lease evidence.",
+                "last_problem_at": None,
+                "recent_run_count": 1,
+                "recent_problem_count": 0,
+                "lease_status": "active",
+                "lease_expires_at": "2026-05-21T02:19:55Z",
+                "next_attempt_source": "lease",
             }
         return {
             "job_key": "bull-put-monitor",
@@ -1006,6 +1207,9 @@ class MockDashboardState:
             "last_problem_at": None,
             "recent_run_count": 1,
             "recent_problem_count": 0,
+            "lease_status": None,
+            "lease_expires_at": None,
+            "next_attempt_source": "schedule",
         }
 
     def _build_order(
@@ -1925,6 +2129,16 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
     app.include_router(ui.router)
 
+    @app.get("/health")
+    def health() -> dict[str, Any]:
+        return {
+            "status": "ok",
+            "app": "Mock Stocks Tool API",
+            "environment": "mock",
+            "execution_mode": "paper",
+            "live_trading_enabled": False,
+        }
+
     @app.get("/broker-accounts")
     def broker_accounts() -> list[dict[str, Any]]:
         return [deepcopy(state.account)]
@@ -1997,6 +2211,20 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     ) -> dict[str, Any]:
         _ = since
         return state.audit_summary(external_account_id=external_account_id, mode=mode, limit=limit)
+
+    @app.get("/ops/consistency")
+    def ops_consistency(
+        external_account_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+        strategy: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> dict[str, Any]:
+        return state.consistency_summary(
+            external_account_id=external_account_id,
+            mode=mode,
+            strategy=strategy,
+            limit=limit,
+        )
 
     @app.get("/strategies/pre-open-risk")
     def pre_open_risk(include_option_overlays: bool = Query(default=False)) -> dict[str, Any]:

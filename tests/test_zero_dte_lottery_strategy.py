@@ -408,6 +408,30 @@ def test_execute_requires_explicit_paper_order_confirmation() -> None:
         raise AssertionError("Expected unconfirmed zero-DTE lottery execution to be rejected.")
 
 
+def test_execute_rejects_manual_limit_price_above_premium_cap() -> None:
+    order_service = FakeOrderService()
+    service = build_service(order_service=order_service)
+
+    try:
+        service.execute(
+            ExecuteZeroDteLotteryRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                direction="call",
+                mode=ExecutionMode.PAPER,
+                as_of=NOW,
+                limit_price=Decimal("1.51"),
+                confirm_paper_order=True,
+            )
+        )
+    except ValueError as exc:
+        assert "$150 premium cap" in str(exc)
+    else:
+        raise AssertionError("Expected manual zero-DTE lottery limit above the premium cap to be rejected.")
+
+    assert order_service.submitted_request is None
+
+
 def test_execute_rejects_ineligible_preview() -> None:
     adapter = FakeLongbridgeAdapter(
         quote=build_underlying_quote(last_done=Decimal("735.10"), prev_close=Decimal("735")),

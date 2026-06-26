@@ -25,6 +25,10 @@ MOCK_SCENARIOS = (
     "recover-eligible",
     "recover-rejected",
     "recover-already-working",
+    "ledger-mismatch",
+    "repair-available",
+    "quote-cache-fallback",
+    "scheduler-lease-active",
 )
 
 
@@ -71,6 +75,8 @@ def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
 
@@ -127,6 +133,8 @@ def resolve_playwright_core() -> str:
         check=True,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout.strip()
     candidates = [
         Path(npm_root) / "@playwright" / "cli" / "node_modules" / "playwright-core",
@@ -158,6 +166,8 @@ def run_browser_flow(base_url: str) -> dict[str, Any]:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env={**os.environ},
     )
     if completed.returncode != 0:
@@ -176,6 +186,9 @@ def run_scenario_assertions(client: httpx.Client, *, scenario: str) -> dict[str,
     audit_events = require_ok(client.get("/ops/audit", params={"external_account_id": "LBPT10087357"}))
     audit_summary = require_ok(
         client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"})
+    )
+    consistency = require_ok(
+        client.get("/ops/consistency", params={"external_account_id": "LBPT10087357", "mode": "paper"})
     )
     spreads = require_ok(client.get("/strategies/bull-put/spreads", params={"external_account_id": "LBPT10087357"}))
     recovery_eligibility = (
@@ -206,6 +219,16 @@ def run_scenario_assertions(client: httpx.Client, *, scenario: str) -> dict[str,
         "audit_actions": [event.get("action") for event in audit_events],
         "audit_warning_codes": [event.get("warning_code") for event in audit_events if event.get("warning_code")],
         "audit_summary_groups": len(audit_summary.get("groups") or []) if isinstance(audit_summary, dict) else None,
+        "consistency_status": consistency.get("status") if isinstance(consistency, dict) else None,
+        "consistency_reason_codes": [
+            check.get("reason_code")
+            for check in consistency.get("checks", [])
+            if isinstance(check, dict) and check.get("reason_code")
+        ]
+        if isinstance(consistency, dict)
+        else [],
+        "local_repair_available": operator_status.get("local_repair_available"),
+        "primary_blocker": operator_status.get("primary_blocker"),
         "recover_close_eligibility": recovery_eligibility,
         "advisor_recorded": advisor_run_cards[0].get("recorded") if advisor_run_cards else None,
     }
@@ -236,6 +259,22 @@ def run_scenario_assertions(client: httpx.Client, *, scenario: str) -> dict[str,
         assert recovery_eligibility and recovery_eligibility["eligible"] is False
         assert recovery_eligibility["working_replacement_order_id"] == "mock-order-0001"
         assert "working_replacement_exists" in recovery_eligibility["reasons"]
+    elif scenario == "ledger-mismatch":
+        assert evidence["consistency_status"] == "warn"
+        assert "covered_call_order_linkage_missing" in evidence["consistency_reason_codes"]
+        assert "consistency_report_warn" in evidence["reason_codes"]
+    elif scenario == "repair-available":
+        assert evidence["consistency_status"] == "fail"
+        assert evidence["local_repair_available"] is True
+        assert evidence["primary_blocker"] == "local_repair_available"
+        assert "zero_dte_strategy_recording_missing" in evidence["consistency_reason_codes"]
+    elif scenario == "quote-cache-fallback":
+        assert operator_status.get("status") == "warn"
+        assert "quote_cache_fallback" in evidence["reason_codes"]
+    elif scenario == "scheduler-lease-active":
+        summaries = operator_status.get("recent_scheduler_summaries") or []
+        assert summaries and summaries[0]["lease_status"] == "active"
+        assert summaries[0]["next_attempt_source"] == "lease"
     else:
         assert operator_status["paper_mandate"]["external_account_id"] == "LBPT10087357"
         assert operator_status["audit_summary"]["event_count"] >= 1

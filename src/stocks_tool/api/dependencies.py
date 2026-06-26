@@ -32,6 +32,7 @@ from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.operator_status import OperatorStatusService
 from stocks_tool.application.services.strategy_advisor_intake import (
     StrategyAdvisorIntakeService,
@@ -50,6 +51,7 @@ from stocks_tool.ports.repository import (
     OrderRepository,
     PreOpenAssessmentRunRepository,
     SchedulerJobRunRepository,
+    SchedulerTaskStateRepository,
     StrategyAuditEventRepository,
     StrategyExperimentRepository,
     TradePlanRepository,
@@ -208,6 +210,12 @@ def get_scheduler_job_run_repository(
     return SQLAlchemySchedulerJobRunRepository(session)
 
 
+def get_scheduler_task_state_repository(
+    session: Session = Depends(get_db_session),
+) -> SchedulerTaskStateRepository:
+    return SQLAlchemySchedulerJobRunRepository(session)
+
+
 def get_strategy_audit_event_repository(
     session: Session = Depends(get_db_session),
 ) -> StrategyAuditEventRepository:
@@ -362,12 +370,28 @@ def get_bull_put_strategy_service(
     )
 
 
+def get_operator_consistency_service(
+    strategy_experiments: StrategyExperimentService = Depends(get_strategy_experiment_service),
+    bull_put_strategy: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    order_service: OrderService = Depends(get_order_service),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
+) -> OperatorConsistencyService:
+    return OperatorConsistencyService(
+        strategy_experiments=strategy_experiments,
+        bull_put_strategy=bull_put_strategy,
+        order_service=order_service,
+        audit_events=audit_events,
+    )
+
+
 def get_operator_status_service(
     strategy_experiments: StrategyExperimentService = Depends(get_strategy_experiment_service),
     bull_put_strategy: BullPutStrategyService = Depends(get_bull_put_strategy_service),
     zero_dte_lottery_strategy: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
     order_service: OrderService = Depends(get_order_service),
+    consistency_service: OperatorConsistencyService = Depends(get_operator_consistency_service),
     scheduler_job_runs: SchedulerJobRunRepository = Depends(get_scheduler_job_run_repository),
+    scheduler_task_states: SchedulerTaskStateRepository = Depends(get_scheduler_task_state_repository),
     audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
     adapter: BrokerIntegrationGateway = Depends(get_longbridge_adapter),
 ) -> OperatorStatusService:
@@ -376,7 +400,9 @@ def get_operator_status_service(
         bull_put_strategy=bull_put_strategy,
         zero_dte_lottery_strategy=zero_dte_lottery_strategy,
         order_service=order_service,
+        consistency_service=consistency_service,
         scheduler_job_runs=scheduler_job_runs,
+        scheduler_task_states=scheduler_task_states,
         audit_events=audit_events,
         broker_adapter=adapter,
     )

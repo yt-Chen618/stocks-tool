@@ -4,15 +4,22 @@ from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
-from stocks_tool.api.dependencies import get_bull_put_strategy_service, get_order_service
+from stocks_tool.api.dependencies import (
+    get_bull_put_strategy_service,
+    get_order_service,
+    get_zero_dte_lottery_strategy_service,
+)
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    OptionRight,
     OrderSide,
     OrderStatus,
     OrderType,
     SpreadStatus,
+    StrategyRunStatus,
+    StrategySignalType,
     TimeInForce,
 )
 from stocks_tool.domain.models import (
@@ -36,6 +43,13 @@ from stocks_tool.domain.models import (
     BullPutStrategyRuntimeState,
     BullPutStrategyScanRunResult,
     Order,
+    OptionContractRef,
+    StrategyRun,
+    StrategySignal,
+    ZeroDteLotteryCandidate,
+    ZeroDteLotteryExecutionResult,
+    ZeroDteLotteryPreviewResult,
+    ZeroDteLotteryScanResult,
 )
 from stocks_tool.main import app
 
@@ -771,6 +785,128 @@ def test_run_bull_put_runtime_scan_returns_scan_result() -> None:
     body = response.json()
     assert body["executed"] is True
     assert body["executed_spread"]["id"] == "spread-1"
+
+
+def test_run_zero_dte_lottery_scan_route_returns_executed_json() -> None:
+    service = Mock()
+    evaluated_at = datetime(2026, 6, 16, 15, 59, tzinfo=timezone.utc)
+    candidate = ZeroDteLotteryCandidate(
+        underlying_symbol="QQQ.US",
+        direction=OptionRight.PUT,
+        expiration_date=evaluated_at.date(),
+        days_to_expiration=0,
+        contracts=1,
+        option_symbol="QQQ260616P731000.US",
+        strike=Decimal("731"),
+        option_bid=Decimal("0.70"),
+        option_ask=Decimal("0.74"),
+        option_mid=Decimal("0.72"),
+        premium_at_ask=Decimal("74.00"),
+        max_loss=Decimal("74.00"),
+        underlying_price=Decimal("732.00"),
+        delta=Decimal("-0.22"),
+        open_interest=500,
+        volume=200,
+        quote_timestamp=evaluated_at,
+    )
+    preview = ZeroDteLotteryPreviewResult(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        evaluated_at=evaluated_at,
+        symbol="QQQ.US",
+        direction=OptionRight.PUT,
+        selected_expiration_date=evaluated_at.date(),
+        days_to_expiration=0,
+        underlying_price=Decimal("732.00"),
+        underlying_change_pct=Decimal("-0.60"),
+        max_premium_per_trade=Decimal("150"),
+        eligible=True,
+        candidate=candidate,
+    )
+    order = Order(
+        id="zero-order-1",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-zero-order-1",
+        client_order_id="client-zero-order-1",
+        symbol="QQQ260616P731000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+        limit_price=Decimal("0.74"),
+        option_contract=OptionContractRef(
+            underlying_symbol="QQQ.US",
+            expiration_date=evaluated_at.date(),
+            strike=Decimal("731"),
+            right=OptionRight.PUT,
+        ),
+        raw_payload={"submission_request": {"remark": "zero_dte_lottery_v1:manual-scan"}},
+        submitted_at=evaluated_at,
+        created_at=evaluated_at,
+        updated_at=evaluated_at,
+    )
+    run = StrategyRun(
+        id="zero-run-1",
+        strategy_id="zero_dte_lottery_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        run_type="auto_scan",
+        status=StrategyRunStatus.EXECUTED,
+        symbol="QQQ.US",
+        order_id=order.id,
+        started_at=evaluated_at,
+        completed_at=evaluated_at,
+        summary="Zero-DTE lottery paper order submitted for QQQ260616P731000.US.",
+        metrics_payload=preview.model_dump(mode="json"),
+        created_at=evaluated_at,
+        updated_at=evaluated_at,
+    )
+    signal = StrategySignal(
+        id="zero-signal-1",
+        strategy_id="zero_dte_lottery_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        signal_type=StrategySignalType.EXECUTION,
+        symbol="QQQ.US",
+        run_id=run.id,
+        strength=Decimal("0.20"),
+        summary="Zero-DTE lottery paper order submitted for QQQ260616P731000.US.",
+        source="zero_dte_lottery_v1",
+        signal_payload=preview.model_dump(mode="json"),
+        emitted_at=evaluated_at,
+        created_at=evaluated_at,
+    )
+    service.run_scan.return_value = ZeroDteLotteryScanResult(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        scanned_at=evaluated_at,
+        executed=True,
+        preview=preview,
+        execution=ZeroDteLotteryExecutionResult(preview=preview, order=order),
+        run=run,
+        signal=signal,
+    )
+
+    app.dependency_overrides[get_zero_dte_lottery_strategy_service] = lambda: service
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/strategies/zero-dte-lottery/runtime/LBPT10087357/scan",
+            params={"symbol": "QQQ.US", "direction": "auto", "mode": "paper", "force": "true"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["executed"] is True
+    assert body["execution"]["order"]["id"] == "zero-order-1"
+    assert body["run"]["order_id"] == "zero-order-1"
+    assert body["signal"]["signal_type"] == "execution"
 
 
 def test_run_bull_put_runtime_review_returns_review_result() -> None:

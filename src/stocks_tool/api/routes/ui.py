@@ -21,6 +21,7 @@ def render_dashboard() -> HTMLResponse:
     lifecycle_warning_js_url = _asset_url("lifecycle-warning.js")
     api_client_js_url = _asset_url("api-client.js")
     formatters_js_url = _asset_url("formatters.js")
+    i18n_js_url = _asset_url("i18n.js")
     state_js_url = _asset_url("state.js")
     app_js_url = _asset_url("app.js")
     return HTMLResponse(
@@ -910,6 +911,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{lifecycle_warning_js_url}" defer></script>
                 <script src="{api_client_js_url}" defer></script>
                 <script src="{formatters_js_url}" defer></script>
+                <script src="{i18n_js_url}" defer></script>
                 <script src="{state_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>
               </body>

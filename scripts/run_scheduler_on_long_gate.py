@@ -119,6 +119,13 @@ def compact_report_payload(report: dict[str, Any]) -> dict[str, Any]:
             "eligible_symbol_count": len(eligible_symbols) if isinstance(eligible_symbols, list) else 0,
             "preview_count": len(previews) if isinstance(previews, list) else 0,
         }
+    if workflow == "bull-put-recovery-drill":
+        return {
+            "inspected_spread_count": payload.get("inspected_spread_count"),
+            "eligible_count": payload.get("eligible_count"),
+            "blocked_count": payload.get("blocked_count"),
+            "post_endpoint_called": payload.get("post_endpoint_called"),
+        }
     return {"payload_keys": sorted(payload.keys())}
 
 
@@ -182,6 +189,34 @@ def scheduler_backoff_reason(unattended_report: dict[str, Any]) -> str | None:
     return None
 
 
+def scheduler_summaries(unattended_report: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = unattended_report.get("payload") if isinstance(unattended_report.get("payload"), dict) else {}
+    operator_status = payload.get("operator_status") if isinstance(payload, dict) else {}
+    summaries = operator_status.get("recent_scheduler_summaries") if isinstance(operator_status, dict) else None
+    if isinstance(summaries, list):
+        return [summary for summary in summaries if isinstance(summary, dict)]
+    loop_summary = payload.get("strategy_loop_summary") if isinstance(payload, dict) else {}
+    summaries = loop_summary.get("recent_scheduler_summaries") if isinstance(loop_summary, dict) else None
+    if isinstance(summaries, list):
+        return [summary for summary in summaries if isinstance(summary, dict)]
+    return []
+
+
+def scheduler_lease_evidence(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "job_key": summary.get("job_key"),
+            "external_account_id": summary.get("external_account_id"),
+            "lease_status": summary.get("lease_status"),
+            "lease_expires_at": summary.get("lease_expires_at"),
+            "next_attempt_source": summary.get("next_attempt_source"),
+            "due_status": summary.get("due_status"),
+        }
+        for summary in summaries
+        if summary.get("lease_status") or summary.get("next_attempt_source") in {"lease", "backoff"}
+    ]
+
+
 def main() -> None:
     args = parse_args()
     evidence_dir = Path(args.evidence_dir)
@@ -221,6 +256,7 @@ def main() -> None:
         real_ui_path = evidence_dir / "real-ui-refresh.json"
         unattended_path = evidence_dir / "unattended-paper-status.json"
         bull_put_path = evidence_dir / "bull-put-real-paper.json"
+        recovery_drill_path = evidence_dir / "bull-put-recovery-drill.json"
         real_ui_child, real_ui_report = run_child_gate(
             name="real-ui-refresh",
             command=[
@@ -276,10 +312,29 @@ def main() -> None:
             timeout_seconds=args.child_timeout_seconds,
         )
         child_reports.append(bull_put_child)
+        recovery_drill_child, _recovery_drill_report = run_child_gate(
+            name="bull-put-recovery-drill",
+            command=[
+                sys.executable,
+                str(ROOT / "scripts" / "run_bull_put_recovery_drill.py"),
+                "--base-url",
+                base_url,
+                "--account-id",
+                args.account_id,
+                "--timeout-seconds",
+                str(args.http_timeout_seconds),
+                "--json-output",
+                str(recovery_drill_path),
+            ],
+            output_path=recovery_drill_path,
+            timeout_seconds=args.child_timeout_seconds,
+        )
+        child_reports.append(recovery_drill_child)
         real_ui_summary = ((real_ui_report.get("payload") or {}).get("summary") or {})
         dashboard_ready = real_ui_summary.get("dashboard_ready") or {}
         overlay_settled = real_ui_summary.get("overlay_settled") or {}
         unattended_summary = ((unattended_report.get("payload") or {}).get("strategy_loop_summary") or {})
+        scheduler_summary_payload = scheduler_summaries(unattended_report)
         event_loop_stall_detected = bool(
             dashboard_ready.get("within_target") is False
             or overlay_settled.get("within_target") is False
@@ -307,6 +362,8 @@ def main() -> None:
                     "operator_posture_status": unattended_summary.get("operator_posture_status"),
                     "operator_posture_reason": unattended_summary.get("operator_posture_reason"),
                     "scheduler_backoff_reason": scheduler_backoff_reason(unattended_report),
+                    "scheduler_summaries": scheduler_summary_payload,
+                    "scheduler_lease_evidence": scheduler_lease_evidence(scheduler_summary_payload),
                     "child_gates": child_reports,
                 },
             ),

@@ -122,6 +122,9 @@ This inventory groups public routes by bounded context. Paths are part of the co
 ## Operator
 
 - `GET /ops/unattended-status`
+- `GET /ops/reason-codes`
 - `GET /ops/scheduler`
+- `GET /ops/consistency`
+- `POST /ops/consistency/repairs/{repair_id}`
 - `GET /ops/audit`
 - `GET /ops/audit/summary`

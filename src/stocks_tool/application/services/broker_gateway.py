@@ -29,6 +29,15 @@ class BrokerGatewayFailure:
     retryable: bool
 
 
+BROKER_FAILURE_REASON_CODES = {
+    BrokerGatewayFailureKind.TIMEOUT: "market_data_unavailable",
+    BrokerGatewayFailureKind.CIRCUIT_OPEN: "market_data_unavailable",
+    BrokerGatewayFailureKind.RATE_LIMIT: "broker_rate_limited",
+    BrokerGatewayFailureKind.STALE_QUOTE: "market_data_unavailable",
+    BrokerGatewayFailureKind.TRANSIENT: "market_data_unavailable",
+}
+
+
 def classify_broker_exception(exc: Exception) -> BrokerGatewayFailure:
     message = str(exc)
     normalized = message.lower()
@@ -36,11 +45,11 @@ def classify_broker_exception(exc: Exception) -> BrokerGatewayFailure:
         return BrokerGatewayFailure(BrokerGatewayFailureKind.CONFIGURATION, message, retryable=False)
     if isinstance(exc, LongbridgeDependencyError):
         return BrokerGatewayFailure(BrokerGatewayFailureKind.DEPENDENCY, message, retryable=False)
-    if "circuit is open" in normalized:
+    if "circuit is open" in normalized or "skipping attempt" in normalized:
         return BrokerGatewayFailure(BrokerGatewayFailureKind.CIRCUIT_OPEN, message, retryable=True)
     if "timed out" in normalized or "timeout" in normalized:
         return BrokerGatewayFailure(BrokerGatewayFailureKind.TIMEOUT, message, retryable=True)
-    if "rate limit" in normalized or "too many requests" in normalized:
+    if "rate limit" in normalized or "too many requests" in normalized or "429" in normalized:
         return BrokerGatewayFailure(BrokerGatewayFailureKind.RATE_LIMIT, message, retryable=True)
     if "stale quote" in normalized or "quote is stale" in normalized:
         return BrokerGatewayFailure(BrokerGatewayFailureKind.STALE_QUOTE, message, retryable=True)
@@ -49,3 +58,7 @@ def classify_broker_exception(exc: Exception) -> BrokerGatewayFailure:
     if isinstance(exc, LongbridgeIntegrationError):
         return BrokerGatewayFailure(BrokerGatewayFailureKind.TRANSIENT, message, retryable=True)
     return BrokerGatewayFailure(BrokerGatewayFailureKind.UNKNOWN, message, retryable=False)
+
+
+def broker_failure_reason_code(failure: BrokerGatewayFailure) -> str | None:
+    return BROKER_FAILURE_REASON_CODES.get(failure.kind)

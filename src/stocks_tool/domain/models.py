@@ -982,6 +982,10 @@ class SecurityQuoteSnapshot(BaseModel):
     pre_market_quote: SessionQuote | None = None
     post_market_quote: SessionQuote | None = None
     overnight_quote: SessionQuote | None = None
+    data_quality: str = "live"
+    warning_code: str | None = None
+    warning_detail: str | None = None
+    cache_age_seconds: int | None = None
 
 
 class HistoricalPriceBar(BaseModel):
@@ -1627,6 +1631,7 @@ class OperatorStatusCheck(BaseModel):
     status: str
     detail: str
     reason_code: str | None = None
+    reason_detail: str | None = None
     severity: str | None = None
 
 
@@ -1659,6 +1664,27 @@ class SchedulerJobRun(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class SchedulerTaskState(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    job_key: str
+    job_label: str | None = None
+    external_account_id: str | None = None
+    last_run_id: str | None = None
+    last_status: SchedulerJobRunStatus | None = None
+    last_started_at: datetime | None = None
+    last_completed_at: datetime | None = None
+    next_attempt_at: datetime | None = None
+    backoff_seconds: int | None = None
+    consecutive_failures: int = 0
+    error_message: str | None = None
+    detail: str | None = None
+    lease_owner: str | None = None
+    lease_acquired_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class SchedulerJobSummary(BaseModel):
     job_key: str
     job_label: str | None = None
@@ -1677,6 +1703,9 @@ class SchedulerJobSummary(BaseModel):
     last_problem_at: datetime | None = None
     recent_run_count: int = 0
     recent_problem_count: int = 0
+    lease_status: str | None = None
+    lease_expires_at: datetime | None = None
+    next_attempt_source: str | None = None
 
 
 class SchedulerStatusSnapshot(BaseModel):
@@ -1730,6 +1759,62 @@ class StrategyAuditSummary(BaseModel):
     groups: list[StrategyAuditSummaryGroup] = Field(default_factory=list)
 
 
+class OperatorConsistencyCheck(BaseModel):
+    id: str
+    checked_at: datetime
+    external_account_id: str
+    mode: ExecutionMode
+    strategy: str | None = None
+    status: str
+    reason_code: str
+    summary: str
+    detail: str | None = None
+    repair_available: bool = False
+    repair_id: str | None = None
+    related_order_ids: list[str] = Field(default_factory=list)
+    related_run_ids: list[str] = Field(default_factory=list)
+    related_signal_ids: list[str] = Field(default_factory=list)
+    related_proposal_ids: list[str] = Field(default_factory=list)
+    related_spread_ids: list[str] = Field(default_factory=list)
+    recommended_action: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class OperatorConsistencySummary(BaseModel):
+    generated_at: datetime
+    external_account_id: str
+    mode: ExecutionMode
+    strategy: str | None = None
+    limit: int = 50
+    status: str
+    check_count: int
+    pass_count: int = 0
+    warn_count: int = 0
+    fail_count: int = 0
+    repair_available_count: int = 0
+    checks: list[OperatorConsistencyCheck] = Field(default_factory=list)
+
+
+class OperatorConsistencyRepairRequest(BaseModel):
+    external_account_id: str
+    mode: ExecutionMode = ExecutionMode.PAPER
+    confirm_local_repair: bool = False
+    actor: str = Field(min_length=1, max_length=64)
+    note: str = Field(min_length=1, max_length=500)
+
+
+class OperatorConsistencyRepairResult(BaseModel):
+    repair_id: str
+    repaired: bool
+    status: str
+    message: str
+    check: OperatorConsistencyCheck | None = None
+    created_run: StrategyRun | None = None
+    created_signal: StrategySignal | None = None
+    broker_order_submitted: bool = False
+    local_repair_executed: bool = False
+
+
 class CreateStrategyAuditEventRequest(BaseModel):
     id: str | None = None
     emitted_at: datetime | None = None
@@ -1777,6 +1862,10 @@ class OperatorStatusSnapshot(BaseModel):
     paper_mandate: PaperMandate | None = None
     audit_events: list[StrategyAuditEvent] = Field(default_factory=list)
     audit_summary: dict[str, Any] = Field(default_factory=dict)
+    consistency_summary: OperatorConsistencySummary | None = None
+    primary_blocker: str | None = None
+    local_repair_available: bool | None = None
+    latest_evidence_at: datetime | None = None
     bull_put_runtime: BullPutStrategyRuntimeState | None = None
     zero_dte_lottery_runtime: ZeroDteLotteryRuntimeState | None = None
     active_bull_put_spread_count: int = 0

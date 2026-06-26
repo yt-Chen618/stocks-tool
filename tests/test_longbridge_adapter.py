@@ -14,6 +14,7 @@ from stocks_tool.adapters.brokers.longbridge import (
 )
 from stocks_tool.application.services.broker_gateway import (
     BrokerGatewayFailureKind,
+    broker_failure_reason_code,
     classify_broker_exception,
 )
 from stocks_tool.core.config import Settings
@@ -60,6 +61,15 @@ def test_broker_gateway_failure_classifier_maps_common_longbridge_errors() -> No
     timeout = classify_broker_exception(LongbridgeIntegrationError("Longbridge action timed out after 20s."))
     assert timeout.kind == BrokerGatewayFailureKind.TIMEOUT
     assert timeout.retryable is True
+    assert broker_failure_reason_code(timeout) == "market_data_unavailable"
+
+    circuit = classify_broker_exception(LongbridgeIntegrationError("Skipping attempt to load quote for another 30s."))
+    assert circuit.kind == BrokerGatewayFailureKind.CIRCUIT_OPEN
+    assert broker_failure_reason_code(circuit) == "market_data_unavailable"
+
+    rate_limit = classify_broker_exception(LongbridgeIntegrationError("Longbridge API returned 429 too many requests."))
+    assert rate_limit.kind == BrokerGatewayFailureKind.RATE_LIMIT
+    assert broker_failure_reason_code(rate_limit) == "broker_rate_limited"
 
     rejection = classify_broker_exception(LongbridgeIntegrationError("Broker rejected the order."))
     assert rejection.kind == BrokerGatewayFailureKind.BROKER_REJECTION
@@ -147,7 +157,13 @@ def test_get_quote_uses_recent_cache_after_transient_failure() -> None:
     second = adapter.get_quote("SPY.US", ExecutionMode.PAPER)
 
     assert first == cached_quote
-    assert second == cached_quote
+    assert second.model_dump(exclude={"data_quality", "warning_code", "warning_detail", "cache_age_seconds"}) == (
+        cached_quote.model_dump(exclude={"data_quality", "warning_code", "warning_detail", "cache_age_seconds"})
+    )
+    assert second.data_quality == "cached"
+    assert second.warning_code == "quote_cache_fallback"
+    assert "timed out" in (second.warning_detail or "")
+    assert second.cache_age_seconds is not None
     adapter._executor.shutdown(wait=False, cancel_futures=True)
 
 

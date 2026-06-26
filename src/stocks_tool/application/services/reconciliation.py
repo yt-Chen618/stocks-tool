@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,9 +36,14 @@ from stocks_tool.domain.enums import (
     SpreadStatus,
     StrategyProposalStatus,
 )
-from stocks_tool.domain.models import CreateStrategyAuditEventRequest, ImportMarketEventsFromProviderRequest, SchedulerJobRun
+from stocks_tool.domain.models import (
+    CreateStrategyAuditEventRequest,
+    ImportMarketEventsFromProviderRequest,
+    SchedulerJobRun,
+    SchedulerTaskState,
+)
 from stocks_tool.ports.broker_gateway import BrokerGateway
-from stocks_tool.ports.repository import SchedulerJobRunRepository, StrategyAuditEventRepository
+from stocks_tool.ports.repository import SchedulerJobRunRepository, SchedulerTaskStateRepository, StrategyAuditEventRepository
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
     SQLAlchemyAccountSnapshotRepository,
 )
@@ -118,7 +124,9 @@ class ReconciliationCoordinator:
         self._last_covered_call_lifecycle_at: dict[str, datetime] = {}
         self._last_zero_dte_lottery_scan_at: dict[str, datetime] = {}
         self._scheduler_job_runs: SchedulerJobRunRepository | None = None
+        self._scheduler_task_states: SchedulerTaskStateRepository | None = None
         self._strategy_audit_events: StrategyAuditEventRepository | None = None
+        self._scheduler_lease_owner = f"pid-{os.getpid()}:{id(self)}"
 
     def run_once(self) -> None:
         with self.session_factory() as session:
@@ -130,7 +138,9 @@ class ReconciliationCoordinator:
             spreads = SQLAlchemyBullPutSpreadRepository(session)
             runtime_states = SQLAlchemyBullPutStrategyRuntimeRepository(session)
             pre_open_runs = SQLAlchemyPreOpenAssessmentRunRepository(session)
-            self._scheduler_job_runs = SQLAlchemySchedulerJobRunRepository(session)
+            scheduler_repository = SQLAlchemySchedulerJobRunRepository(session)
+            self._scheduler_job_runs = scheduler_repository
+            self._scheduler_task_states = scheduler_repository
             self._strategy_audit_events = SQLAlchemyStrategyAuditEventRepository(session)
             market_events = SQLAlchemyMarketEventRepository(session)
             experiments = SQLAlchemyStrategyExperimentRepository(session)
@@ -359,6 +369,7 @@ class ReconciliationCoordinator:
             now=now,
         ):
             state = self._automatic_task_backoffs.get((external_account_id, task_key))
+            persisted_state = self._get_task_state(external_account_id=external_account_id, task_key=task_key)
             self._record_scheduler_job_run(
                 external_account_id=external_account_id,
                 task_key=task_key,
@@ -366,9 +377,42 @@ class ReconciliationCoordinator:
                 status=SchedulerJobRunStatus.SKIPPED,
                 started_at=now,
                 completed_at=now,
-                next_attempt_at=state.next_attempt_at if state is not None else None,
-                consecutive_failures=state.consecutive_failures if state is not None else 0,
+                next_attempt_at=(
+                    state.next_attempt_at if state is not None else persisted_state.next_attempt_at if persisted_state else None
+                ),
+                consecutive_failures=(
+                    state.consecutive_failures
+                    if state is not None
+                    else persisted_state.consecutive_failures
+                    if persisted_state
+                    else 0
+                ),
                 detail="Skipped because task backoff is active.",
+            )
+            return
+        active_lease = self._try_acquire_task_lease(
+            external_account_id=external_account_id,
+            task_key=task_key,
+            task_label=task_label,
+            now=now,
+        )
+        if active_lease is not None:
+            self._record_scheduler_job_run(
+                external_account_id=external_account_id,
+                task_key=task_key,
+                task_label=task_label,
+                status=SchedulerJobRunStatus.SKIPPED,
+                started_at=now,
+                completed_at=now,
+                next_attempt_at=active_lease.lease_expires_at,
+                detail="Skipped because scheduler task lease is active.",
+                raw_payload={
+                    "lease_status": "active",
+                    "lease_expires_at": active_lease.lease_expires_at.isoformat()
+                    if active_lease.lease_expires_at
+                    else None,
+                },
+                update_task_state=False,
             )
             return
         try:
@@ -424,6 +468,11 @@ class ReconciliationCoordinator:
                 external_account_id,
             )
             return
+        finally:
+            self._release_task_lease(
+                external_account_id=external_account_id,
+                task_key=task_key,
+            )
         self._clear_task_backoff(
             external_account_id=external_account_id,
             task_key=task_key,
@@ -454,6 +503,7 @@ class ReconciliationCoordinator:
             now=now,
         ):
             state = self._automatic_task_backoffs.get((external_account_id, task_key))
+            persisted_state = self._get_task_state(external_account_id=external_account_id, task_key=task_key)
             self._record_scheduler_job_run(
                 external_account_id=external_account_id,
                 task_key=task_key,
@@ -461,11 +511,66 @@ class ReconciliationCoordinator:
                 status=SchedulerJobRunStatus.SKIPPED,
                 started_at=now,
                 completed_at=now,
-                next_attempt_at=state.next_attempt_at if state is not None else None,
-                consecutive_failures=state.consecutive_failures if state is not None else 0,
+                next_attempt_at=(
+                    state.next_attempt_at if state is not None else persisted_state.next_attempt_at if persisted_state else None
+                ),
+                consecutive_failures=(
+                    state.consecutive_failures
+                    if state is not None
+                    else persisted_state.consecutive_failures
+                    if persisted_state
+                    else 0
+                ),
                 detail="Skipped because task backoff is active.",
             )
             return
+        active_lease = self._try_acquire_task_lease(
+            external_account_id=external_account_id,
+            task_key=task_key,
+            task_label="bull put monitor",
+            now=now,
+        )
+        if active_lease is not None:
+            self._record_scheduler_job_run(
+                external_account_id=external_account_id,
+                task_key=task_key,
+                task_label="bull put monitor",
+                status=SchedulerJobRunStatus.SKIPPED,
+                started_at=now,
+                completed_at=now,
+                next_attempt_at=active_lease.lease_expires_at,
+                detail="Skipped because scheduler task lease is active.",
+                raw_payload={
+                    "lease_status": "active",
+                    "lease_expires_at": active_lease.lease_expires_at.isoformat()
+                    if active_lease.lease_expires_at
+                    else None,
+                },
+                update_task_state=False,
+            )
+            return
+        try:
+            self._monitor_due_spreads_unlocked(
+                external_account_id=external_account_id,
+                spreads=spreads,
+                strategy_service=strategy_service,
+                now=now,
+            )
+        finally:
+            self._release_task_lease(
+                external_account_id=external_account_id,
+                task_key=task_key,
+            )
+
+    def _monitor_due_spreads_unlocked(
+        self,
+        *,
+        external_account_id: str,
+        spreads: SQLAlchemyBullPutSpreadRepository,
+        strategy_service: BullPutStrategyService,
+        now: datetime,
+    ) -> None:
+        task_key = "bull-put-monitor"
 
         executed_monitor = False
         monitored_count = 0
@@ -778,7 +883,10 @@ class ReconciliationCoordinator:
     ) -> bool:
         state = self._automatic_task_backoffs.get((external_account_id, task_key))
         if state is None or state.next_attempt_at is None:
-            return False
+            persisted = self._get_task_state(external_account_id=external_account_id, task_key=task_key)
+            if persisted is None or persisted.next_attempt_at is None:
+                return False
+            return now < persisted.next_attempt_at
         return now < state.next_attempt_at
 
     def _record_task_backoff(
@@ -790,6 +898,9 @@ class ReconciliationCoordinator:
     ) -> int:
         key = (external_account_id, task_key)
         state = self._automatic_task_backoffs.get(key, AutomaticTaskBackoffState())
+        persisted = self._get_task_state(external_account_id=external_account_id, task_key=task_key)
+        if persisted is not None:
+            state.consecutive_failures = max(state.consecutive_failures, persisted.consecutive_failures)
         state.consecutive_failures += 1
         delay_seconds = self._task_backoff_delay_seconds(state.consecutive_failures)
         state.next_attempt_at = now + timedelta(seconds=delay_seconds)
@@ -803,6 +914,23 @@ class ReconciliationCoordinator:
         task_key: str,
     ) -> None:
         self._automatic_task_backoffs.pop((external_account_id, task_key), None)
+
+    def _get_task_state(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+    ) -> SchedulerTaskState | None:
+        if self._scheduler_task_states is None:
+            return None
+        try:
+            return self._scheduler_task_states.get_state(
+                external_account_id=external_account_id,
+                job_key=task_key,
+            )
+        except Exception as exc:
+            logger.debug("Failed to read scheduler task state for %s: %s", task_key, exc)
+            return None
 
     def _record_scheduler_job_run(
         self,
@@ -819,6 +947,7 @@ class ReconciliationCoordinator:
         error_message: str | None = None,
         detail: str | None = None,
         raw_payload: dict | None = None,
+        update_task_state: bool = True,
     ) -> None:
         if self._scheduler_job_runs is None:
             return
@@ -841,11 +970,55 @@ class ReconciliationCoordinator:
                     error_message=error_message,
                     detail=detail,
                     raw_payload=raw_payload,
-                )
+                ),
+                update_task_state=update_task_state,
             )
             self._append_scheduler_audit_event(run)
         except Exception as exc:
             logger.debug("Failed to record scheduler job run for %s: %s", task_key, exc)
+
+    def _try_acquire_task_lease(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+        task_label: str,
+        now: datetime,
+    ) -> SchedulerTaskState | None:
+        if self._scheduler_task_states is None:
+            return None
+        try:
+            lease = self._scheduler_task_states.try_acquire_lease(
+                external_account_id=external_account_id,
+                job_key=task_key,
+                job_label=task_label,
+                lease_owner=self._scheduler_lease_owner,
+                lease_expires_at=now + timedelta(seconds=self._task_lease_ttl_seconds()),
+                now=now,
+            )
+        except Exception as exc:
+            logger.debug("Failed to acquire scheduler task lease for %s: %s", task_key, exc)
+            return None
+        if lease.lease_owner == self._scheduler_lease_owner:
+            return None
+        return lease
+
+    def _release_task_lease(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+    ) -> None:
+        if self._scheduler_task_states is None:
+            return
+        try:
+            self._scheduler_task_states.release_lease(
+                external_account_id=external_account_id,
+                job_key=task_key,
+                lease_owner=self._scheduler_lease_owner,
+            )
+        except Exception as exc:
+            logger.debug("Failed to release scheduler task lease for %s: %s", task_key, exc)
 
     def _append_scheduler_audit_event(self, run: SchedulerJobRun) -> None:
         if self._strategy_audit_events is None:
@@ -913,6 +1086,13 @@ class ReconciliationCoordinator:
             self.settings.covered_call_strategy.lifecycle_interval_seconds,
         )
         return min(max_seconds, base_seconds * (2 ** max(0, consecutive_failures - 1)))
+
+    def _task_lease_ttl_seconds(self) -> int:
+        return max(
+            300,
+            self.settings.reconciliation_poll_interval_seconds * 4,
+            self.settings.longbridge_request_timeout_seconds * 3,
+        )
 
     @staticmethod
     def _should_backoff_for_failure(exc: Exception) -> bool:

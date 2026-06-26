@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from decimal import Decimal, InvalidOperation
@@ -65,6 +66,17 @@ def parse_args() -> argparse.Namespace:
         choices=("info", "warning", "critical"),
         default="info",
         help="Minimum notification level to emit.",
+    )
+    parser.add_argument(
+        "--notification-run-id",
+        default=None,
+        help="Optional local run id to group dry-run/console/file notification payloads.",
+    )
+    parser.add_argument(
+        "--notification-max-bytes",
+        type=int,
+        default=5_000_000,
+        help="Rotate the file notification JSONL before appending when it is at or above this size.",
     )
     parser.add_argument(
         "--zero-dte-lottery-auto-order",
@@ -609,6 +621,9 @@ def build_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     audit_summary = _snapshot_audit_summary(snapshot)
     broker_profiles = _snapshot_broker_profiles(snapshot)
     paper_mandate = _snapshot_paper_mandate(snapshot)
+    consistency_summary = operator_status.get("consistency_summary") if isinstance(operator_status, dict) else None
+    if not isinstance(consistency_summary, dict):
+        consistency_summary = None
     return {
         "strategy_loop_checks": build_strategy_loop_checks(snapshot),
         "strategy_loop_summary": summarize_strategy_loop(snapshot),
@@ -617,6 +632,12 @@ def build_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
         "operator_status": operator_status,
         "operator_posture_reason": operator_status.get("operator_posture_reason"),
         "operator_reason_codes": _operator_reason_codes(operator_status),
+        "operator_reason_details": _operator_reason_details(operator_status),
+        "primary_blocker": operator_status.get("primary_blocker"),
+        "local_repair_available": bool(operator_status.get("local_repair_available")),
+        "latest_evidence_at": operator_status.get("latest_evidence_at"),
+        "recent_scheduler_summaries": operator_status.get("recent_scheduler_summaries") or [],
+        "consistency_summary": consistency_summary,
         "broker_profiles": broker_profiles,
         "paper_mandate": paper_mandate,
         "audit_events": audit_events[:20] if isinstance(audit_events, list) else [],
@@ -664,6 +685,14 @@ def summarize_strategy_loop(snapshot: dict[str, Any]) -> dict[str, Any]:
         "operator_posture_status": operator_status.get("status"),
         "operator_posture_reason": operator_status.get("operator_posture_reason"),
         "operator_reason_codes": _operator_reason_codes(operator_status),
+        "operator_reason_details": _operator_reason_details(operator_status),
+        "primary_blocker": operator_status.get("primary_blocker"),
+        "local_repair_available": bool(operator_status.get("local_repair_available")),
+        "latest_evidence_at": operator_status.get("latest_evidence_at"),
+        "recent_scheduler_summaries": operator_status.get("recent_scheduler_summaries") or [],
+        "consistency_status": (operator_status.get("consistency_summary") or {}).get("status")
+        if isinstance(operator_status.get("consistency_summary"), dict)
+        else None,
         "check_status": "passed" if all(check["status"] != "fail" for check in checks) else "failed",
         "failed_checks": [check["name"] for check in checks if check["status"] == "fail"],
         "warning_checks": [check["name"] for check in checks if check["status"] == "warn"],
@@ -857,6 +886,20 @@ def _operator_reason_codes(operator_status: dict[str, Any]) -> list[str]:
     return sorted(set(codes))
 
 
+def _operator_reason_details(operator_status: dict[str, Any]) -> dict[str, str]:
+    details: dict[str, str] = {}
+    checks = operator_status.get("checks") if isinstance(operator_status, dict) else None
+    if isinstance(checks, list):
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            code = check.get("reason_code")
+            detail = check.get("reason_detail")
+            if code and detail:
+                details[str(code)] = str(detail)
+    return {code: details[code] for code in sorted(details)}
+
+
 def _snapshot_audit_summary(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     audit_summary = snapshot.get("audit_summary")
     if isinstance(audit_summary, dict):
@@ -1024,19 +1067,35 @@ NOTIFICATION_LEVEL_RANK = {
 
 
 def attach_notification_result(report: dict[str, Any], *, args: argparse.Namespace) -> None:
-    notification = build_unattended_notification(report, action=args.action)
+    notification = build_unattended_notification(
+        report,
+        action=args.action,
+        run_id=args.notification_run_id or default_notification_run_id(report, action=args.action),
+    )
     result = dispatch_unattended_notification(
         notification,
         channel=args.notification_channel,
         notification_file=args.notification_file,
         min_level=args.notification_min_level,
+        max_file_bytes=args.notification_max_bytes,
     )
     payload = report.setdefault("payload", {})
     if isinstance(payload, dict):
         payload["notification"] = result
 
 
-def build_unattended_notification(report: dict[str, Any], *, action: str) -> dict[str, Any]:
+def default_notification_run_id(report: dict[str, Any], *, action: str) -> str:
+    generated_at = str(report.get("generated_at") or datetime.now(timezone.utc).isoformat())
+    safe_generated_at = generated_at.replace(":", "").replace("-", "").replace(".", "")
+    return f"unattended-paper-{action}-{safe_generated_at}"
+
+
+def build_unattended_notification(
+    report: dict[str, Any],
+    *,
+    action: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     payload = report.get("payload") if isinstance(report.get("payload"), dict) else {}
     strategy_summary = payload.get("strategy_loop_summary") if isinstance(payload, dict) else {}
     if not isinstance(strategy_summary, dict):
@@ -1054,7 +1113,9 @@ def build_unattended_notification(report: dict[str, Any], *, action: str) -> dic
     return {
         "schema_version": "unattended_paper_notification_v1",
         "event_type": f"unattended_paper_{action}",
+        "run_id": run_id,
         "level": level,
+        "severity": level,
         "title": report.get("summary") or f"Unattended paper {action} completed.",
         "generated_at": report.get("generated_at"),
         "status": status,
@@ -1064,6 +1125,18 @@ def build_unattended_notification(report: dict[str, Any], *, action: str) -> dic
             strategy_summary.get("account_id")
             or (payload.get("runtime") or {}).get("external_account_id")
             or payload.get("account_id")
+        ),
+        "reason_codes": list(payload.get("operator_reason_codes") or strategy_summary.get("operator_reason_codes") or []),
+        "primary_blocker": payload.get("primary_blocker") or strategy_summary.get("primary_blocker") or report.get("error"),
+        "recommended_action": _notification_recommended_action(
+            payload,
+            strategy_summary,
+            report_error=str(report.get("error") or ""),
+        ),
+        "artifact_paths": [],
+        "broker_submit_allowed": False,
+        "local_repair_available": bool(
+            payload.get("local_repair_available") or strategy_summary.get("local_repair_available")
         ),
         "failed_checks": failed_checks,
         "warning_checks": warning_checks,
@@ -1079,12 +1152,34 @@ def build_unattended_notification(report: dict[str, Any], *, action: str) -> dic
     }
 
 
+def _notification_recommended_action(
+    payload: dict[str, Any],
+    strategy_summary: dict[str, Any],
+    *,
+    report_error: str = "",
+) -> str:
+    if payload.get("local_repair_available") or strategy_summary.get("local_repair_available"):
+        return "Review /ops/consistency and apply a guarded local repair only after explicit operator confirmation."
+    failed = strategy_summary.get("failed_checks") or []
+    if failed:
+        return f"Review failed unattended check(s): {', '.join(str(item) for item in failed)}."
+    if report_error:
+        return f"Review unattended failure: {report_error}"
+    warnings = strategy_summary.get("warning_checks") or []
+    if warnings:
+        return f"Review warning unattended check(s): {', '.join(str(item) for item in warnings)}."
+    if strategy_summary.get("zero_dte_lottery_auto_order_enabled"):
+        return "Verify zero-DTE lottery auto-ordering is intentionally armed before leaving the app unattended."
+    return "No operator action required."
+
+
 def dispatch_unattended_notification(
     notification: dict[str, Any],
     *,
     channel: str,
     notification_file: Path,
     min_level: str = "info",
+    max_file_bytes: int | None = None,
 ) -> dict[str, Any]:
     level = str(notification.get("level") or "info")
     if NOTIFICATION_LEVEL_RANK[level] < NOTIFICATION_LEVEL_RANK[min_level]:
@@ -1118,16 +1213,45 @@ def dispatch_unattended_notification(
         }
     if channel == "file":
         notification_file.parent.mkdir(parents=True, exist_ok=True)
+        rotated_path = rotate_notification_file_if_needed(
+            notification_file,
+            max_file_bytes=max_file_bytes,
+        )
         with notification_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(notification, ensure_ascii=True))
             handle.write("\n")
         return {
             "channel": channel,
             "emitted": True,
-            "reason": f"Notification appended to {notification_file}.",
+            "reason": (
+                f"Notification appended to {notification_file}."
+                if rotated_path is None
+                else f"Notification file rotated to {rotated_path}; appended to {notification_file}."
+            ),
+            "run_id": notification.get("run_id"),
+            "rotated_path": str(rotated_path) if rotated_path is not None else None,
             "payload": notification,
         }
     raise UnattendedPaperError(f"Notification channel '{channel}' is not supported.")
+
+
+def rotate_notification_file_if_needed(
+    notification_file: Path,
+    *,
+    max_file_bytes: int | None,
+) -> Path | None:
+    if max_file_bytes is None or max_file_bytes <= 0:
+        return None
+    if not notification_file.exists() or notification_file.stat().st_size < max_file_bytes:
+        return None
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = notification_file.with_name(f"{notification_file.name}.{timestamp}.rotated")
+    suffix = 1
+    while candidate.exists():
+        candidate = notification_file.with_name(f"{notification_file.name}.{timestamp}.{suffix}.rotated")
+        suffix += 1
+    notification_file.replace(candidate)
+    return candidate
 
 
 def main() -> None:

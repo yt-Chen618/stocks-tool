@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from stocks_tool.application.services.bull_put_strategy import ACTIVE_SPREAD_STATUSES, BullPutStrategyService
+from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.application.services.strategy_lifecycle import bull_put_close_order_warning
@@ -13,6 +14,7 @@ from stocks_tool.domain.models import (
     BrokerProfile,
     BullPutSpread,
     Order,
+    OperatorConsistencySummary,
     OperatorLifecycleWarning,
     OperatorStatusCheck,
     OperatorStatusSnapshot,
@@ -20,13 +22,14 @@ from stocks_tool.domain.models import (
     SchedulerJobSummary,
     SchedulerJobRun,
     SchedulerStatusSnapshot,
+    SchedulerTaskState,
     StrategyAuditEvent,
     StrategyAuditSummary,
     StrategyAuditSummaryGroup,
     StrategyControlSnapshot,
 )
 from stocks_tool.ports.broker_gateway import BrokerAccountGateway
-from stocks_tool.ports.repository import SchedulerJobRunRepository, StrategyAuditEventRepository
+from stocks_tool.ports.repository import SchedulerJobRunRepository, SchedulerTaskStateRepository, StrategyAuditEventRepository
 
 
 OPEN_ORDER_STATUSES = {
@@ -38,13 +41,41 @@ OPEN_ORDER_STATUSES = {
 SCHEDULER_PROBLEM_STATUSES = {SchedulerJobRunStatus.FAILED, SchedulerJobRunStatus.BACKOFF}
 
 OPERATOR_REASON_CODE_DETAILS = {
+    "paper_first_controls_ok": "Paper execution is allowed and live execution is blocked.",
+    "live_boundary_not_blocked": "Paper/live execution boundaries are not in the expected unattended posture.",
     "degraded_broker": "Broker profile or credentials are degraded for the selected paper account.",
+    "scheduler_enabled": "The in-process scheduler is enabled.",
+    "scheduler_disabled": "The in-process scheduler is disabled.",
+    "scheduler_no_observations": "The scheduler is enabled but has not recorded durable job-run observations yet.",
+    "scheduler_recent_runs_healthy": "Recent scheduler job-run observations are healthy.",
     "scheduler_backoff": "A scheduler job is backing off after a broker or local workflow failure.",
+    "scheduler_failed": "A scheduler job has failed and needs operator review.",
+    "scheduler_degraded": "Recent scheduler observations are degraded.",
+    "advisor_read_only": "Advisor output is read-only and cannot directly execute broker orders.",
+    "advisor_direct_execution_enabled": "Advisor direct execution is enabled and should be treated as a critical posture.",
     "manual_pause": "Paper mandate has a manual pause active.",
     "kill_switch": "Paper mandate kill switch is active.",
     "advisor_pending_record": "Advisor output is pending an explicit Record Output action.",
+    "bull_put_auto_entry_disabled": "Bull put auto-entry is disabled; existing spreads may still be monitored.",
+    "bull_put_runtime_ready": "Bull put runtime controls allow configured paper automation.",
+    "bull_put_runtime_missing": "Bull put runtime state is missing for the selected paper account.",
+    "zero_dte_auto_execute_disabled": "Zero-DTE lottery auto-ordering is disabled.",
+    "zero_dte_auto_execute_armed": "Zero-DTE lottery auto-ordering is armed and should be verified as intentional.",
+    "zero_dte_runtime_missing": "Zero-DTE lottery runtime state is missing for the selected paper account.",
+    "bull_put_spreads_unavailable": "Bull put spread state is unavailable for the selected paper account.",
     "manual_action_required": "A strategy lifecycle item requires manual operator recovery.",
+    "no_manual_action_required": "No strategy lifecycle item currently requires manual operator recovery.",
+    "operator_audit_summary_available": "Operator audit summary is available.",
     "operator_audit_summary_unavailable": "Operator audit summary is unavailable.",
+    "consistency_report_clean": "Local strategy/order ledger consistency checks passed.",
+    "consistency_report_warn": "Local strategy/order ledger consistency checks have warnings.",
+    "consistency_report_failed": "Local strategy/order ledger consistency checks failed.",
+    "local_repair_available": "A guarded local ledger repair is available and requires explicit confirmation.",
+    "consistency_report_unavailable": "Local strategy/order ledger consistency checks are unavailable.",
+    "market_data_unavailable": "Broker market data is unavailable for a read-only preview or dashboard path.",
+    "order_sync_backoff": "Broker order synchronization is in backoff.",
+    "quote_cache_fallback": "A read-only quote cache fallback was used for degraded rendering.",
+    "broker_rate_limited": "Broker market-data or order-detail requests are rate limited.",
 }
 
 
@@ -115,12 +146,22 @@ def bull_put_lifecycle_warnings(
     return warnings
 
 
-def scheduler_job_summaries(runs: list[SchedulerJobRun]) -> list[SchedulerJobSummary]:
+def scheduler_job_summaries(
+    runs: list[SchedulerJobRun],
+    states: list[SchedulerTaskState] | None = None,
+    *,
+    now: datetime | None = None,
+) -> list[SchedulerJobSummary]:
+    now = now or datetime.now(timezone.utc)
     grouped: dict[tuple[str, str | None], list[SchedulerJobRun]] = {}
     for run in runs:
         grouped.setdefault((run.job_key, run.external_account_id), []).append(run)
 
-    summaries: list[SchedulerJobSummary] = []
+    state_by_key = {
+        (state.job_key, state.external_account_id): state
+        for state in (states or [])
+    }
+    summaries_by_key: dict[tuple[str, str | None], SchedulerJobSummary] = {}
     for group_runs in grouped.values():
         ordered = sorted(group_runs, key=lambda run: run.started_at, reverse=True)
         latest = ordered[0]
@@ -130,28 +171,119 @@ def scheduler_job_summaries(runs: list[SchedulerJobRun]) -> list[SchedulerJobSum
             latest=latest,
             recent_problem_count=recent_problem_count,
         )
-        summaries.append(
+        key = (latest.job_key, latest.external_account_id)
+        summaries_by_key[key] = _apply_scheduler_state_to_summary(
             SchedulerJobSummary(
-                job_key=latest.job_key,
-                job_label=latest.job_label,
-                external_account_id=latest.external_account_id,
-                posture=posture,
-                due_status=due_status,
-                status_detail=status_detail,
-                last_status=latest.status,
-                last_started_at=latest.started_at,
-                last_completed_at=latest.completed_at,
-                next_attempt_at=latest.next_attempt_at,
-                backoff_seconds=latest.backoff_seconds,
-                consecutive_failures=latest.consecutive_failures,
-                error_message=latest.error_message,
-                detail=latest.detail,
-                last_problem_at=problem_runs[0].started_at if problem_runs else None,
-                recent_run_count=len(ordered),
-                recent_problem_count=recent_problem_count,
-            )
+                    job_key=latest.job_key,
+                    job_label=latest.job_label,
+                    external_account_id=latest.external_account_id,
+                    posture=posture,
+                    due_status=due_status,
+                    status_detail=status_detail,
+                    last_status=latest.status,
+                    last_started_at=latest.started_at,
+                    last_completed_at=latest.completed_at,
+                    next_attempt_at=latest.next_attempt_at,
+                    backoff_seconds=latest.backoff_seconds,
+                    consecutive_failures=latest.consecutive_failures,
+                    error_message=latest.error_message,
+                    detail=latest.detail,
+                    last_problem_at=problem_runs[0].started_at if problem_runs else None,
+                    recent_run_count=len(ordered),
+                    recent_problem_count=recent_problem_count,
+                ),
+            state_by_key.get(key),
+            now=now,
         )
-    return sorted(summaries, key=lambda summary: summary.last_started_at, reverse=True)
+    for key, state in state_by_key.items():
+        if key in summaries_by_key:
+            continue
+        summaries_by_key[key] = _scheduler_summary_from_state(state, now=now)
+    return sorted(summaries_by_key.values(), key=lambda summary: summary.last_started_at, reverse=True)
+
+
+def _scheduler_summary_from_state(state: SchedulerTaskState, *, now: datetime) -> SchedulerJobSummary:
+    last_status = state.last_status or SchedulerJobRunStatus.SKIPPED
+    last_started_at = state.last_started_at or state.lease_acquired_at or state.updated_at
+    summary = SchedulerJobSummary(
+        job_key=state.job_key,
+        job_label=state.job_label,
+        external_account_id=state.external_account_id,
+        posture="pass",
+        due_status="observed",
+        status_detail=state.detail or "Scheduler task state exists without a recent run observation.",
+        last_status=last_status,
+        last_started_at=last_started_at,
+        last_completed_at=state.last_completed_at,
+        next_attempt_at=state.next_attempt_at,
+        backoff_seconds=state.backoff_seconds,
+        consecutive_failures=state.consecutive_failures,
+        error_message=state.error_message,
+        detail=state.detail,
+        last_problem_at=last_started_at if last_status in SCHEDULER_PROBLEM_STATUSES else None,
+        recent_run_count=0,
+        recent_problem_count=1 if last_status in SCHEDULER_PROBLEM_STATUSES else 0,
+    )
+    return _apply_scheduler_state_to_summary(summary, state, now=now)
+
+
+def _apply_scheduler_state_to_summary(
+    summary: SchedulerJobSummary,
+    state: SchedulerTaskState | None,
+    *,
+    now: datetime,
+) -> SchedulerJobSummary:
+    if state is None:
+        return summary.model_copy(
+            update={
+                "next_attempt_source": "backoff" if summary.next_attempt_at and summary.next_attempt_at > now else "run",
+            }
+        )
+    update: dict[str, Any] = {
+        "lease_status": _scheduler_lease_status(state, now=now),
+        "lease_expires_at": state.lease_expires_at,
+        "next_attempt_source": "backoff" if state.next_attempt_at and state.next_attempt_at > now else "state",
+    }
+    if state.next_attempt_at is not None:
+        update["next_attempt_at"] = state.next_attempt_at
+    if state.backoff_seconds is not None:
+        update["backoff_seconds"] = state.backoff_seconds
+    if state.consecutive_failures:
+        update["consecutive_failures"] = state.consecutive_failures
+    if state.error_message:
+        update["error_message"] = state.error_message
+    if state.detail:
+        update["detail"] = state.detail
+    if state.next_attempt_at is not None and state.next_attempt_at > now:
+        update["posture"] = "warn"
+        update["due_status"] = "backoff"
+        update["status_detail"] = (
+            state.detail
+            or state.error_message
+            or f"Backoff active; next attempt at {state.next_attempt_at.isoformat()}."
+        )
+    if update["lease_status"] == "active":
+        update["posture"] = "warn"
+        update["due_status"] = "lease_active"
+        update["status_detail"] = (
+            f"Single-flight lease is active until {state.lease_expires_at.isoformat()}."
+            if state.lease_expires_at is not None
+            else "Single-flight lease is active."
+        )
+        update["next_attempt_source"] = "lease"
+    elif update["lease_status"] == "expired" and summary.due_status == "observed":
+        update["due_status"] = "lease_expired"
+        update["status_detail"] = "Previous scheduler lease expired before a new run observation cleared it."
+        update["next_attempt_source"] = "lease"
+    return summary.model_copy(update=update)
+
+
+def _scheduler_lease_status(state: SchedulerTaskState, *, now: datetime) -> str | None:
+    if state.lease_owner is None:
+        return None
+    if state.lease_expires_at is None:
+        return "active"
+    return "active" if state.lease_expires_at > now else "expired"
 
 
 def scheduler_summary_status_detail(
@@ -217,7 +349,9 @@ class OperatorStatusService:
         bull_put_strategy: BullPutStrategyService,
         zero_dte_lottery_strategy: ZeroDteLotteryStrategyService,
         order_service: OrderService,
+        consistency_service: OperatorConsistencyService | None = None,
         scheduler_job_runs: SchedulerJobRunRepository | None = None,
+        scheduler_task_states: SchedulerTaskStateRepository | None = None,
         audit_events: StrategyAuditEventRepository | None = None,
         broker_adapter: BrokerAccountGateway | None = None,
     ) -> None:
@@ -225,7 +359,9 @@ class OperatorStatusService:
         self.bull_put_strategy = bull_put_strategy
         self.zero_dte_lottery_strategy = zero_dte_lottery_strategy
         self.order_service = order_service
+        self.consistency_service = consistency_service
         self.scheduler_job_runs = scheduler_job_runs
+        self.scheduler_task_states = scheduler_task_states
         self.audit_events = audit_events
         self.broker_adapter = broker_adapter
 
@@ -239,7 +375,12 @@ class OperatorStatusService:
         checks: list[OperatorStatusCheck] = []
         controls = self.strategy_experiments.get_control_snapshot(external_account_id=external_account_id)
         recent_scheduler_runs = self._recent_scheduler_runs(external_account_id=external_account_id, limit=20)
-        recent_scheduler_summaries = scheduler_job_summaries(recent_scheduler_runs)
+        recent_scheduler_states = self._recent_scheduler_task_states(external_account_id=external_account_id, limit=100)
+        recent_scheduler_summaries = scheduler_job_summaries(
+            recent_scheduler_runs,
+            recent_scheduler_states,
+            now=generated_at,
+        )
         bull_put_runtime = None
         zero_dte_runtime = None
         spreads: list[BullPutSpread] = []
@@ -417,6 +558,37 @@ class OperatorStatusService:
             severity="critical" if lifecycle_warnings else "info",
         )
 
+        consistency_summary = None
+        if self.consistency_service is not None:
+            try:
+                consistency_summary = self.consistency_service.get_summary(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    limit=50,
+                )
+                consistency_status = consistency_summary.status
+                consistency_reason_code = self._consistency_reason_code(
+                    status=consistency_status,
+                    repair_available_count=consistency_summary.repair_available_count,
+                )
+                self._add_check(
+                    checks,
+                    name="ledger_consistency",
+                    status=consistency_status,
+                    detail=self._consistency_check_detail(consistency_summary),
+                    reason_code=consistency_reason_code,
+                    severity=self._status_severity(consistency_status),
+                )
+            except Exception as exc:
+                self._add_check(
+                    checks,
+                    name="ledger_consistency",
+                    status="warn",
+                    detail=f"Local consistency report is unavailable: {exc}",
+                    reason_code="consistency_report_unavailable",
+                    severity="warning",
+                )
+
         open_order_count = sum(1 for order in orders if order.status in OPEN_ORDER_STATUSES)
         active_spread_count = sum(1 for spread in spreads if spread.status in ACTIVE_SPREAD_STATUSES)
         status = self._overall_status(checks)
@@ -455,6 +627,17 @@ class OperatorStatusService:
             paper_mandate=paper_mandate,
             audit_events=audit_events,
             audit_summary=self._audit_summary(audit_events),
+            consistency_summary=consistency_summary,
+            primary_blocker=self._primary_blocker(checks),
+            local_repair_available=(
+                consistency_summary.repair_available_count > 0 if consistency_summary is not None else None
+            ),
+            latest_evidence_at=self._latest_evidence_at(
+                generated_at=generated_at,
+                audit_events=audit_events,
+                scheduler_runs=recent_scheduler_runs,
+                consistency_summary=consistency_summary,
+            ),
             bull_put_runtime=bull_put_runtime,
             zero_dte_lottery_runtime=zero_dte_runtime,
             active_bull_put_spread_count=active_spread_count,
@@ -471,11 +654,12 @@ class OperatorStatusService:
         limit: int = 50,
     ) -> SchedulerStatusSnapshot:
         runs = self._recent_scheduler_runs(external_account_id=external_account_id, limit=limit)
+        states = self._recent_scheduler_task_states(external_account_id=external_account_id, limit=100)
         return SchedulerStatusSnapshot(
             generated_at=datetime.now(timezone.utc),
             external_account_id=external_account_id,
             runs=runs,
-            summaries=scheduler_job_summaries(runs),
+            summaries=scheduler_job_summaries(runs, states),
         )
 
     def list_audit_events(
@@ -583,6 +767,19 @@ class OperatorStatusService:
         if self.scheduler_job_runs is None:
             return []
         return self.scheduler_job_runs.list_runs(
+            external_account_id=external_account_id,
+            limit=limit,
+        )
+
+    def _recent_scheduler_task_states(
+        self,
+        *,
+        external_account_id: str | None,
+        limit: int,
+    ) -> list[SchedulerTaskState]:
+        if self.scheduler_task_states is None:
+            return []
+        return self.scheduler_task_states.list_states(
             external_account_id=external_account_id,
             limit=limit,
         )
@@ -874,6 +1071,7 @@ class OperatorStatusService:
                 status=status,
                 detail=detail,
                 reason_code=reason_code,
+                reason_detail=OperatorStatusService.reason_code_detail(reason_code),
                 severity=severity,
             )
         )
@@ -914,6 +1112,54 @@ class OperatorStatusService:
         if problem_count:
             return f"{problem_count} recent scheduler run(s) failed or entered backoff."
         return "Recent scheduler job-run observations are available."
+
+    @staticmethod
+    def _consistency_reason_code(*, status: str, repair_available_count: int) -> str:
+        if repair_available_count > 0:
+            return "local_repair_available"
+        if status == "fail":
+            return "consistency_report_failed"
+        if status == "warn":
+            return "consistency_report_warn"
+        return "consistency_report_clean"
+
+    @staticmethod
+    def _consistency_check_detail(summary: OperatorConsistencySummary) -> str:
+        if summary.repair_available_count:
+            return (
+                f"{summary.repair_available_count} guarded local ledger repair(s) available; "
+                "explicit operator confirmation is required."
+            )
+        if summary.fail_count:
+            return f"{summary.fail_count} local ledger consistency check(s) failed."
+        if summary.warn_count:
+            return f"{summary.warn_count} local ledger consistency check(s) returned warnings."
+        return "Local strategy/order ledger consistency checks passed."
+
+    @staticmethod
+    def _primary_blocker(checks: list[OperatorStatusCheck]) -> str | None:
+        failing = next((check for check in checks if check.status == "fail"), None)
+        if failing is not None:
+            return failing.reason_code or failing.name
+        warning = next((check for check in checks if check.status == "warn"), None)
+        if warning is not None:
+            return warning.reason_code or warning.name
+        return None
+
+    @staticmethod
+    def _latest_evidence_at(
+        *,
+        generated_at: datetime,
+        audit_events: list[StrategyAuditEvent],
+        scheduler_runs: list[SchedulerJobRun],
+        consistency_summary: OperatorConsistencySummary | None,
+    ) -> datetime:
+        candidates = [generated_at]
+        candidates.extend(event.emitted_at for event in audit_events)
+        candidates.extend((run.completed_at or run.started_at) for run in scheduler_runs)
+        if consistency_summary is not None:
+            candidates.append(consistency_summary.generated_at)
+        return max(candidates)
 
     @staticmethod
     def _posture_reason(checks: list[OperatorStatusCheck]) -> str:

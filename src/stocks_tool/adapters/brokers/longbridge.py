@@ -149,7 +149,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         try:
             quote = self._run_sdk_action(f"load quote for '{symbol}'", _load_quote)
         except LongbridgeIntegrationError as exc:
-            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode)
+            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode, fallback_detail=str(exc))
             if cached_quote is not None:
                 logger.warning(
                     "Using cached Longbridge quote for %s after transient failure. %s",
@@ -184,7 +184,11 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         try:
             quotes = self._run_sdk_action(f"load quotes for {joined_symbols}", _load_quotes)
         except LongbridgeIntegrationError as exc:
-            cached_quotes = self._get_cached_quotes(symbols=normalized_symbols, mode=mode)
+            cached_quotes = self._get_cached_quotes(
+                symbols=normalized_symbols,
+                mode=mode,
+                fallback_detail=str(exc),
+            )
             if cached_quotes:
                 logger.warning(
                     "Using %s cached Longbridge quotes after transient batch failure for %s. %s",
@@ -695,26 +699,36 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         *,
         symbol: str,
         mode: ExecutionMode,
+        fallback_detail: str | None = None,
     ) -> SecurityQuoteSnapshot | None:
         with self._quote_cache_lock:
             cached = self._quote_cache.get((mode.value, symbol))
             if cached is None:
                 return None
             cached_at, quote = cached
-            if time.monotonic() - cached_at > self._QUOTE_CACHE_TTL_SECONDS:
+            cache_age_seconds = int(time.monotonic() - cached_at)
+            if cache_age_seconds > self._QUOTE_CACHE_TTL_SECONDS:
                 self._quote_cache.pop((mode.value, symbol), None)
                 return None
-            return quote
+            return quote.model_copy(
+                update={
+                    "data_quality": "cached",
+                    "warning_code": "quote_cache_fallback",
+                    "warning_detail": fallback_detail,
+                    "cache_age_seconds": cache_age_seconds,
+                }
+            )
 
     def _get_cached_quotes(
         self,
         *,
         symbols: list[str],
         mode: ExecutionMode,
+        fallback_detail: str | None = None,
     ) -> dict[str, SecurityQuoteSnapshot]:
         cached_quotes: dict[str, SecurityQuoteSnapshot] = {}
         for symbol in symbols:
-            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode)
+            cached_quote = self._get_cached_quote(symbol=symbol, mode=mode, fallback_detail=fallback_detail)
             if cached_quote is not None:
                 cached_quotes[symbol] = cached_quote
         return cached_quotes

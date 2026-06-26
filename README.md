@@ -31,7 +31,7 @@ This repository currently contains:
 - a read-only operator status endpoint for unattended paper posture and lifecycle warnings
 - an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
-- current architecture, route inventory, runtime operations, lifecycle, regression, and optimization design docs under `docs/`
+- current architecture, route inventory, runtime operations, lifecycle, regression, operator runbook, release-slice, and optimization design docs under `docs/`
 
 ## Repository layout
 
@@ -146,6 +146,8 @@ Then open:
 - `GET /strategies/advisor/audit`
 - `GET /ops/unattended-status?external_account_id=LBPT10087357&mode=paper`
 - `GET /ops/scheduler?external_account_id=LBPT10087357`
+- `GET /ops/consistency?external_account_id=LBPT10087357&mode=paper`
+- `POST /ops/consistency/repairs/{repair_id}`
 - `GET /ops/audit?external_account_id=LBPT10087357`
 - `GET /ops/audit/summary?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/proposals`
@@ -227,7 +229,7 @@ The bull put spread workflow is currently paper-only:
 - dashboard event calendar: `/` now shows upcoming market events so strategy proposal risk warnings have a visible source
 - dashboard snapshot load: `/` now reads a lightweight latest-snapshot summary from `/account-snapshots/latest` instead of pulling the full account snapshot history on each refresh
 - Longbridge resilience: broker SDK calls now use a bounded `20s` request timeout plus a short circuit breaker, giving slow background loads room to complete while still failing fast when quote connectivity degrades
-- scheduler resilience: automatic Longbridge tasks now add an in-memory `account + task` backoff after timeout / circuit-open / connectivity failures so the same account does not keep retrying every poll while the broker is unstable
+- scheduler resilience: automatic Longbridge tasks now project per-account/task backoff, next attempt, consecutive failures, and single-flight lease state into `scheduler_task_states`, while preserving append-only observations in `scheduler_job_runs`
 - Longbridge circuit isolation: account/order failures and market-data failures now use separate circuit-breaker buckets, so a failed account sync does not automatically block quote-backed dashboard panels
 - scheduler priority: the background loop now runs bull put monitor / scan / review and pre-open capture / review before account and order reconciliation so strategy and market-data tasks get first access to Longbridge when broker connectivity is unstable
 - pre-open board resilience: `/strategies/pre-open-risk` now falls back to the latest stored pre-open run when transient Longbridge failures hit, returns a partial board when only some proxies are unavailable, and degrades to a structured unavailable board when no live or stored pre-open snapshot exists yet
@@ -244,6 +246,14 @@ The repo includes regression workflows behind a single entrypoint:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-recovery-drill
+.venv\Scripts\python.exe scripts\run_regression.py consistency-report
+.venv\Scripts\python.exe scripts\run_regression.py worktree-release-inventory
+.venv\Scripts\python.exe scripts\run_regression.py data-hygiene-audit
+.venv\Scripts\python.exe scripts\run_regression.py paper-session-gate --session full --strict
+.venv\Scripts\python.exe scripts\run_regression.py zero-dte-lottery-drill
+.venv\Scripts\python.exe scripts\run_regression.py 60h-completion-audit
+.venv\Scripts\python.exe scripts\run_regression.py operator-platform-v8
 .venv\Scripts\python.exe scripts\run_regression.py advisor-intake
 .venv\Scripts\python.exe scripts\run_regression.py mock-ui
 .venv\Scripts\python.exe scripts\run_regression.py real-paper
@@ -257,14 +267,22 @@ Available workflows:
 - `bull-put-paper`: runs an in-memory bull put service regression through scheduled scan, spread open, spread close, parameter review, runtime PnL update, and strategy journal writes
 - `bull-put-readiness`: runs the read-only bull put opening readiness check against an already running local API session; it defaults to `QQQ.US` so the check avoids scanning the full universe before the open
 - `bull-put-real-paper`: hits the local API against the real Longbridge paper account and validates bull put runtime state plus live preview responses without placing option orders unless `--execute` is supplied
+- `bull-put-recovery-drill`: reads bull put recover-close eligibility for all listed spreads or a selected `--spread-id`, classifies the operator action, and never submits a recovery order
+- `consistency-report`: exports read-only `/ops/consistency` evidence over orders, strategy runs/signals/proposals, bull put spreads, and repair availability; it never applies a repair
+- `worktree-release-inventory`: classifies the dirty worktree into reviewable release slices and flags unknown or generated-artifact candidates
+- `data-hygiene-audit`: performs a read-only audit of watchlist residue and generated evidence artifacts by default; generated file archival or project-cache cleanup requires explicit `--confirm-generated-cleanup`
+- `paper-session-gate`: runs the morning, midday, evening, or full paper operator evidence loop against an already running local API; the full loop includes consistency-report and a preview-only zero-DTE lottery drill by default, and `--strict` fails if consistency evidence is missing or any broker submit / local repair / destructive action is observed
+- `zero-dte-lottery-drill`: reads zero-DTE runtime plus preview evidence for `QQQ.US` by default and does not call force scan unless both `--force-scan` and `--confirm-paper-scan` are supplied; if a confirmed force scan already produced a matching paper manual-scan order but the scan response failed, it can reconcile that existing local order instead of attempting another order, and `--record-reconciled-ledger` explicitly repairs missing local strategy run/signal rows without broker submission
+- `60h-completion-audit`: audits current JSON evidence against the 60h operator hardening plan and reports `incomplete` while any requirement is missing, weak, or not backed by confirmed/reconciled evidence plus required local recording
 - `advisor-intake`: fetches `/strategies/advisor-context` from an already running local API session, can call DeepSeek with `--call-deepseek` through the same `/strategies/advisor/deepseek/dry-run` API path used by the dashboard, includes the local `/strategies/advisor/audit` snapshot when available, and can record a provided or generated advisor response into `/strategies/advisor/responses` only when `--record` is explicitly supplied
 - `audit-export`: exports read-only `/ops/audit` and `/ops/audit/summary` evidence from an already running local API session
+- `operator-platform-v8`: runs the aggregate local V8 gate and writes `artifacts\operator-platform-v8-manifest.json`; it excludes DeepSeek calls and confirmed zero-DTE force scans by default
 - `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 - `real-preopen-board`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, clicks `Load Live Macro`, and verifies the response is live fast-path data for the expected U.S. session date instead of a stored fallback
 - `real-ui-refresh`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, reloads it repeatedly, and reports dashboard-ready plus overlay-settled timings for the warm real instance
-- `unattended-paper`: arms, inspects, or resumes the local paper unattended workflow. `arm` disables new bull put entries while keeping existing spread monitoring and lifecycle reconciliation under the running FastAPI scheduler; add `--zero-dte-lottery-auto-order on` to explicitly arm paper zero-DTE lottery auto-ordering, or `off` to turn it back off; `status` prints a morning/evening summary with `strategy_loop_checks` covering paper-first controls, covered-call auto-propose, bull put runtime state, linked spread/lifecycle orders, executions, journals, and zero-DTE cap/one-trade guard; `resume` re-enables bull put auto-entry. Optional `--notification-channel dry-run|console|file` emits a local notification payload for arm/status/resume, failures, warning checks, zero-DTE auto-order state, and strategy-loop drift; email/push/SMS are reserved but not active.
-- `scheduler-on-long-gate`: starts a temporary scheduler-enabled API on an available local port, then runs `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, and `bull-put-real-paper` against the same process
+- `unattended-paper`: arms, inspects, or resumes the local paper unattended workflow. `arm` disables new bull put entries while keeping existing spread monitoring and lifecycle reconciliation under the running FastAPI scheduler; add `--zero-dte-lottery-auto-order on` to explicitly arm paper zero-DTE lottery auto-ordering, or `off` to turn it back off; `status` prints a morning/evening summary with `strategy_loop_checks` covering paper-first controls, covered-call auto-propose, bull put runtime state, linked spread/lifecycle orders, executions, journals, and zero-DTE cap/one-trade guard; `resume` re-enables bull put auto-entry. Optional `--notification-channel dry-run|console|file` emits a local notification payload for arm/status/resume, failures, warning checks, zero-DTE auto-order state, and strategy-loop drift; file notifications include `run_id` and size-based JSONL rotation; email/push/SMS are reserved but not active.
+- `scheduler-on-long-gate`: starts a temporary scheduler-enabled API on an available local port, then runs `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, `bull-put-real-paper`, and `bull-put-recovery-drill` against the same process; the report includes scheduler lease/backoff evidence
 
 All workflow scripts emit the same JSON envelope shape:
 
@@ -283,6 +301,12 @@ Useful examples:
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-paper --json-output artifacts/bull-put-paper-regression.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-readiness --symbol QQQ.US --json-output artifacts/bull-put-readiness.json
 .venv\Scripts\python.exe scripts\run_regression.py bull-put-real-paper --json-output artifacts/bull-put-real-paper-dry-run.json
+.venv\Scripts\python.exe scripts\run_regression.py bull-put-recovery-drill --json-output artifacts/bull-put-recovery-drill.json
+.venv\Scripts\python.exe scripts\run_regression.py worktree-release-inventory --json-output artifacts/worktree-release-inventory.json
+.venv\Scripts\python.exe scripts\run_regression.py data-hygiene-audit --json-output artifacts/data-hygiene-audit.json
+.venv\Scripts\python.exe scripts\run_regression.py paper-session-gate --session full --json-output artifacts/paper-session-gate.json
+.venv\Scripts\python.exe scripts\run_regression.py zero-dte-lottery-drill --json-output artifacts/zero-dte-lottery-drill.json
+.venv\Scripts\python.exe scripts\run_regression.py 60h-completion-audit --json-output artifacts/60h-completion-audit.json
 .venv\Scripts\python.exe scripts\run_regression.py advisor-intake --json-output artifacts/advisor-intake-context.json
 .venv\Scripts\python.exe scripts\run_regression.py audit-export --json-output artifacts/audit-export.json
 .venv\Scripts\python.exe scripts\run_regression.py advisor-intake --call-deepseek --json-output artifacts/deepseek-advisor-dry-run.json

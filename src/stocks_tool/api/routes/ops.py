@@ -2,10 +2,14 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from stocks_tool.api.dependencies import get_operator_status_service
-from stocks_tool.application.services.operator_status import OperatorStatusService
+from stocks_tool.api.dependencies import get_operator_consistency_service, get_operator_status_service
+from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
+from stocks_tool.application.services.operator_status import OPERATOR_REASON_CODE_DETAILS, OperatorStatusService
 from stocks_tool.domain.enums import ExecutionMode
 from stocks_tool.domain.models import (
+    OperatorConsistencyRepairRequest,
+    OperatorConsistencyRepairResult,
+    OperatorConsistencySummary,
     OperatorStatusSnapshot,
     SchedulerStatusSnapshot,
     StrategyAuditEvent,
@@ -14,6 +18,11 @@ from stocks_tool.domain.models import (
 
 
 router = APIRouter(prefix="/ops", tags=["ops"])
+
+
+@router.get("/reason-codes", response_model=dict[str, str])
+def list_operator_reason_codes() -> dict[str, str]:
+    return dict(sorted(OPERATOR_REASON_CODE_DETAILS.items()))
 
 
 @router.get("/unattended-status", response_model=OperatorStatusSnapshot)
@@ -27,6 +36,41 @@ def get_unattended_operator_status(
             external_account_id=external_account_id,
             mode=mode,
         )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/consistency", response_model=OperatorConsistencySummary)
+def get_operator_consistency_report(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    strategy: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    service: OperatorConsistencyService = Depends(get_operator_consistency_service),
+) -> OperatorConsistencySummary:
+    try:
+        return service.get_summary(
+            external_account_id=external_account_id,
+            mode=mode,
+            strategy=strategy,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/consistency/repairs/{repair_id}", response_model=OperatorConsistencyRepairResult)
+def apply_operator_consistency_repair(
+    repair_id: str,
+    request: OperatorConsistencyRepairRequest,
+    service: OperatorConsistencyService = Depends(get_operator_consistency_service),
+) -> OperatorConsistencyRepairResult:
+    try:
+        return service.apply_repair(repair_id=repair_id, request=request)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

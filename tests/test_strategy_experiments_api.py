@@ -1201,6 +1201,9 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
         "covered_call_v1",
         "zero_dte_lottery_v1",
     ]
+    for playbook in context.playbooks:
+        assert set(playbook.allowed_outputs).issubset({"proposal", "review"})
+        assert "Cannot submit, cancel, replace, or recover broker orders." in playbook.hard_limits
     experiments.list_proposals.assert_any_call(
         external_account_id="LBPT10087357",
         strategy_id=None,

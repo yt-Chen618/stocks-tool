@@ -30,6 +30,7 @@ from stocks_tool.domain.models import (
     MarketEvent,
     Order,
     SchedulerJobRun,
+    SchedulerTaskState,
     StrategyAdvisorRun,
     StrategyAuditEvent,
     StrategyProposal,
@@ -286,7 +287,7 @@ class PreOpenAssessmentRunRepository(ABC):
 
 class SchedulerJobRunRepository(ABC):
     @abstractmethod
-    def create_run(self, run: SchedulerJobRun) -> SchedulerJobRun:
+    def create_run(self, run: SchedulerJobRun, *, update_task_state: bool = True) -> SchedulerJobRun:
         raise NotImplementedError
 
     @abstractmethod
@@ -297,6 +298,54 @@ class SchedulerJobRunRepository(ABC):
         job_key: str | None = None,
         limit: int = 50,
     ) -> list[SchedulerJobRun]:
+        raise NotImplementedError
+
+
+class SchedulerTaskStateRepository(ABC):
+    @abstractmethod
+    def get_state(
+        self,
+        *,
+        external_account_id: str | None,
+        job_key: str,
+    ) -> SchedulerTaskState | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_states(
+        self,
+        *,
+        external_account_id: str | None = None,
+        job_key: str | None = None,
+        limit: int = 100,
+    ) -> list[SchedulerTaskState]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def try_acquire_lease(
+        self,
+        *,
+        external_account_id: str | None,
+        job_key: str,
+        job_label: str | None,
+        lease_owner: str,
+        lease_expires_at: datetime,
+        now: datetime,
+    ) -> SchedulerTaskState:
+        raise NotImplementedError
+
+    @abstractmethod
+    def release_lease(
+        self,
+        *,
+        external_account_id: str | None,
+        job_key: str,
+        lease_owner: str,
+    ) -> SchedulerTaskState | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert_from_run(self, run: SchedulerJobRun) -> SchedulerTaskState:
         raise NotImplementedError
 
 

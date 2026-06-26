@@ -74,6 +74,8 @@ def base_snapshot() -> dict:
                     "name": "scheduler_recent_runs",
                     "status": "pass",
                     "detail": "Recent scheduler job-run observations are available.",
+                    "reason_code": "scheduler_recent_runs_healthy",
+                    "reason_detail": "Recent scheduler job-run observations are healthy.",
                 }
             ],
             "controls": {},
@@ -106,6 +108,23 @@ def base_snapshot() -> dict:
             },
             "audit_events": [],
             "audit_summary": {"event_count": 1, "warning_count": 0, "by_action": {"advisor_run_card_observed": 1}},
+            "consistency_summary": {
+                "generated_at": "2026-06-04T14:32:00Z",
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "strategy": None,
+                "limit": 50,
+                "status": "pass",
+                "check_count": 3,
+                "pass_count": 3,
+                "warn_count": 0,
+                "fail_count": 0,
+                "repair_available_count": 0,
+                "checks": [],
+            },
+            "primary_blocker": None,
+            "local_repair_available": False,
+            "latest_evidence_at": "2026-06-04T14:32:00Z",
             "bull_put_runtime": None,
             "zero_dte_lottery_runtime": None,
             "active_bull_put_spread_count": 1,
@@ -510,11 +529,22 @@ def test_payload_filters_to_monitorable_spreads() -> None:
         "zero_dte_lottery_runtime_policy",
     }
     assert payload["operator_status"]["status"] == "pass"
+    assert payload["consistency_summary"]["status"] == "pass"
+    assert payload["primary_blocker"] is None
+    assert payload["local_repair_available"] is False
+    assert payload["latest_evidence_at"] == "2026-06-04T14:32:00Z"
     assert payload["broker_profiles"][0]["paper_guard"] == "config_declared"
     assert payload["paper_mandate"]["external_account_id"] == "LBPT10087357"
     assert payload["audit_events"][0]["action"] == "advisor_run_card_observed"
     assert payload["operator_posture_reason"] == "All operator posture checks passed."
     assert payload["strategy_loop_summary"]["operator_posture_status"] == "pass"
+    assert payload["strategy_loop_summary"]["consistency_status"] == "pass"
+    assert payload["strategy_loop_summary"]["operator_reason_details"] == {
+        "scheduler_recent_runs_healthy": "Recent scheduler job-run observations are healthy."
+    }
+    assert payload["operator_reason_details"] == {
+        "scheduler_recent_runs_healthy": "Recent scheduler job-run observations are healthy."
+    }
     assert payload["strategy_loop_summary"]["audit_event_count"] == 1
     assert [spread["id"] for spread in payload["monitorable_spreads"]] == ["spread-1"]
     assert payload["monitorable_spreads"][0]["monitor"] == {"should_close": False}
@@ -623,7 +653,7 @@ def test_unattended_notification_dry_run_reports_warning_when_lottery_auto_order
         "payload": payload,
     }
 
-    notification = build_unattended_notification(report, action="arm")
+    notification = build_unattended_notification(report, action="arm", run_id="run-20260618")
     result = dispatch_unattended_notification(
         notification,
         channel="dry-run",
@@ -631,7 +661,13 @@ def test_unattended_notification_dry_run_reports_warning_when_lottery_auto_order
     )
 
     assert notification["event_type"] == "unattended_paper_arm"
+    assert notification["run_id"] == "run-20260618"
     assert notification["level"] == "warning"
+    assert notification["severity"] == "warning"
+    assert notification["reason_codes"] == ["scheduler_recent_runs_healthy"]
+    assert notification["broker_submit_allowed"] is False
+    assert notification["local_repair_available"] is False
+    assert notification["recommended_action"].startswith("Verify zero-DTE lottery auto-ordering")
     assert notification["metrics"]["zero_dte_lottery_auto_order_enabled"] is True
     assert "email" in notification["reserved_external_channels"]
     assert result["channel"] == "dry-run"
@@ -662,6 +698,79 @@ def test_unattended_notification_file_channel_writes_jsonl(tmp_path: Path) -> No
     payload = json.loads(line)
     assert payload["level"] == "critical"
     assert payload["account_id"] == "LBPT10087357"
+
+
+def test_unattended_notification_file_channel_rotates_large_jsonl(tmp_path: Path) -> None:
+    output_path = tmp_path / "notifications.jsonl"
+    output_path.write_text('{"old": true}\n', encoding="utf-8")
+    notification = {
+        "schema_version": "unattended_paper_notification_v1",
+        "event_type": "unattended_paper_status",
+        "run_id": "run-rotation",
+        "level": "info",
+    }
+
+    result = dispatch_unattended_notification(
+        notification,
+        channel="file",
+        notification_file=output_path,
+        max_file_bytes=1,
+    )
+
+    assert result["emitted"] is True
+    assert result["run_id"] == "run-rotation"
+    assert result["rotated_path"] is not None
+    rotated_path = Path(result["rotated_path"])
+    assert rotated_path.exists()
+    assert json.loads(rotated_path.read_text(encoding="utf-8").strip()) == {"old": True}
+    current_payload = json.loads(output_path.read_text(encoding="utf-8").strip())
+    assert current_payload["run_id"] == "run-rotation"
+
+
+def test_unattended_notification_reports_local_repair_availability() -> None:
+    notification = build_unattended_notification(
+        {
+            "status": "passed",
+            "mode": "paper",
+            "summary": "Unattended paper status.",
+            "generated_at": "2026-06-04T14:32:00Z",
+            "payload": {
+                "account_id": "LBPT10087357",
+                "operator_reason_codes": ["local_repair_available"],
+                "primary_blocker": "local_repair_available",
+                "local_repair_available": True,
+                "strategy_loop_summary": {
+                    "account_id": "LBPT10087357",
+                    "failed_checks": [],
+                    "warning_checks": [],
+                },
+            },
+        },
+        action="status",
+    )
+
+    assert notification["local_repair_available"] is True
+    assert notification["primary_blocker"] == "local_repair_available"
+    assert notification["reason_codes"] == ["local_repair_available"]
+    assert "/ops/consistency" in notification["recommended_action"]
+
+
+def test_unattended_notification_failed_report_points_to_error() -> None:
+    notification = build_unattended_notification(
+        {
+            "status": "failed",
+            "mode": "paper",
+            "summary": "Unattended paper workflow failed.",
+            "generated_at": "2026-06-04T14:32:00Z",
+            "payload": {"account_id": "LBPT10087357"},
+            "error": "operator_posture_ready: bull put monitor failed",
+        },
+        action="status",
+    )
+
+    assert notification["level"] == "critical"
+    assert notification["primary_blocker"] == "operator_posture_ready: bull put monitor failed"
+    assert notification["recommended_action"] == "Review unattended failure: operator_posture_ready: bull put monitor failed"
 
 
 def test_unattended_notification_respects_min_level() -> None:

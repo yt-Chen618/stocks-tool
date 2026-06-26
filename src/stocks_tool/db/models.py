@@ -477,6 +477,36 @@ class SchedulerJobRunRecord(TimestampMixin, Base):
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
 
 
+class SchedulerTaskStateRecord(TimestampMixin, Base):
+    __tablename__ = "scheduler_task_states"
+    __table_args__ = (
+        UniqueConstraint("external_account_id", "job_key", name="uq_scheduler_task_states_account_job"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    job_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    job_label: Mapped[str | None] = mapped_column(String(160))
+    last_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    last_status: Mapped[str | None] = mapped_column(String(24), index=True)
+    last_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    backoff_seconds: Mapped[int | None] = mapped_column(Integer)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    lease_owner: Mapped[str | None] = mapped_column(String(120), index=True)
+    lease_acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
 class StrategyAuditEventRecord(TimestampMixin, Base):
     __tablename__ = "strategy_audit_events"
 

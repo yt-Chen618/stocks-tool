@@ -38,6 +38,7 @@ from stocks_tool.domain.models import (
     MarketEventImportResult,
     PositionSnapshot,
     SchedulerJobRun,
+    SchedulerTaskState,
 )
 
 
@@ -45,12 +46,94 @@ class FakeSchedulerJobRunRepository:
     def __init__(self) -> None:
         self.runs: list[SchedulerJobRun] = []
 
-    def create_run(self, run: SchedulerJobRun) -> SchedulerJobRun:
+    def create_run(self, run: SchedulerJobRun, *, update_task_state: bool = True) -> SchedulerJobRun:
         self.runs.append(run)
         return run
 
     def list_runs(self, **kwargs) -> list[SchedulerJobRun]:
         return self.runs
+
+
+class FakeSchedulerTaskStateRepository:
+    def __init__(self) -> None:
+        self.states: dict[tuple[str | None, str], SchedulerTaskState] = {}
+
+    def get_state(self, *, external_account_id: str | None, job_key: str) -> SchedulerTaskState | None:
+        return self.states.get((external_account_id, job_key))
+
+    def list_states(self, **kwargs) -> list[SchedulerTaskState]:
+        return list(self.states.values())
+
+    def try_acquire_lease(
+        self,
+        *,
+        external_account_id: str | None,
+        job_key: str,
+        job_label: str | None,
+        lease_owner: str,
+        lease_expires_at: datetime,
+        now: datetime,
+    ) -> SchedulerTaskState:
+        key = (external_account_id, job_key)
+        state = self.states.get(key)
+        if state is None:
+            state = SchedulerTaskState(
+                external_account_id=external_account_id,
+                job_key=job_key,
+                job_label=job_label,
+            )
+        if (
+            state.lease_owner
+            and state.lease_owner != lease_owner
+            and state.lease_expires_at is not None
+            and state.lease_expires_at > now
+        ):
+            self.states[key] = state
+            return state
+        state = state.model_copy(
+            update={
+                "job_label": job_label,
+                "lease_owner": lease_owner,
+                "lease_acquired_at": now,
+                "lease_expires_at": lease_expires_at,
+            }
+        )
+        self.states[key] = state
+        return state
+
+    def release_lease(self, *, external_account_id: str | None, job_key: str, lease_owner: str) -> SchedulerTaskState | None:
+        key = (external_account_id, job_key)
+        state = self.states.get(key)
+        if state is None:
+            return None
+        if state.lease_owner == lease_owner:
+            state = state.model_copy(
+                update={
+                    "lease_owner": None,
+                    "lease_acquired_at": None,
+                    "lease_expires_at": None,
+                }
+            )
+            self.states[key] = state
+        return state
+
+    def upsert_from_run(self, run: SchedulerJobRun) -> SchedulerTaskState:
+        state = SchedulerTaskState(
+            external_account_id=run.external_account_id,
+            job_key=run.job_key,
+            job_label=run.job_label,
+            last_run_id=run.id,
+            last_status=run.status,
+            last_started_at=run.started_at,
+            last_completed_at=run.completed_at,
+            next_attempt_at=run.next_attempt_at,
+            backoff_seconds=run.backoff_seconds,
+            consecutive_failures=run.consecutive_failures,
+            error_message=run.error_message,
+            detail=run.detail,
+        )
+        self.states[(run.external_account_id, run.job_key)] = state
+        return state
 
 
 def build_broker_account() -> BrokerAccount:
@@ -238,6 +321,82 @@ def test_reconciliation_coordinator_records_backoff_and_skip_scheduler_job_runs(
     assert backoff_run.backoff_seconds == 30
     assert backoff_run.next_attempt_at == datetime(2026, 6, 15, 14, 30, 30, tzinfo=timezone.utc)
     assert skipped_run.next_attempt_at == backoff_run.next_attempt_at
+
+
+def test_reconciliation_coordinator_uses_persisted_backoff_state_after_restart() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    task_states = FakeSchedulerTaskStateRepository()
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+    next_attempt = datetime(2026, 6, 15, 14, 45, tzinfo=timezone.utc)
+    task_states.states[("LBPT10087357", "orders-sync")] = SchedulerTaskState(
+        external_account_id="LBPT10087357",
+        job_key="orders-sync",
+        job_label="order reconciliation",
+        last_status=SchedulerJobRunStatus.BACKOFF,
+        next_attempt_at=next_attempt,
+        consecutive_failures=2,
+    )
+    callback = Mock()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    coordinator._scheduler_task_states = task_states
+
+    coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="orders-sync",
+        task_label="order reconciliation",
+        now=now,
+        callback=callback,
+    )
+
+    callback.assert_not_called()
+    assert len(scheduler_runs.runs) == 1
+    run = scheduler_runs.runs[0]
+    assert run.status == SchedulerJobRunStatus.SKIPPED
+    assert run.next_attempt_at == next_attempt
+    assert run.consecutive_failures == 2
+
+
+def test_reconciliation_coordinator_skips_when_scheduler_task_lease_is_active() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    task_states = FakeSchedulerTaskStateRepository()
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+    lease_expires = datetime(2026, 6, 15, 14, 35, tzinfo=timezone.utc)
+    task_states.states[("LBPT10087357", "orders-sync")] = SchedulerTaskState(
+        external_account_id="LBPT10087357",
+        job_key="orders-sync",
+        job_label="order reconciliation",
+        lease_owner="other-worker",
+        lease_acquired_at=now,
+        lease_expires_at=lease_expires,
+    )
+    callback = Mock()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    coordinator._scheduler_task_states = task_states
+
+    coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="orders-sync",
+        task_label="order reconciliation",
+        now=now,
+        callback=callback,
+    )
+
+    callback.assert_not_called()
+    assert len(scheduler_runs.runs) == 1
+    run = scheduler_runs.runs[0]
+    assert run.status == SchedulerJobRunStatus.SKIPPED
+    assert run.next_attempt_at == lease_expires
+    assert run.detail == "Skipped because scheduler task lease is active."
 
 
 def patch_covered_call_reconciliation_dependencies(
