@@ -8,23 +8,18 @@ from stocks_tool.application.services.orders import OrderService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
-    BrokerName,
     ExecutionMode,
     OptionRight,
     OrderSide,
     OrderStatus,
-    OrderType,
     StrategyRunStatus,
     StrategySignalType,
-    TimeInForce,
 )
 from stocks_tool.domain.models import (
-    CreateOrderRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
     ExecuteZeroDteLotteryRequest,
     OptionChainEntry,
-    OptionContractRef,
     OptionMarketSnapshot,
     Order,
     SecurityQuoteSnapshot,
@@ -37,6 +32,15 @@ from stocks_tool.domain.models import (
 )
 from stocks_tool.ports.repository import BrokerAccountRepository, StrategyExperimentRepository
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
+
+
+class ZeroDteExecutionDisabledError(RuntimeError):
+    code = "zero_dte_execution_disabled_pending_lifecycle"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Zero-DTE execution is disabled until expiry and assignment handling is implemented."
+        )
 
 
 class ZeroDteLotteryStrategyService:
@@ -79,6 +83,8 @@ class ZeroDteLotteryStrategyService:
         if mode != ExecutionMode.PAPER:
             raise ValueError("Zero-DTE lottery automation is paper-only in the current implementation.")
         self._ensure_account(external_account_id)
+        if request.auto_execute_enabled is True:
+            raise ZeroDteExecutionDisabledError()
         if request.auto_execute_enabled is not None:
             self.settings.zero_dte_lottery_strategy.auto_execute_enabled = request.auto_execute_enabled
         return self._runtime_state(external_account_id=external_account_id, mode=mode)
@@ -210,63 +216,7 @@ class ZeroDteLotteryStrategyService:
         )
 
     def execute(self, request: ExecuteZeroDteLotteryRequest) -> ZeroDteLotteryExecutionResult:
-        if request.mode != ExecutionMode.PAPER:
-            raise ValueError("Zero-DTE lottery execution is paper-only in the current implementation.")
-        if not request.confirm_paper_order:
-            raise ValueError("Zero-DTE lottery execution requires confirm_paper_order=true.")
-        if self.order_service is None:
-            raise ValueError("Zero-DTE lottery execution requires an order service.")
-        preview = self.preview(
-            external_account_id=request.external_account_id,
-            symbol=request.symbol,
-            direction=request.direction,
-            mode=request.mode,
-            as_of=request.as_of,
-        )
-        if not preview.eligible or preview.candidate is None:
-            reason = preview.reasons[0] if preview.reasons else "Zero-DTE lottery preview did not produce a candidate."
-            raise ValueError(reason)
-
-        self._assert_daily_trade_capacity(
-            external_account_id=request.external_account_id,
-            mode=request.mode,
-            evaluated_at=preview.evaluated_at,
-        )
-        candidate = preview.candidate
-        limit_price = request.limit_price or candidate.option_ask
-        premium_at_limit = (
-            limit_price
-            * Decimal(candidate.contracts)
-            * Decimal("100")
-        ).quantize(Decimal("0.01"))
-        if premium_at_limit > self.settings.zero_dte_lottery_strategy.max_premium_per_trade:
-            raise ValueError("Zero-DTE lottery limit price exceeds the configured $150 premium cap.")
-
-        order = self.order_service.submit_order(
-            CreateOrderRequest(
-                external_account_id=request.external_account_id,
-                broker=BrokerName.LONGBRIDGE,
-                symbol=candidate.option_symbol,
-                asset_type=AssetType.OPTION,
-                side=OrderSide.BUY,
-                quantity=candidate.contracts,
-                order_type=OrderType.LIMIT,
-                time_in_force=TimeInForce.DAY,
-                mode=request.mode,
-                limit_price=limit_price,
-                option_contract=OptionContractRef(
-                    underlying_symbol=candidate.underlying_symbol,
-                    expiration_date=candidate.expiration_date,
-                    strike=candidate.strike,
-                    right=candidate.direction,
-                ),
-                remark=self._order_remark(request.remark),
-            )
-        )
-        return ZeroDteLotteryExecutionResult(
-            preview=preview,
-            order=order,
-        )
+        raise ZeroDteExecutionDisabledError()
 
     def run_scan(
         self,
@@ -278,6 +228,10 @@ class ZeroDteLotteryStrategyService:
         as_of: datetime | None = None,
         force: bool = False,
     ) -> ZeroDteLotteryScanResult:
+        if force:
+            raise ZeroDteExecutionDisabledError()
+        if self.settings.zero_dte_lottery_strategy.auto_execute_enabled:
+            raise ZeroDteExecutionDisabledError()
         scanned_at = self._reference_time(as_of)
         if mode != ExecutionMode.PAPER:
             raise ValueError("Zero-DTE lottery automation is paper-only in the current implementation.")

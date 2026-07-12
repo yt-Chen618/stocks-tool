@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
@@ -8,13 +8,23 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeIntegrationError,
 )
 from stocks_tool.api.dependencies import get_bull_put_strategy_service, get_order_service
-from stocks_tool.application.services.bull_put_strategy import ACTIVE_SPREAD_STATUSES, BullPutStrategyService
+from stocks_tool.api.idempotency import require_idempotency_key
+from stocks_tool.application.services.bull_put_strategy import (
+    ACTIVE_SPREAD_STATUSES,
+    BullPutActionIdempotencyConflictError,
+    BullPutStrategyService,
+)
 from stocks_tool.application.services.operator_status import (
     OPEN_ORDER_STATUSES,
     bull_put_lifecycle_warnings,
     order_lifecycle_lookup,
 )
-from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.orders import (
+    OrderService,
+    TradingIntentConflictError,
+    TradingIntentError,
+    TradingIntentOutcomeUnknownError,
+)
 from stocks_tool.domain.enums import ExecutionMode, SpreadStatus
 from stocks_tool.domain.models import (
     BullPutDashboardSnapshot,
@@ -32,6 +42,25 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter()
+
+
+def _raise_strategy_intent_http_error(exc: TradingIntentError) -> None:
+    code = "order_intent_rejected"
+    if isinstance(exc, TradingIntentConflictError):
+        code = "idempotency_conflict"
+    elif isinstance(exc, TradingIntentOutcomeUnknownError):
+        code = "order_outcome_unknown"
+    raise HTTPException(
+        status_code=409,
+        detail={"code": code, "intent_id": exc.intent_id, "retryable": False},
+    ) from exc
+
+
+def _raise_action_conflict_http_error(exc: BullPutActionIdempotencyConflictError) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "idempotency_conflict", "retryable": False},
+    ) from exc
 
 
 @router.get("/bull-put/preview", response_model=BullPutSpreadScanResult)
@@ -188,6 +217,7 @@ def update_bull_put_runtime_state(
 @router.post("/bull-put/runtime/{external_account_id}/scan", response_model=BullPutStrategyScanRunResult)
 def run_bull_put_runtime_scan(
     external_account_id: str,
+    response: Response,
     mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     force: bool = Query(default=False, description="Run outside the scheduled ET scan window."),
     as_of: datetime | None = Query(
@@ -195,14 +225,31 @@ def run_bull_put_runtime_scan(
         description="Optional UTC timestamp for deterministic auto-scan checks, e.g. 2026-05-23T14:45:00Z",
     ),
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
+    confirm_paper_order: bool = Header(default=False, alias="X-Confirm-Paper-Order"),
 ) -> BullPutStrategyScanRunResult:
+    if force and not confirm_paper_order:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "paper_order_not_confirmed", "message": "X-Confirm-Paper-Order: true is required."},
+        )
     try:
-        return service.run_entry_scan(
+        result = service.run_entry_scan(
             external_account_id=external_account_id,
             mode=mode,
             as_of=as_of,
             force=force,
+            idempotency_key=idempotency_key,
         )
+        if result.idempotent_replayed or (
+            result.executed_spread is not None and result.executed_spread.idempotent_replayed
+        ):
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except BullPutActionIdempotencyConflictError as exc:
+        _raise_action_conflict_http_error(exc)
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -242,10 +289,24 @@ def run_bull_put_runtime_review(
 @router.post("/bull-put/execute", response_model=BullPutSpread, status_code=201)
 def execute_bull_put_spread(
     request: ExecuteBullPutSpreadRequest,
+    response: Response,
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> BullPutSpread:
+    if not request.confirm_paper_order:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "paper_order_not_confirmed", "message": "Set confirm_paper_order=true."},
+        )
     try:
-        return service.execute_spread(request)
+        spread = service.execute_spread(request, idempotency_key=idempotency_key)
+        if spread.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return spread
+    except BullPutActionIdempotencyConflictError as exc:
+        _raise_action_conflict_http_error(exc)
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
@@ -281,10 +342,17 @@ def refresh_bull_put_spread(
 def recover_bull_put_close(
     spread_id: str,
     request: RecoverBullPutCloseRequest,
+    response: Response,
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> BullPutSpread:
     try:
-        return service.recover_close(spread_id, request)
+        spread = service.recover_close(spread_id, request, idempotency_key=idempotency_key)
+        if spread.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return spread
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -317,14 +385,21 @@ def get_bull_put_recover_close_eligibility(
 @router.post("/bull-put/spreads/{spread_id}/monitor", response_model=BullPutSpreadMonitorResult)
 def monitor_bull_put_spread(
     spread_id: str,
+    response: Response,
     as_of: datetime | None = Query(
         default=None,
         description="Optional UTC timestamp for deterministic exit checks, e.g. 2026-05-23T15:00:00Z",
     ),
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> BullPutSpreadMonitorResult:
     try:
-        return service.monitor_spread(spread_id, as_of=as_of)
+        result = service.monitor_spread(spread_id, as_of=as_of, idempotency_key=idempotency_key)
+        if result.spread.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

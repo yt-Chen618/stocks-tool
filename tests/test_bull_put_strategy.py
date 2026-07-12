@@ -6,6 +6,10 @@ import pytest
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeIntegrationError
 from stocks_tool.application.services.bull_put_strategy import BullPutStrategyService
+from stocks_tool.application.services.orders import (
+    TradingIntentConflictError,
+    TradingIntentOutcomeUnknownError,
+)
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -18,10 +22,13 @@ from stocks_tool.domain.enums import (
     OrderType,
     SpreadStatus,
     TimeInForce,
+    TradingIntentState,
+    TradingOperation,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
     BrokerAccount,
+    BrokerOrderIntent,
     BullPutSpread,
     ExecuteBullPutSpreadRequest,
     HistoricalPriceBar,
@@ -29,10 +36,14 @@ from stocks_tool.domain.models import (
     OptionChainEntry,
     OptionMarketSnapshot,
     Order,
+    PositionSnapshot,
+    PreparedTradeActionIntent,
     RecoverBullPutCloseRequest,
     SecurityQuoteSnapshot,
+    TradeActionIntent,
     UpdateBullPutStrategyRuntimeRequest,
 )
+from stocks_tool.ports.repository import ConcurrentSpreadUpdateError
 
 
 def build_broker_account() -> BrokerAccount:
@@ -92,6 +103,7 @@ def build_market_quote(
     last_done: Decimal,
     prev_close: Decimal,
     pre_market_last_done: Decimal | None = None,
+    timestamp: datetime = datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
 ) -> SecurityQuoteSnapshot:
     pre_market_quote = None
     if pre_market_last_done is not None:
@@ -111,7 +123,7 @@ def build_market_quote(
         open=prev_close,
         high=max(last_done, prev_close),
         low=min(last_done, prev_close),
-        timestamp=datetime(2026, 5, 26, 12, 20, tzinfo=timezone.utc),
+        timestamp=timestamp,
         volume=1_000_000,
         turnover=last_done * Decimal("1000000"),
         trade_status="Normal",
@@ -575,28 +587,64 @@ def build_service(
     underlying_quote: SecurityQuoteSnapshot | None = None,
 ) -> tuple[BullPutStrategyService, Mock, Mock, Mock]:
     adapter = Mock()
+    adapter.get_us_market_calendar.return_value = (True, False)
     broker_accounts = Mock()
     account_snapshots = Mock()
     spreads = Mock()
     order_service = Mock()
+    order_service.has_unresolved_intents.return_value = False
     broker_accounts.get_by_external_account_id.return_value = build_broker_account()
-    account_snapshots.list_account_snapshots.return_value = [account_snapshot or build_account_snapshot()]
+    current_account_snapshot = account_snapshot or build_account_snapshot()
+    account_snapshots.list_account_snapshots.return_value = [current_account_snapshot]
+    account_snapshots.create_account_snapshot.return_value = current_account_snapshot
+    adapter.build_account_snapshot.return_value = current_account_snapshot
+    order_service.reconcile_unresolved_intents.return_value = Mock(unresolved_intents=0)
+    order_service.sync_today_orders.return_value = Mock()
+    order_service.list_trading_intents.return_value = []
+    parent_counter = 0
+
+    def prepare_trade_action(**kwargs):
+        nonlocal parent_counter
+        parent_counter += 1
+        return PreparedTradeActionIntent(
+            intent=TradeActionIntent(
+                id=f"parent-action-{parent_counter}",
+                external_account_id=kwargs["external_account_id"],
+                broker=kwargs["broker"],
+                mode=kwargs["mode"],
+                idempotency_key=kwargs["idempotency_key"],
+                request_hash=kwargs["request_hash"],
+                action=kwargs["action_context"].action,
+                strategy_id=kwargs["action_context"].strategy_id,
+                entity_id=kwargs["action_context"].entity_id,
+                state=TradingIntentState.PREPARED,
+                request_payload=kwargs["request_payload"],
+                created_at=build_scan_time(),
+                updated_at=build_scan_time(),
+            ),
+            created=True,
+        )
+
+    order_service.prepare_trade_action.side_effect = prepare_trade_action
     quote_map = {
         "QQQ.US": underlying_quote or build_underlying_quote(),
         "SMH.US": build_market_quote(
             symbol="SMH.US",
             last_done=Decimal("500"),
             prev_close=Decimal("498"),
+            timestamp=build_scan_time(),
         ),
         "SOXL.US": build_market_quote(
             symbol="SOXL.US",
             last_done=Decimal("500"),
             prev_close=Decimal("498"),
+            timestamp=build_scan_time(),
         ),
         "EWY.US": build_market_quote(
             symbol="EWY.US",
             last_done=Decimal("500"),
             prev_close=Decimal("498"),
+            timestamp=build_scan_time(),
         ),
         "SPY.US": build_market_quote(
             symbol="SPY.US",
@@ -672,8 +720,9 @@ def build_service(
         "SPY260605P600000.US": (Decimal("2.50"), Decimal("2.70")),
     }[symbol]
     spreads.list_spreads.return_value = []
+    spreads.get_spread.return_value = None
     spreads.create_spread.side_effect = lambda spread: spread
-    spreads.update_spread.side_effect = lambda spread: spread
+    spreads.update_spread.side_effect = lambda spread, **kwargs: spread
     runtime_states = Mock()
     pre_open_runs = Mock()
     runtime_store: dict[str, object] = {}
@@ -687,6 +736,7 @@ def build_service(
         return state
 
     runtime_states.get_runtime_state.side_effect = get_runtime_state
+    runtime_states.lock_for_entry.side_effect = get_runtime_state
     runtime_states.upsert_runtime_state.side_effect = upsert_runtime_state
     pre_open_runs.get_by_session_date.side_effect = (
         lambda *, external_account_id, target_session_date, strategy_id="pre_open_put_check_v1": pre_open_store.get(
@@ -705,8 +755,9 @@ def build_service(
     )
     journal_service = Mock()
 
+    settings = Settings(bull_put_strategy={"entry_kill_switch_active": False})
     service = BullPutStrategyService(
-        settings=Settings(),
+        settings=settings,
         broker_accounts=broker_accounts,
         account_snapshots=account_snapshots,
         spreads=spreads,
@@ -714,7 +765,7 @@ def build_service(
         pre_open_runs=pre_open_runs,
         order_service=order_service,
         longbridge_adapter=adapter,
-        risk_service=RiskService(settings=Settings()),
+        risk_service=RiskService(settings=settings),
         journal_service=journal_service,
     )
     return service, adapter, spreads, order_service
@@ -728,6 +779,7 @@ def build_option_order(
     status: OrderStatus,
     limit_price: Decimal | None,
     external_order_id: str | None = None,
+    executed_quantity: int = 0,
 ) -> Order:
     option_contract = OptionContractRef(
         underlying_symbol="QQQ.US",
@@ -748,6 +800,7 @@ def build_option_order(
         time_in_force=TimeInForce.DAY,
         mode=ExecutionMode.PAPER,
         status=status,
+        executed_quantity=executed_quantity,
         limit_price=limit_price,
         option_contract=option_contract,
         raw_payload={
@@ -759,6 +812,17 @@ def build_option_order(
         created_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
     )
+
+
+def test_bull_put_p0_defaults_are_fail_closed_and_single_contract() -> None:
+    strategy = Settings().bull_put_strategy
+
+    assert strategy.entry_kill_switch_active is True
+    assert strategy.contracts_per_trade == 1
+    assert strategy.max_option_quote_age_seconds == 15
+
+    with pytest.raises(ValueError, match="contracts_per_trade=1"):
+        Settings(bull_put_strategy={"contracts_per_trade": 2})
 
 
 def test_preview_spread_selects_tradeable_candidate() -> None:
@@ -812,6 +876,44 @@ def test_preview_spread_fails_trend_filter() -> None:
 
     assert result.eligible is False
     assert "Underlying price is below the 20-day moving average." in result.reasons
+
+
+def test_preview_spread_rejects_cached_underlying_quote_for_entry() -> None:
+    cached_quote = build_underlying_quote().model_copy(
+        update={
+            "data_quality": "cached",
+            "warning_code": "longbridge_quote_cache_fallback",
+            "cache_age_seconds": 4,
+        }
+    )
+    service, _, _, _ = build_service(underlying_quote=cached_quote)
+
+    result = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert result.eligible is False
+    assert any("cached quote" in reason.lower() for reason in result.reasons)
+
+
+def test_preview_spread_rejects_stale_underlying_quote_for_entry() -> None:
+    stale_quote = build_underlying_quote().model_copy(
+        update={"timestamp": build_scan_time() - timedelta(seconds=16)}
+    )
+    service, _, _, _ = build_service(underlying_quote=stale_quote)
+
+    result = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert result.eligible is False
+    assert any("underlying quote is stale" in reason.lower() for reason in result.reasons)
 
 
 def test_preview_spread_blocks_risk_above_per_trade_limit() -> None:
@@ -876,7 +978,8 @@ def test_execute_spread_opens_position_when_both_legs_fill() -> None:
             symbol="QQQ.US",
             mode=ExecutionMode.PAPER,
             as_of=build_scan_time(),
-        )
+        ),
+        idempotency_key="bull-reprice-parent-key-0001",
     )
 
     assert spread.status == SpreadStatus.OPEN
@@ -888,6 +991,85 @@ def test_execute_spread_opens_position_when_both_legs_fill() -> None:
     assert spread.max_profit == Decimal("130.00")
     assert spread.max_loss == Decimal("170.00")
     assert spread.break_even == Decimal("468.70")
+    first_submit, second_submit = order_service.submit_order.call_args_list
+    assert first_submit.kwargs["idempotency_key"].startswith("strategy:")
+    assert second_submit.kwargs["idempotency_key"].startswith("strategy:")
+    assert first_submit.kwargs["idempotency_key"] != second_submit.kwargs["idempotency_key"]
+    assert first_submit.kwargs["action_context"].leg == "long_entry"
+    assert second_submit.kwargs["action_context"].leg == "short_entry"
+
+
+def test_execute_spread_locks_runtime_before_capacity_check_and_broker_submit() -> None:
+    service, _, spreads, order_service = build_service()
+    events: list[str] = []
+    service.runtime_states.lock_for_entry.side_effect = lambda **kwargs: (
+        events.append("runtime-lock")
+        or service.runtime_states.get_runtime_state(**kwargs)
+    )
+    spreads.list_spreads.return_value = []
+    spreads.create_spread.side_effect = lambda spread: events.append("spread-reserved") or spread
+    submitted_orders = iter(
+        [
+            build_option_order(
+                order_id="long-entry",
+                symbol="QQQ260619P467000.US",
+                side=OrderSide.BUY,
+                status=OrderStatus.FILLED,
+                limit_price=Decimal("1.10"),
+            ),
+            build_option_order(
+                order_id="short-entry",
+                symbol="QQQ260619P470000.US",
+                side=OrderSide.SELL,
+                status=OrderStatus.FILLED,
+                limit_price=Decimal("2.40"),
+            ),
+        ]
+    )
+    order_service.submit_order.side_effect = lambda *args, **kwargs: (
+        events.append("broker-submit") or next(submitted_orders)
+    )
+
+    service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
+    assert events[:3] == [
+        "runtime-lock",
+        "spread-reserved",
+        "broker-submit",
+    ]
+
+
+def test_failed_entry_attempt_consumes_daily_capacity_before_broker_submit() -> None:
+    service, _, spreads, order_service = build_service()
+    attempted_at = build_scan_time()
+    spreads.list_spreads.return_value = [
+        build_open_spread(status=SpreadStatus.ENTRY_FAILED).model_copy(
+            update={
+                "entry_started_at": attempted_at,
+                "created_at": attempted_at,
+                "updated_at": attempted_at,
+            }
+        )
+    ]
+
+    with pytest.raises(ValueError, match="daily bull put entry-attempt capacity"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=attempted_at,
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
 
 
 def test_execute_spread_rejects_changed_locked_candidate() -> None:
@@ -948,6 +1130,40 @@ def test_execute_spread_reuses_locked_preview_and_refreshes_selected_legs() -> N
     assert spread.status == SpreadStatus.OPEN
     assert spread.long_symbol == "QQQ260619P467000.US"
     assert spread.short_symbol == "QQQ260619P470000.US"
+    qqq_calls = [
+        call
+        for call in adapter.get_quote.call_args_list
+        if call.kwargs.get("symbol") == "QQQ.US" or (call.args and call.args[0] == "QQQ.US")
+    ]
+    assert len(qqq_calls) == 2
+
+
+def test_execute_spread_blocks_when_refreshed_underlying_is_cached() -> None:
+    service, adapter, _, order_service = build_service()
+    preview = service.preview_spread(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+    assert preview.candidate_token is not None
+    adapter.get_quote.side_effect = None
+    adapter.get_quote.return_value = build_underlying_quote().model_copy(
+        update={"data_quality": "cached", "warning_code": "quote_cache_fallback"}
+    )
+
+    with pytest.raises(ValueError, match="Cached quote evidence"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+                candidate_token=preview.candidate_token,
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
 
 
 def test_execute_spread_uses_buffered_long_limit_and_waits_for_fill() -> None:
@@ -1053,12 +1269,22 @@ def test_execute_spread_reprices_long_leg_before_fill() -> None:
             symbol="QQQ.US",
             mode=ExecutionMode.PAPER,
             as_of=build_scan_time(),
-        )
+        ),
+        idempotency_key="bull-reprice-parent-key-0002",
     )
 
     assert spread.status == SpreadStatus.OPEN
     assert order_service.submit_order.call_args_list[0].args[0].limit_price == Decimal("1.10")
     assert order_service.submit_order.call_args_list[1].args[0].limit_price == Decimal("1.15")
+    assert {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    } == {"parent-action-1"}
+    assert order_service.cancel_order.call_args.kwargs["parent_action_intent_id"] == "parent-action-1"
+    assert (
+        order_service.cancel_order.call_args.kwargs["action_context"].entity_id
+        == order_service.submit_order.call_args_list[0].kwargs["action_context"].entity_id
+    )
 
 
 def test_execute_spread_blocks_outside_regular_session() -> None:
@@ -1190,6 +1416,453 @@ def test_execute_spread_rolls_back_when_short_leg_does_not_fill() -> None:
     assert spread.exit_reason == "short_entry_unfilled"
 
 
+def test_execute_spread_retains_long_hedge_when_short_submit_outcome_is_unknown() -> None:
+    service, _, _, order_service = build_service()
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        TradingIntentOutcomeUnknownError("short-intent-1"),
+    ]
+
+    with pytest.raises(TradingIntentOutcomeUnknownError):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            )
+        )
+
+    persisted = service.spreads.update_spread.call_args.args[0]
+    assert persisted.status == SpreadStatus.ENTRY_PENDING_SHORT
+    assert persisted.manual_action_required is True
+    assert persisted.lifecycle_warning_code == "short_entry_outcome_unknown"
+    assert persisted.long_exit_order_id is None
+    assert order_service.submit_order.call_count == 2
+
+
+def test_execute_spread_marks_unknown_long_submit_for_manual_action() -> None:
+    service, _, _, order_service = build_service()
+    order_service.submit_order.side_effect = TradingIntentOutcomeUnknownError("long-intent-1")
+
+    with pytest.raises(TradingIntentOutcomeUnknownError):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            )
+        )
+
+    persisted = service.spreads.update_spread.call_args.args[0]
+    assert persisted.status == SpreadStatus.ENTRY_PENDING_LONG
+    assert persisted.manual_action_required is True
+    assert persisted.lifecycle_warning_code == "long_entry_outcome_unknown"
+    assert order_service.submit_order.call_count == 1
+
+
+def test_execute_spread_links_long_order_and_stops_when_local_link_initially_fails() -> None:
+    service, _, spreads, order_service = build_service()
+    order_service.submit_order.return_value = build_option_order(
+        order_id="long-entry",
+        symbol="QQQ260619P467000.US",
+        side=OrderSide.BUY,
+        status=OrderStatus.FILLED,
+        limit_price=Decimal("1.10"),
+        executed_quantity=1,
+    )
+
+    def update_spread(spread: BullPutSpread, **kwargs) -> BullPutSpread:
+        if spread.long_entry_order_id == "long-entry" and not spread.manual_action_required:
+            raise ValueError("local spread link failed")
+        return spread
+
+    spreads.update_spread.side_effect = update_spread
+
+    result = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
+    assert result.status == SpreadStatus.ENTRY_PENDING_LONG
+    assert result.long_entry_order_id == "long-entry"
+    assert result.manual_action_required is True
+    assert result.lifecycle_warning_code == "long_entry_link_failed"
+    assert order_service.submit_order.call_count == 1
+
+
+def test_execute_spread_retains_hedge_and_links_short_when_local_link_initially_fails() -> None:
+    service, _, spreads, order_service = build_service()
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        build_option_order(
+            order_id="short-entry",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+            executed_quantity=1,
+        ),
+    ]
+
+    def update_spread(spread: BullPutSpread, **kwargs) -> BullPutSpread:
+        if spread.short_entry_order_id == "short-entry" and not spread.manual_action_required:
+            raise ValueError("local spread link failed")
+        return spread
+
+    spreads.update_spread.side_effect = update_spread
+
+    result = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
+    assert result.status == SpreadStatus.ENTRY_PENDING_SHORT
+    assert result.long_entry_order_id == "long-entry"
+    assert result.short_entry_order_id == "short-entry"
+    assert result.manual_action_required is True
+    assert result.lifecycle_warning_code == "short_entry_link_failed"
+    assert result.long_exit_order_id is None
+    assert order_service.submit_order.call_count == 2
+
+
+def test_execute_spread_does_not_reprice_while_cancel_is_still_pending() -> None:
+    service, _, _, order_service = build_service()
+    service.settings.bull_put_strategy.entry_fill_timeout_seconds = 0
+    service.settings.bull_put_strategy.entry_reprice_max_steps = 2
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        build_option_order(
+            order_id="short-entry-1",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("2.40"),
+        ),
+    ]
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="short-entry-1",
+        symbol="QQQ260619P470000.US",
+        side=OrderSide.SELL,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("2.40"),
+    )
+    order_service.cancel_order.return_value = build_option_order(
+        order_id="short-entry-1",
+        symbol="QQQ260619P470000.US",
+        side=OrderSide.SELL,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("2.40"),
+    )
+
+    spread = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
+    assert spread.manual_action_required is True
+    assert order_service.submit_order.call_count == 2
+
+
+def test_execute_spread_does_not_reprice_after_partial_fill_cancel() -> None:
+    service, _, _, order_service = build_service()
+    service.settings.bull_put_strategy.entry_fill_timeout_seconds = 0
+    service.settings.bull_put_strategy.entry_reprice_max_steps = 2
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        build_option_order(
+            order_id="short-entry-1",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.PARTIALLY_FILLED,
+            limit_price=Decimal("2.40"),
+            executed_quantity=1,
+        ),
+    ]
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="short-entry-1",
+        symbol="QQQ260619P470000.US",
+        side=OrderSide.SELL,
+        status=OrderStatus.PARTIALLY_FILLED,
+        limit_price=Decimal("2.40"),
+        executed_quantity=1,
+    )
+    order_service.cancel_order.return_value = build_option_order(
+        order_id="short-entry-1",
+        symbol="QQQ260619P470000.US",
+        side=OrderSide.SELL,
+        status=OrderStatus.CANCELED,
+        limit_price=Decimal("2.40"),
+        executed_quantity=1,
+    )
+
+    spread = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        )
+    )
+
+    assert spread.manual_action_required is True
+    assert order_service.submit_order.call_count == 2
+
+
+def test_execute_spread_replays_action_before_capacity_and_conflicts_on_changed_request() -> None:
+    service, _, spreads, order_service = build_service()
+    stored: dict[str, BullPutSpread] = {}
+
+    def create_spread(spread: BullPutSpread) -> BullPutSpread:
+        stored[spread.id] = spread
+        return spread
+
+    def update_spread(spread: BullPutSpread, *, expected_version: int) -> BullPutSpread:
+        assert stored[spread.id].version == expected_version
+        saved = spread.model_copy(update={"version": expected_version + 1})
+        stored[saved.id] = saved
+        return saved
+
+    spreads.get_spread.side_effect = lambda spread_id: stored.get(spread_id)
+    spreads.list_spreads.side_effect = lambda **kwargs: list(stored.values())
+    spreads.create_spread.side_effect = create_spread
+    spreads.update_spread.side_effect = update_spread
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        build_option_order(
+            order_id="short-entry",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+            executed_quantity=1,
+        ),
+    ]
+    request = ExecuteBullPutSpreadRequest(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    first = service.execute_spread(request, idempotency_key="bull-action-0001")
+    replay = service.execute_spread(request, idempotency_key="bull-action-0001")
+
+    assert first.status == SpreadStatus.OPEN
+    assert replay.model_dump() == first.model_dump()
+    assert replay.idempotent_replayed is True
+    assert order_service.submit_order.call_count == 2
+    child_parent_ids = {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    }
+    child_keys = {
+        call_args.kwargs["idempotency_key"]
+        for call_args in order_service.submit_order.call_args_list
+    }
+    assert child_parent_ids == {"parent-action-1"}
+    assert len(child_keys) == 2
+    assert "bull-action-0001" not in child_keys
+    assert order_service.has_unresolved_intents.call_args.kwargs[
+        "exclude_action_intent_id"
+    ] == "parent-action-1"
+
+    with pytest.raises(ValueError, match="already used for a different request"):
+        service.execute_spread(
+            request.model_copy(update={"symbol": "SMH.US"}),
+            idempotency_key="bull-action-0001",
+        )
+    assert order_service.submit_order.call_count == 2
+
+
+def test_force_scan_replay_without_as_of_ignores_new_server_time_and_skips_sync() -> None:
+    service, _, spreads, order_service = build_service()
+    key = "bull-force-scan-key-0001"
+    spread_id, request_hash = service._bull_put_action_identity_for_payload(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        idempotency_key=key,
+        request_payload={
+            "action": "bull_put_scan",
+            "external_account_id": "LBPT10087357",
+            "mode": "paper",
+            "force": True,
+            "as_of": None,
+        },
+    )
+    existing = build_open_spread().model_copy(
+        update={
+            "id": spread_id,
+            "raw_payload": {"action_request_hash": request_hash},
+        }
+    )
+    spreads.get_spread.return_value = existing
+
+    result = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        force=True,
+        idempotency_key=key,
+    )
+
+    assert result.executed_spread is not None
+    assert result.executed_spread.id == spread_id
+    assert result.executed_spread.idempotent_replayed is True
+    order_service.sync_today_orders.assert_not_called()
+
+
+def test_execute_spread_replays_persisted_parent_action_before_sync() -> None:
+    service, _, _, order_service = build_service()
+    original = build_open_spread().model_copy(
+        update={
+            "id": "parent-replay-spread",
+            "raw_payload": {"action_request_hash": "stored-by-parent"},
+        }
+    )
+    order_service.prepare_trade_action.side_effect = None
+    order_service.prepare_trade_action.return_value = PreparedTradeActionIntent(
+        intent=TradeActionIntent(
+            id="parent-replay-action",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key="parent-replay-key-0001",
+            request_hash="request-hash",
+            action="bull_put_execute",
+            strategy_id="paper_bull_put_v1",
+            entity_id=original.id,
+            state=TradingIntentState.PERSISTED,
+            request_payload={},
+            response_payload=original.model_dump(mode="json"),
+            created_at=build_scan_time(),
+            updated_at=build_scan_time(),
+        ),
+        created=False,
+    )
+
+    replay = service.execute_spread(
+        ExecuteBullPutSpreadRequest(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            mode=ExecutionMode.PAPER,
+            as_of=build_scan_time(),
+        ),
+        idempotency_key="parent-replay-key-0001",
+    )
+
+    assert replay.model_dump() == original.model_dump()
+    assert replay.idempotent_replayed is True
+    order_service.sync_today_orders.assert_not_called()
+    order_service.submit_order.assert_not_called()
+
+
+def test_execute_spread_parent_action_changed_payload_conflicts_before_sync() -> None:
+    service, _, _, order_service = build_service()
+    order_service.prepare_trade_action.side_effect = TradingIntentConflictError(
+        "parent-conflict-action"
+    )
+
+    with pytest.raises(TradingIntentConflictError) as exc_info:
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            ),
+            idempotency_key="parent-conflict-key-0001",
+        )
+
+    assert exc_info.value.intent_id == "parent-conflict-action"
+    order_service.sync_today_orders.assert_not_called()
+    order_service.submit_order.assert_not_called()
+
+
+def test_execute_spread_marks_shared_parent_unknown_after_hedge_then_unknown_short() -> None:
+    service, _, _, order_service = build_service()
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            executed_quantity=1,
+        ),
+        TradingIntentOutcomeUnknownError("short-child-unknown"),
+    ]
+
+    with pytest.raises(TradingIntentOutcomeUnknownError):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            ),
+            idempotency_key="parent-unknown-key-0001",
+        )
+
+    assert {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    } == {"parent-action-1"}
+    order_service.mark_trade_action_unknown.assert_called_with(
+        "parent-action-1",
+        "Broker mutation outcome is unknown; do not retry with a new key.",
+    )
+    persisted = service.spreads.update_spread.call_args.args[0]
+    assert persisted.manual_action_required is True
+    assert persisted.status == SpreadStatus.ENTRY_PENDING_SHORT
+
 def test_execute_spread_blocks_when_same_symbol_is_already_active() -> None:
     service, _, spreads, _ = build_service()
     spreads.list_spreads.return_value = [build_open_spread()]
@@ -1210,6 +1883,126 @@ def test_execute_spread_blocks_when_same_symbol_is_already_active() -> None:
         )
     else:
         raise AssertionError("Expected execute_spread to block when the same symbol is already active.")
+
+
+def test_execute_spread_blocks_when_trading_intent_is_unresolved() -> None:
+    service, _, _, order_service = build_service()
+    order_service.has_unresolved_intents.return_value = True
+
+    with pytest.raises(ValueError, match="unresolved trading intent"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_execute_spread_blocks_when_current_cycle_order_sync_fails() -> None:
+    service, _, _, order_service = build_service()
+    order_service.sync_today_orders.side_effect = RuntimeError("order sync failed")
+
+    with pytest.raises(ValueError, match="current-cycle order/account synchronization failed"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            ),
+            idempotency_key="sync-failure-parent-key-0001",
+        )
+
+    order_service.submit_order.assert_not_called()
+    order_service.mark_trade_action_rejected.assert_called_with(
+        "parent-action-1",
+        "Bull Put entry is blocked because current-cycle order/account synchronization failed.",
+    )
+
+
+def test_execute_spread_blocks_same_day_option_position_mapped_as_stock() -> None:
+    snapshot = build_account_snapshot()
+    snapshot.positions.append(
+        PositionSnapshot(
+            symbol="QQQ260522P470000.US",
+            asset_type=AssetType.STOCK,
+            quantity=Decimal("1"),
+            average_cost=Decimal("2.50"),
+            market_value=Decimal("250"),
+            unrealized_pnl=Decimal("0"),
+        )
+    )
+    service, _, _, order_service = build_service(account_snapshot=snapshot)
+    audit_events = Mock()
+    service.audit_events = audit_events
+
+    with pytest.raises(ValueError, match="current-cycle order/account synchronization failed"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            ),
+            idempotency_key="bull-same-day-option-key-0001",
+        )
+
+    order_service.submit_order.assert_not_called()
+    order_service.mark_trade_action_rejected.assert_called_once()
+    warning = audit_events.create_event.call_args.args[0]
+    assert warning.warning_code == "same_day_option_position_requires_manual_action"
+    assert warning.payload["severity"] == "critical"
+    assert warning.payload["manual_action_required"] is True
+    order_service.mark_trade_action_unknown.assert_not_called()
+
+
+def test_reconciled_unknown_short_entry_is_linked_and_remains_manual() -> None:
+    service, _, spreads, order_service = build_service()
+    spread = build_open_spread(status=SpreadStatus.ENTRY_PENDING_SHORT).model_copy(
+        update={
+            "short_entry_order_id": None,
+            "manual_action_required": True,
+            "lifecycle_warning_code": "short_entry_outcome_unknown",
+        }
+    )
+    spreads.get_spread.return_value = spread
+    order_service.list_trading_intents.return_value = [
+        BrokerOrderIntent(
+            id="short-intent-1",
+            trade_action_intent_id="short-action-1",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key="strategy-short-entry",
+            request_hash="request-hash",
+            operation=TradingOperation.SUBMIT,
+            action="bull_put_entry",
+            strategy_id="paper_bull_put_v1",
+            entity_id="spread-1:publickeyhash",
+            leg="short_entry",
+            broker_marker="st:0123456789abcdef",
+            state=TradingIntentState.PERSISTED,
+            request_payload={},
+            response_payload={"id": "short-entry-reconciled"},
+            created_at=build_scan_time(),
+            updated_at=build_scan_time(),
+        )
+    ]
+
+    linked = service.relink_reconciled_order_intents(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+
+    assert linked == 1
+    persisted = spreads.update_spread.call_args.args[0]
+    assert persisted.short_entry_order_id == "short-entry-reconciled"
+    assert persisted.manual_action_required is True
+    assert persisted.lifecycle_warning_code == "reconciled_leg_linked_manual_review"
 
 
 def test_execute_spread_blocks_when_correlated_group_is_already_at_capacity() -> None:
@@ -1345,6 +2138,93 @@ def test_run_entry_scan_executes_and_updates_runtime_state() -> None:
     assert result.strategy_state.daily_entry_count == 1
     assert result.strategy_state.last_scan_result == "executed"
     assert service.journal_service.create_entry.call_count >= 1
+
+
+def test_run_entry_scan_pre_window_does_not_block_later_due_window() -> None:
+    service, _, _, order_service = build_service()
+    order_service.submit_order.side_effect = [
+        build_option_order(
+            order_id="long-entry-after-pre-window",
+            symbol="QQQ260619P467000.US",
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+        ),
+        build_option_order(
+            order_id="short-entry-after-pre-window",
+            symbol="QQQ260619P470000.US",
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+        ),
+    ]
+
+    early = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=datetime(2026, 5, 22, 14, 0, tzinfo=timezone.utc),
+    )
+    due = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=build_scan_time(),
+    )
+
+    assert early.executed is False
+    assert early.reason is not None
+    assert due.executed is True
+    parent_keys = [
+        call_args.kwargs["idempotency_key"]
+        for call_args in order_service.prepare_trade_action.call_args_list
+    ]
+    assert len(parent_keys) == 2
+    assert parent_keys[0] != parent_keys[1]
+    assert order_service.submit_order.call_count == 2
+
+
+def test_run_entry_scan_replays_exact_success_result_before_sync() -> None:
+    service, _, _, order_service = build_service()
+    scanned_at = datetime(2026, 5, 22, 14, 0, tzinfo=timezone.utc)
+    key = "bull-scan-not-due-replay-key-0001"
+
+    first = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=scanned_at,
+        idempotency_key=key,
+    )
+    response_payload = order_service.complete_trade_action.call_args.args[1]
+    sync_calls_after_first = order_service.sync_today_orders.call_count
+    order_service.prepare_trade_action.side_effect = None
+    order_service.prepare_trade_action.return_value = PreparedTradeActionIntent(
+        intent=TradeActionIntent(
+            id="persisted-scan-parent",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key=key,
+            request_hash="persisted-scan-hash",
+            action="bull_put_scan",
+            strategy_id="paper_bull_put_v1",
+            entity_id="persisted-scan-entity",
+            state=TradingIntentState.PERSISTED,
+            request_payload={},
+            response_payload=response_payload,
+            created_at=scanned_at,
+            updated_at=scanned_at,
+        ),
+        created=False,
+    )
+
+    replay = service.run_entry_scan(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        as_of=scanned_at,
+        idempotency_key=key,
+    )
+
+    assert replay.model_dump(mode="json") == first.model_dump(mode="json")
+    assert order_service.sync_today_orders.call_count == sync_calls_after_first
 
 
 def test_run_review_returns_not_due_before_threshold() -> None:
@@ -1749,6 +2629,81 @@ def test_refresh_spread_marks_canceled_stop_loss_close_order_for_manual_action()
     assert result.latest_close_order_status == "canceled"
 
 
+def test_refresh_spread_does_not_reopen_exit_pending_long_from_filled_entries() -> None:
+    service, _, spreads, order_service = build_service()
+    spread = build_open_spread(status=SpreadStatus.EXIT_PENDING_LONG).model_copy(
+        update={
+            "long_entry_order_id": "long-entry",
+            "short_entry_order_id": "short-entry",
+            "short_exit_order_id": "short-exit",
+            "long_exit_order_id": "long-exit",
+        }
+    )
+    spreads.get_spread.return_value = spread
+    orders = {
+        "long-entry": build_option_order(
+            order_id="long-entry",
+            symbol=spread.long_symbol,
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+        ),
+        "short-entry": build_option_order(
+            order_id="short-entry",
+            symbol=spread.short_symbol,
+            side=OrderSide.SELL,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("2.40"),
+        ),
+        "short-exit": build_option_order(
+            order_id="short-exit",
+            symbol=spread.short_symbol,
+            side=OrderSide.BUY,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.60"),
+        ),
+        "long-exit": build_option_order(
+            order_id="long-exit",
+            symbol=spread.long_symbol,
+            side=OrderSide.SELL,
+            status=OrderStatus.SUBMITTED,
+            limit_price=None,
+        ),
+    }
+    order_service.refresh_order.side_effect = lambda order_id: orders[order_id]
+
+    result = service.refresh_spread(spread.id)
+
+    assert result.status == SpreadStatus.EXIT_PENDING_LONG
+
+
+def test_refresh_spread_reloads_and_reevaluates_once_after_version_conflict() -> None:
+    service, _, spreads, order_service = build_service()
+    initial = build_open_spread(status=SpreadStatus.EXIT_PENDING_LONG).model_copy(
+        update={"version": 0, "long_exit_order_id": "long-exit"}
+    )
+    concurrent = initial.model_copy(update={"version": 1})
+    persisted = concurrent.model_copy(update={"version": 2})
+    spreads.get_spread.side_effect = [initial, concurrent]
+    spreads.update_spread.side_effect = [
+        ConcurrentSpreadUpdateError(initial.id),
+        persisted,
+    ]
+    order_service.refresh_order.return_value = build_option_order(
+        order_id="long-exit",
+        symbol=initial.long_symbol,
+        side=OrderSide.SELL,
+        status=OrderStatus.SUBMITTED,
+        limit_price=None,
+    )
+
+    result = service.refresh_spread(initial.id)
+
+    assert result.version == 2
+    assert spreads.update_spread.call_args_list[0].kwargs["expected_version"] == 0
+    assert spreads.update_spread.call_args_list[1].kwargs["expected_version"] == 1
+
+
 def test_recover_close_rejects_unconfirmed_paper_order_and_audits() -> None:
     service, _, spreads, order_service = build_service()
     audit_events = Mock()
@@ -1775,6 +2730,40 @@ def test_recover_close_rejects_unconfirmed_paper_order_and_audits() -> None:
     audit_request = audit_events.create_event.call_args.args[0]
     assert audit_request.action == "bull_put_recover_close_rejected"
     assert audit_request.warning_code == "paper_order_not_confirmed"
+
+
+def test_execute_spread_blocks_when_official_calendar_is_unavailable() -> None:
+    service, adapter, _, order_service = build_service()
+    adapter.get_us_market_calendar.side_effect = RuntimeError("calendar unavailable")
+
+    with pytest.raises(ValueError, match="Official U.S. market calendar is unavailable"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=build_scan_time(),
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_execute_spread_uses_13_et_close_on_half_trading_day() -> None:
+    service, adapter, _, order_service = build_service()
+    adapter.get_us_market_calendar.return_value = (True, True)
+
+    with pytest.raises(ValueError, match="stop before the close"):
+        service.execute_spread(
+            ExecuteBullPutSpreadRequest(
+                external_account_id="LBPT10087357",
+                symbol="QQQ.US",
+                mode=ExecutionMode.PAPER,
+                as_of=datetime(2026, 5, 22, 16, 56, tzinfo=timezone.utc),
+            )
+        )
+
+    order_service.submit_order.assert_not_called()
 
 
 def test_recover_close_rejects_existing_working_short_close_order_and_audits() -> None:
@@ -1919,23 +2908,64 @@ def test_recover_close_submits_replacement_after_canceled_short_close_order() ->
         ),
     ]
 
+    recover_request = RecoverBullPutCloseRequest(
+        external_account_id="LBPT10087357",
+        confirm_paper_order=True,
+        max_debit=Decimal("3.00"),
+        actor="operator-a",
+        note="manual stop-loss recovery",
+    )
     result = service.recover_close(
         "spread-1",
-        RecoverBullPutCloseRequest(
-            external_account_id="LBPT10087357",
-            confirm_paper_order=True,
-            max_debit=Decimal("3.00"),
-            actor="operator-a",
-            note="manual stop-loss recovery",
-        ),
+        recover_request,
+        idempotency_key="recover-public-key-0001",
     )
 
     assert result.status == SpreadStatus.CLOSED
     assert result.short_exit_order_id == "short-exit-replacement"
     assert result.long_exit_order_id == "long-exit"
     assert order_service.submit_order.call_count == 2
+    assert all(
+        call_args.kwargs["action_context"].entity_id == "spread-1"
+        for call_args in order_service.submit_order.call_args_list
+    )
+    assert {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    } == {"parent-action-1"}
+    order_service.complete_trade_action.assert_called_once()
     actions = [call_args.args[0].action for call_args in audit_events.create_event.call_args_list]
     assert actions == ["bull_put_recover_close_submitted", "bull_put_recover_close_completed"]
+
+    order_service.submit_order.reset_mock()
+    order_service.prepare_trade_action.side_effect = None
+    order_service.prepare_trade_action.return_value = PreparedTradeActionIntent(
+        intent=TradeActionIntent(
+            id="recover-parent-replay",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key="recover-public-key-0001",
+            request_hash="recover-parent-hash",
+            action="bull_put_recover_close",
+            strategy_id="paper_bull_put_v1",
+            entity_id="spread-1",
+            state=TradingIntentState.PERSISTED,
+            request_payload={},
+            response_payload=result.model_dump(mode="json"),
+            created_at=build_scan_time(),
+            updated_at=build_scan_time(),
+        ),
+        created=False,
+    )
+    replay = service.recover_close(
+        "spread-1",
+        recover_request,
+        idempotency_key="recover-public-key-0001",
+    )
+    assert replay.model_dump() == result.model_dump()
+    assert replay.idempotent_replayed is True
+    order_service.submit_order.assert_not_called()
 
 
 def test_monitor_spread_keeps_open_position_without_exit_trigger() -> None:
@@ -1988,9 +3018,11 @@ def test_monitor_spread_closes_position_on_take_profit() -> None:
         ),
     ]
 
+    monitor_as_of = datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc)
     result = service.monitor_spread(
         "spread-1",
-        as_of=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+        as_of=monitor_as_of,
+        idempotency_key="monitor-public-key-0001",
     )
 
     assert result.should_close is True
@@ -2000,6 +3032,45 @@ def test_monitor_spread_closes_position_on_take_profit() -> None:
     assert result.spread.long_exit_order_id == "long-exit"
     assert result.estimated_exit_debit == Decimal("0.50")
     assert result.estimated_pnl == Decimal("80.00")
+    assert all(
+        call_args.kwargs["action_context"].entity_id == "spread-1"
+        for call_args in order_service.submit_order.call_args_list
+    )
+    assert {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    } == {"parent-action-1"}
+    order_service.complete_trade_action.assert_called_once()
+
+    order_service.submit_order.reset_mock()
+    order_service.prepare_trade_action.side_effect = None
+    order_service.prepare_trade_action.return_value = PreparedTradeActionIntent(
+        intent=TradeActionIntent(
+            id="monitor-parent-replay",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key="monitor-public-key-0001",
+            request_hash="monitor-parent-hash",
+            action="bull_put_monitor",
+            strategy_id="paper_bull_put_v1",
+            entity_id="spread-1",
+            state=TradingIntentState.PERSISTED,
+            request_payload={},
+            response_payload=result.model_dump(mode="json"),
+            created_at=monitor_as_of,
+            updated_at=monitor_as_of,
+        ),
+        created=False,
+    )
+    replay = service.monitor_spread(
+        "spread-1",
+        as_of=monitor_as_of,
+        idempotency_key="monitor-public-key-0001",
+    )
+    assert replay.model_dump() == result.model_dump()
+    assert replay.spread.idempotent_replayed is True
+    order_service.submit_order.assert_not_called()
 
 
 def test_monitor_spread_leaves_residual_long_when_long_exit_does_not_fill() -> None:

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Callable
 from zoneinfo import ZoneInfo
 
 from stocks_tool.application.services.covered_call.candidate import (
@@ -31,8 +36,14 @@ from stocks_tool.application.services.covered_call.policy import (
     ADVISOR_SOURCES,
     assert_order_execution_policy,
 )
-from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.orders import (
+    OrderService,
+    TradingIntentConflictError,
+    TradingIntentOutcomeUnknownError,
+    TradingIntentRejectedError,
+)
 from stocks_tool.application.services.option_snapshot_planner import ranked_otm_call_symbols
+from stocks_tool.application.services.strategy_idempotency import strategy_order_identity
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -41,10 +52,13 @@ from stocks_tool.domain.enums import (
     MarketEventSeverity,
     OptionRight,
     OrderSide,
+    OrderStatus,
     RiskStatus,
     StrategyProposalStatus,
     StrategyRunStatus,
     StrategySignalType,
+    TradingIntentState,
+    TradingOperation,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -61,6 +75,7 @@ from stocks_tool.domain.models import (
     CoveredCallRiskSummary,
     CreateCoveredCallRollProposalRequest,
     CreateOrderRequest,
+    CreateStrategyAuditEventRequest,
     CreateStrategyProposalRequest,
     CreateStrategyRunRequest,
     CreateStrategySignalRequest,
@@ -70,14 +85,24 @@ from stocks_tool.domain.models import (
     Order,
     OptionMarketSnapshot,
     PositionSnapshot,
+    StrategyProposal,
+    TradingActionContext,
+)
+from stocks_tool.domain.option_symbols import (
+    parse_us_option_symbol,
+    same_day_expiring_option_positions,
 )
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
     MarketEventRepository,
     StrategyExperimentRepository,
+    StrategyAuditEventRepository,
 )
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
+
+
+logger = logging.getLogger(__name__)
 
 
 class CoveredCallStrategyService:
@@ -95,6 +120,8 @@ class CoveredCallStrategyService:
         longbridge_adapter: BrokerMarketDataGateway,
         order_service: OrderService | None = None,
         market_events: MarketEventRepository | None = None,
+        audit_events: StrategyAuditEventRepository | None = None,
+        authorization_clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
@@ -103,7 +130,165 @@ class CoveredCallStrategyService:
         self.longbridge_adapter = longbridge_adapter
         self.order_service = order_service
         self.market_events = market_events
+        self.audit_events = audit_events
+        self.authorization_clock = authorization_clock or (lambda: datetime.now(timezone.utc))
         self.new_york = ZoneInfo("America/New_York")
+
+    def _submit_lifecycle_order(
+        self,
+        *,
+        proposal: StrategyProposal,
+        request: CreateOrderRequest,
+        action: str,
+        leg: str,
+        parent_action_intent_id: str | None = None,
+    ) -> Order:
+        if self.order_service is None:
+            raise RuntimeError("Covered call execution requires an order service.")
+        idempotency_key, action_context = strategy_order_identity(
+            strategy_id=self.strategy_id,
+            entity_id=proposal.id,
+            action=action,
+            leg=leg,
+        )
+        if parent_action_intent_id is not None:
+            action_context = action_context.model_copy(update={"entity_id": proposal.id})
+        return self.order_service.submit_order(
+            request,
+            idempotency_key=idempotency_key,
+            action_context=action_context,
+            parent_action_intent_id=parent_action_intent_id,
+        )
+
+    def _prepare_public_action(
+        self,
+        *,
+        proposal: StrategyProposal,
+        idempotency_key: str | None,
+        action: str,
+        request_payload: dict,
+    ) -> tuple[str | None, dict | None]:
+        if idempotency_key is None:
+            return None, None
+        canonical_payload = {
+            "action": action,
+            "proposal_id": proposal.id,
+            "request": request_payload,
+        }
+        request_hash = hashlib.sha256(
+            json.dumps(
+                canonical_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        prepared = self.order_service.prepare_trade_action(
+            external_account_id=proposal.external_account_id,
+            broker=BrokerName.LONGBRIDGE,
+            mode=proposal.mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            action_context=TradingActionContext(
+                action=action,
+                strategy_id=self.strategy_id,
+                entity_id=proposal.id,
+            ),
+            request_payload=canonical_payload,
+        )
+        parent = prepared.intent
+        if not prepared.created:
+            if parent.state == TradingIntentState.PERSISTED and parent.response_payload:
+                return parent.id, parent.response_payload
+            if parent.state in {
+                TradingIntentState.REJECTED,
+                TradingIntentState.RESOLVED_NO_ORDER,
+            }:
+                raise TradingIntentRejectedError(parent.id, parent.last_error)
+            raise TradingIntentOutcomeUnknownError(parent.id)
+        try:
+            self.order_service.mark_trade_action_submitting(parent.id)
+        except Exception as exc:
+            self._mark_public_action_unknown(parent.id, exc)
+            raise TradingIntentOutcomeUnknownError(parent.id) from exc
+        return parent.id, None
+
+    def _complete_public_action(self, parent_action_intent_id: str | None, result):
+        if parent_action_intent_id is None:
+            return result
+        response_payload = result.model_dump(mode="json")
+        try:
+            self.order_service.complete_trade_action(
+                parent_action_intent_id,
+                response_payload,
+            )
+        except Exception as exc:
+            current = self.order_service.get_trade_action(parent_action_intent_id)
+            if (
+                current is not None
+                and current.state == TradingIntentState.PERSISTED
+                and current.response_payload
+            ):
+                return type(result).model_validate(current.response_payload)
+            self._mark_public_action_unknown(parent_action_intent_id, exc)
+            raise TradingIntentOutcomeUnknownError(parent_action_intent_id) from exc
+        return result
+
+    @contextmanager
+    def _known_prebroker_phase(self, parent_action_intent_id: str | None):
+        try:
+            yield
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                self._mark_public_action_rejected(parent_action_intent_id, exc)
+            raise
+
+    def _mark_public_action_for_child_failure(
+        self,
+        parent_action_intent_id: str | None,
+        exc: Exception,
+    ) -> None:
+        if parent_action_intent_id is None:
+            return
+        if isinstance(
+            exc,
+            (
+                TradingIntentRejectedError,
+                TradingIntentConflictError,
+                LookupError,
+                PermissionError,
+                ValueError,
+                NotImplementedError,
+            ),
+        ):
+            self._mark_public_action_rejected(parent_action_intent_id, exc)
+            return
+        self._mark_public_action_unknown(parent_action_intent_id, exc)
+
+    def _persist_after_child(
+        self,
+        parent_action_intent_id: str | None,
+        callback,
+        *args,
+        **kwargs,
+    ):
+        try:
+            return callback(*args, **kwargs)
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                self._mark_public_action_unknown(parent_action_intent_id, exc)
+            raise
+
+    def _mark_public_action_unknown(self, parent_action_intent_id: str, exc: Exception) -> None:
+        try:
+            self.order_service.mark_trade_action_unknown(parent_action_intent_id, str(exc))
+        except Exception:
+            logger.exception("Failed to mark Covered Call parent action '%s' unknown.", parent_action_intent_id)
+
+    def _mark_public_action_rejected(self, parent_action_intent_id: str, exc: Exception) -> None:
+        try:
+            self.order_service.mark_trade_action_rejected(parent_action_intent_id, str(exc))
+        except Exception:
+            logger.exception("Failed to mark Covered Call parent action '%s' rejected.", parent_action_intent_id)
 
     def preview(
         self,
@@ -388,6 +573,8 @@ class CoveredCallStrategyService:
         self,
         proposal_id: str,
         request: ExecuteCoveredCallProposalRequest,
+        *,
+        idempotency_key: str | None = None,
     ) -> CoveredCallExecutionResult:
         if self.order_service is None:
             raise RuntimeError("Covered call execution requires an order service.")
@@ -398,41 +585,83 @@ class CoveredCallStrategyService:
             raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
         if proposal.proposed_action != "sell_covered_call":
             raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call sell proposal.")
-        if proposal.status != StrategyProposalStatus.APPROVED:
-            raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before execution.")
-        if proposal.candidate_payload is None:
-            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
-        self._assert_order_execution_policy(
+        parent_action_intent_id, replay_payload = self._prepare_public_action(
             proposal=proposal,
-            action="execute_covered_call",
-            required_checks={
-                "local_position_covered",
-                "liquidity_filter",
-                "manual_approval_required",
-            },
-            require_manual_approval=True,
+            idempotency_key=idempotency_key,
+            action="covered_call_execute",
+            request_payload=request.model_dump(mode="json"),
         )
-
-        candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
-        self._ensure_latest_position_still_covers(
-            external_account_id=proposal.external_account_id,
-            candidate=candidate,
-        )
-        limit_price = request.limit_price or candidate.call_bid
-        if limit_price <= Decimal("0"):
-            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive limit price.")
-
-        order = self.order_service.submit_order(
-            self._covered_call_order_request(
-                external_account_id=proposal.external_account_id,
-                side=OrderSide.SELL,
-                mode=proposal.mode,
-                candidate=candidate,
-                limit_price=limit_price,
-                remark=request.remark or "covered-call",
+        if replay_payload is not None:
+            replay = CoveredCallExecutionResult.model_validate(replay_payload)
+            replay.order = replay.order.model_copy(update={"idempotent_replayed": True})
+            return replay
+        with self._known_prebroker_phase(parent_action_intent_id):
+            if proposal.status != StrategyProposalStatus.APPROVED:
+                raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before execution.")
+            if proposal.candidate_payload is None:
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload."
+                )
+            self._assert_order_execution_policy(
+                proposal=proposal,
+                action="execute_covered_call",
+                required_checks={
+                    "local_position_covered",
+                    "liquidity_filter",
+                    "manual_approval_required",
+                },
+                require_manual_approval=True,
             )
-        )
-        run = self.experiments.create_run(
+
+            candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
+            authorization_time = self.authorization_clock()
+            self._assert_no_same_day_expiring_option_positions(
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                as_of=datetime.now(timezone.utc),
+            )
+            self._assert_no_unresolved_entry_intents(
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                exclude_action_intent_id=parent_action_intent_id,
+            )
+            candidate = self._refresh_entry_authorization_candidate(
+                candidate=candidate,
+                external_account_id=proposal.external_account_id,
+                mode=proposal.mode,
+                evaluated_at=authorization_time,
+            )
+            self._ensure_latest_position_still_covers(
+                external_account_id=proposal.external_account_id,
+                candidate=candidate,
+                mode=proposal.mode,
+                excluded_proposal_ids={proposal.id},
+            )
+            limit_price = request.limit_price or candidate.call_bid
+            if limit_price <= Decimal("0"):
+                raise ValueError(f"Strategy proposal '{proposal_id}' has no positive limit price.")
+
+        try:
+            order = self._submit_lifecycle_order(
+                proposal=proposal,
+                request=self._covered_call_order_request(
+                    external_account_id=proposal.external_account_id,
+                    side=OrderSide.SELL,
+                    mode=proposal.mode,
+                    candidate=candidate,
+                    limit_price=limit_price,
+                    remark=request.remark or "covered-call",
+                ),
+                action="covered_call_open",
+                leg="short_call_open",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+        except Exception as exc:
+            self._mark_public_action_for_child_failure(parent_action_intent_id, exc)
+            raise
+        run = self._persist_after_child(
+            parent_action_intent_id,
+            self.experiments.create_run,
             CreateStrategyRunRequest(
                 strategy_id=self.strategy_id,
                 external_account_id=proposal.external_account_id,
@@ -463,7 +692,9 @@ class CoveredCallStrategyService:
                 },
             )
         )
-        signal = self.experiments.create_signal(
+        signal = self._persist_after_child(
+            parent_action_intent_id,
+            self.experiments.create_signal,
             CreateStrategySignalRequest(
                 strategy_id=self.strategy_id,
                 external_account_id=proposal.external_account_id,
@@ -490,21 +721,26 @@ class CoveredCallStrategyService:
         )
         result_proposal = proposal
         if self._order_filled(order):
-            result_proposal = self.experiments.update_proposal_status(
+            result_proposal = self._persist_after_child(
+                parent_action_intent_id,
+                self.experiments.update_proposal_status,
                 proposal.id,
                 status=StrategyProposalStatus.EXECUTED,
             )
-        return CoveredCallExecutionResult(
+        result = CoveredCallExecutionResult(
             proposal=result_proposal,
             order=order,
             run=run,
             signal=signal,
         )
+        return self._complete_public_action(parent_action_intent_id, result)
 
     def close_proposal(
         self,
         proposal_id: str,
         request: CloseCoveredCallProposalRequest,
+        *,
+        idempotency_key: str | None = None,
     ) -> CoveredCallCloseResult:
         if self.order_service is None:
             raise RuntimeError("Covered call close requires an order service.")
@@ -513,35 +749,56 @@ class CoveredCallStrategyService:
             raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
         if proposal.strategy_id != self.strategy_id:
             raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call proposal.")
-        if proposal.status != StrategyProposalStatus.EXECUTED:
-            raise ValueError(f"Strategy proposal '{proposal_id}' must be executed before close.")
-        if proposal.candidate_payload is None:
-            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload.")
-        self._assert_order_execution_policy(
+        parent_action_intent_id, replay_payload = self._prepare_public_action(
             proposal=proposal,
-            action="close_covered_call",
-            required_checks=set(),
-            require_manual_approval=False,
+            idempotency_key=idempotency_key,
+            action="covered_call_close",
+            request_payload=request.model_dump(mode="json"),
         )
-
-        candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
-        limit_price = request.limit_price or self._current_call_mark(
-            candidate=candidate,
-            mode=proposal.mode,
-        )
-        if limit_price is None or limit_price <= Decimal("0"):
-            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive close limit price.")
-
-        order = self.order_service.submit_order(
-            self._covered_call_order_request(
-                external_account_id=proposal.external_account_id,
-                side=OrderSide.BUY,
-                mode=proposal.mode,
-                candidate=candidate,
-                limit_price=limit_price,
-                remark=request.remark or "covered-call-close",
+        if replay_payload is not None:
+            replay = CoveredCallCloseResult.model_validate(replay_payload)
+            replay.order = replay.order.model_copy(update={"idempotent_replayed": True})
+            return replay
+        with self._known_prebroker_phase(parent_action_intent_id):
+            if proposal.status != StrategyProposalStatus.EXECUTED:
+                raise ValueError(f"Strategy proposal '{proposal_id}' must be executed before close.")
+            if proposal.candidate_payload is None:
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' does not include a covered call candidate payload."
+                )
+            self._assert_order_execution_policy(
+                proposal=proposal,
+                action="close_covered_call",
+                required_checks=set(),
+                require_manual_approval=False,
             )
-        )
+
+            candidate = self._current_short_call_candidate(proposal, proposal_id=proposal_id)
+            limit_price = request.limit_price or self._current_call_mark(
+                candidate=candidate,
+                mode=proposal.mode,
+            )
+            if limit_price is None or limit_price <= Decimal("0"):
+                raise ValueError(f"Strategy proposal '{proposal_id}' has no positive close limit price.")
+
+        try:
+            order = self._submit_lifecycle_order(
+                proposal=proposal,
+                request=self._covered_call_order_request(
+                    external_account_id=proposal.external_account_id,
+                    side=OrderSide.BUY,
+                    mode=proposal.mode,
+                    candidate=candidate,
+                    limit_price=limit_price,
+                    remark=request.remark or "covered-call-close",
+                ),
+                action="covered_call_close",
+                leg="short_call_close",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+        except Exception as exc:
+            self._mark_public_action_for_child_failure(parent_action_intent_id, exc)
+            raise
         now = datetime.now(timezone.utc)
         run = self.experiments.create_run(
             CreateStrategyRunRequest(
@@ -589,12 +846,13 @@ class CoveredCallStrategyService:
                 proposal.id,
                 status=StrategyProposalStatus.CLOSED,
             )
-        return CoveredCallCloseResult(
+        result = CoveredCallCloseResult(
             proposal=result_proposal,
             order=order,
             run=run,
             signal=signal,
         )
+        return self._complete_public_action(parent_action_intent_id, result)
 
     def create_roll_proposal(
         self,
@@ -747,6 +1005,8 @@ class CoveredCallStrategyService:
         self,
         proposal_id: str,
         request: ExecuteCoveredCallRollProposalRequest,
+        *,
+        idempotency_key: str | None = None,
     ) -> CoveredCallRollExecutionResult:
         if self.order_service is None:
             raise RuntimeError("Covered call roll execution requires an order service.")
@@ -755,69 +1015,131 @@ class CoveredCallStrategyService:
             raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
         if proposal.strategy_id != self.strategy_id or proposal.proposed_action != "roll_covered_call":
             raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call roll proposal.")
-        if proposal.status != StrategyProposalStatus.APPROVED:
-            raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before roll execution.")
-        if proposal.candidate_payload is None:
-            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call roll payload.")
-        self._assert_order_execution_policy(
+        parent_action_intent_id, replay_payload = self._prepare_public_action(
             proposal=proposal,
-            action="execute_covered_call_roll",
-            required_checks={
-                "current_call_identified",
-                "local_position_covered",
-                "roll_out_candidate",
-                "liquidity_filter",
-                "manual_approval_required",
-            },
-            require_manual_approval=True,
+            idempotency_key=idempotency_key,
+            action="covered_call_roll_execute",
+            request_payload=request.model_dump(mode="json"),
         )
-
-        roll_from, roll_to = self._parse_roll_payload(proposal.candidate_payload, proposal_id=proposal_id)
-        self._ensure_latest_position_still_covers(
-            external_account_id=proposal.external_account_id,
-            candidate=roll_to,
-        )
-
-        buyback_limit = request.buyback_limit_price or self._current_call_mark(
-            candidate=roll_from,
-            mode=proposal.mode,
-        )
-        if buyback_limit is None or buyback_limit <= Decimal("0"):
-            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive roll buyback limit price.")
-        sell_limit = request.sell_limit_price or roll_to.call_bid
-        if sell_limit <= Decimal("0"):
-            raise ValueError(f"Strategy proposal '{proposal_id}' has no positive roll sell limit price.")
-
-        buyback_order = self.order_service.submit_order(
-            self._covered_call_order_request(
-                external_account_id=proposal.external_account_id,
-                mode=proposal.mode,
-                candidate=roll_from,
-                side=OrderSide.BUY,
-                limit_price=buyback_limit,
-                remark=request.remark or "covered-call-roll-close",
+        if replay_payload is not None:
+            replay = CoveredCallRollExecutionResult.model_validate(replay_payload)
+            replay.buyback_order = replay.buyback_order.model_copy(update={"idempotent_replayed": True})
+            if replay.sell_order is not None:
+                replay.sell_order = replay.sell_order.model_copy(update={"idempotent_replayed": True})
+            return replay
+        with self._known_prebroker_phase(parent_action_intent_id):
+            if proposal.status != StrategyProposalStatus.APPROVED:
+                raise ValueError(f"Strategy proposal '{proposal_id}' must be approved before roll execution.")
+            if proposal.candidate_payload is None:
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' does not include a covered call roll payload."
+                )
+            self._assert_order_execution_policy(
+                proposal=proposal,
+                action="execute_covered_call_roll",
+                required_checks={
+                    "current_call_identified",
+                    "local_position_covered",
+                    "roll_out_candidate",
+                    "liquidity_filter",
+                    "manual_approval_required",
+                },
+                require_manual_approval=True,
             )
-        )
+
+            roll_from, roll_to = self._parse_roll_payload(
+                proposal.candidate_payload,
+                proposal_id=proposal_id,
+            )
+            buyback_limit = request.buyback_limit_price or self._current_call_mark(
+                candidate=roll_from,
+                mode=proposal.mode,
+            )
+            if buyback_limit is None or buyback_limit <= Decimal("0"):
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' has no positive roll buyback limit price."
+                )
+            sell_limit = request.sell_limit_price or roll_to.call_bid
+
+        try:
+            buyback_order = self._submit_lifecycle_order(
+                proposal=proposal,
+                request=self._covered_call_order_request(
+                    external_account_id=proposal.external_account_id,
+                    mode=proposal.mode,
+                    candidate=roll_from,
+                    side=OrderSide.BUY,
+                    limit_price=buyback_limit,
+                    remark=request.remark or "covered-call-roll-close",
+                ),
+                action="covered_call_roll",
+                leg="roll_buyback",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+        except Exception as exc:
+            self._mark_public_action_for_child_failure(parent_action_intent_id, exc)
+            raise
         sell_order = None
         sequence_status = "buyback_submitted_waiting_fill"
         reason = "Buyback order was submitted; sell-to-open is held until the old call is filled closed."
         if self._order_filled(buyback_order):
-            sell_order = self.order_service.submit_order(
-                self._covered_call_order_request(
+            try:
+                self._assert_no_same_day_expiring_option_positions(
                     external_account_id=proposal.external_account_id,
                     mode=proposal.mode,
-                    candidate=roll_to,
-                    side=OrderSide.SELL,
-                    limit_price=sell_limit,
-                    remark=request.remark or "covered-call-roll-open",
+                    as_of=datetime.now(timezone.utc),
                 )
-            )
-            if self._order_filled(sell_order):
-                sequence_status = "roll_filled"
-                reason = None
+                roll_to = self._refresh_entry_authorization_candidate(
+                    candidate=roll_to,
+                    external_account_id=proposal.external_account_id,
+                    mode=proposal.mode,
+                    evaluated_at=self.authorization_clock(),
+                )
+                self._ensure_latest_position_still_covers(
+                    external_account_id=proposal.external_account_id,
+                    candidate=roll_to,
+                    mode=proposal.mode,
+                    excluded_proposal_ids={
+                        proposal.id,
+                        str(proposal.candidate_payload.get("source_proposal_id") or ""),
+                    },
+                )
+                sell_limit = request.sell_limit_price or roll_to.call_bid
+                if sell_limit <= Decimal("0"):
+                    raise ValueError(
+                        f"Strategy proposal '{proposal_id}' has no positive roll sell limit price."
+                    )
+            except (LookupError, PermissionError, RuntimeError, ValueError) as exc:
+                sequence_status = "roll_sell_blocked_manual_action"
+                reason = (
+                    "Buyback filled, but the replacement sell-to-open is blocked and requires "
+                    f"manual review: {exc}"
+                )
             else:
-                sequence_status = "roll_sell_submitted_waiting_fill"
-                reason = "Sell-to-open order was submitted; roll stays pending until the new short call is filled."
+                try:
+                    sell_order = self._submit_lifecycle_order(
+                        proposal=proposal,
+                        request=self._covered_call_order_request(
+                            external_account_id=proposal.external_account_id,
+                            mode=proposal.mode,
+                            candidate=roll_to,
+                            side=OrderSide.SELL,
+                            limit_price=sell_limit,
+                            remark=request.remark or "covered-call-roll-open",
+                        ),
+                        action="covered_call_roll",
+                        leg="roll_sell_open",
+                        parent_action_intent_id=parent_action_intent_id,
+                    )
+                except Exception as exc:
+                    self._mark_public_action_for_child_failure(parent_action_intent_id, exc)
+                    raise
+                if self._order_filled(sell_order):
+                    sequence_status = "roll_filled"
+                    reason = None
+                else:
+                    sequence_status = "roll_sell_submitted_waiting_fill"
+                    reason = "Sell-to-open order was submitted; roll stays pending until the new short call is filled."
 
         now = datetime.now(timezone.utc)
         run = self.experiments.create_run(
@@ -884,7 +1206,7 @@ class CoveredCallStrategyService:
                 proposal.id,
                 status=StrategyProposalStatus.EXECUTED,
             )
-        return CoveredCallRollExecutionResult(
+        result = CoveredCallRollExecutionResult(
             proposal=result_proposal,
             buyback_order=buyback_order,
             sell_order=sell_order,
@@ -893,11 +1215,14 @@ class CoveredCallStrategyService:
             sequence_status=sequence_status,
             reason=reason,
         )
+        return self._complete_public_action(parent_action_intent_id, result)
 
     def continue_roll_proposal(
         self,
         proposal_id: str,
         request: ContinueCoveredCallRollRequest,
+        *,
+        idempotency_key: str | None = None,
     ) -> CoveredCallRollExecutionResult:
         if self.order_service is None:
             raise RuntimeError("Covered call roll continuation requires an order service.")
@@ -906,59 +1231,107 @@ class CoveredCallStrategyService:
             raise LookupError(f"Strategy proposal '{proposal_id}' was not found.")
         if proposal.strategy_id != self.strategy_id or proposal.proposed_action != "roll_covered_call":
             raise ValueError(f"Strategy proposal '{proposal_id}' is not a covered call roll proposal.")
-        if proposal.status != StrategyProposalStatus.APPROVED:
-            raise ValueError(f"Strategy proposal '{proposal_id}' must stay approved while a roll buyback is pending.")
-        if proposal.candidate_payload is None:
-            raise ValueError(f"Strategy proposal '{proposal_id}' does not include a covered call roll payload.")
-        self._assert_order_execution_policy(
+        parent_action_intent_id, replay_payload = self._prepare_public_action(
             proposal=proposal,
-            action="continue_covered_call_roll",
-            required_checks={
-                "current_call_identified",
-                "local_position_covered",
-                "roll_out_candidate",
-                "liquidity_filter",
-                "manual_approval_required",
-            },
-            require_manual_approval=True,
+            idempotency_key=idempotency_key,
+            action="covered_call_roll_continue",
+            request_payload=request.model_dump(mode="json"),
         )
+        if replay_payload is not None:
+            replay = CoveredCallRollExecutionResult.model_validate(replay_payload)
+            replay.buyback_order = replay.buyback_order.model_copy(update={"idempotent_replayed": True})
+            if replay.sell_order is not None:
+                replay.sell_order = replay.sell_order.model_copy(update={"idempotent_replayed": True})
+            return replay
+        with self._known_prebroker_phase(parent_action_intent_id):
+            if proposal.status != StrategyProposalStatus.APPROVED:
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' must stay approved while a roll buyback is pending."
+                )
+            if proposal.candidate_payload is None:
+                raise ValueError(
+                    f"Strategy proposal '{proposal_id}' does not include a covered call roll payload."
+                )
+            self._assert_order_execution_policy(
+                proposal=proposal,
+                action="continue_covered_call_roll",
+                required_checks={
+                    "current_call_identified",
+                    "local_position_covered",
+                    "roll_out_candidate",
+                    "liquidity_filter",
+                    "manual_approval_required",
+                },
+                require_manual_approval=True,
+            )
 
-        roll_from, roll_to = self._parse_roll_payload(proposal.candidate_payload, proposal_id=proposal_id)
-        buyback_order = self.order_service.refresh_order(request.buyback_order_id)
-        self._validate_roll_buyback_order(
-            buyback_order=buyback_order,
-            proposal=proposal,
-            roll_from=roll_from,
-        )
+            roll_from, roll_to = self._parse_roll_payload(
+                proposal.candidate_payload,
+                proposal_id=proposal_id,
+            )
+            buyback_order = self.order_service.refresh_order(request.buyback_order_id)
+            self._validate_roll_buyback_order(
+                buyback_order=buyback_order,
+                proposal=proposal,
+                roll_from=roll_from,
+            )
         sell_order = None
         sequence_status = "buyback_still_working"
         reason = "Buyback order is not filled yet; sell-to-open remains held."
         if self._order_filled(buyback_order):
-            self._ensure_latest_position_still_covers(
-                external_account_id=proposal.external_account_id,
-                candidate=roll_to,
-            )
             if request.sell_order_id:
-                sell_order = self.order_service.refresh_order(request.sell_order_id)
-                self._validate_roll_sell_order(
-                    sell_order=sell_order,
-                    proposal=proposal,
-                    roll_to=roll_to,
-                )
+                with self._known_prebroker_phase(parent_action_intent_id):
+                    sell_order = self.order_service.refresh_order(request.sell_order_id)
+                    self._validate_roll_sell_order(
+                        sell_order=sell_order,
+                        proposal=proposal,
+                        roll_to=roll_to,
+                    )
             else:
-                sell_limit = request.sell_limit_price or roll_to.call_bid
-                if sell_limit <= Decimal("0"):
-                    raise ValueError(f"Strategy proposal '{proposal_id}' has no positive roll sell limit price.")
-                sell_order = self.order_service.submit_order(
-                    self._covered_call_order_request(
+                with self._known_prebroker_phase(parent_action_intent_id):
+                    self._assert_no_same_day_expiring_option_positions(
                         external_account_id=proposal.external_account_id,
                         mode=proposal.mode,
-                        candidate=roll_to,
-                        side=OrderSide.SELL,
-                        limit_price=sell_limit,
-                        remark=request.remark or "covered-call-roll-open",
+                        as_of=datetime.now(timezone.utc),
                     )
-                )
+                    roll_to = self._refresh_entry_authorization_candidate(
+                        candidate=roll_to,
+                        external_account_id=proposal.external_account_id,
+                        mode=proposal.mode,
+                        evaluated_at=self.authorization_clock(),
+                    )
+                    self._ensure_latest_position_still_covers(
+                        external_account_id=proposal.external_account_id,
+                        candidate=roll_to,
+                        mode=proposal.mode,
+                        excluded_proposal_ids={
+                            proposal.id,
+                            str(proposal.candidate_payload.get("source_proposal_id") or ""),
+                        },
+                    )
+                    sell_limit = request.sell_limit_price or roll_to.call_bid
+                    if sell_limit <= Decimal("0"):
+                        raise ValueError(
+                            f"Strategy proposal '{proposal_id}' has no positive roll sell limit price."
+                        )
+                try:
+                    sell_order = self._submit_lifecycle_order(
+                        proposal=proposal,
+                        request=self._covered_call_order_request(
+                            external_account_id=proposal.external_account_id,
+                            mode=proposal.mode,
+                            candidate=roll_to,
+                            side=OrderSide.SELL,
+                            limit_price=sell_limit,
+                            remark=request.remark or "covered-call-roll-open",
+                        ),
+                        action="covered_call_roll",
+                        leg="roll_sell_open",
+                        parent_action_intent_id=parent_action_intent_id,
+                    )
+                except Exception as exc:
+                    self._mark_public_action_for_child_failure(parent_action_intent_id, exc)
+                    raise
             if self._order_filled(sell_order):
                 sequence_status = "roll_filled"
                 reason = None
@@ -1029,7 +1402,7 @@ class CoveredCallStrategyService:
                 proposal.id,
                 status=StrategyProposalStatus.EXECUTED,
             )
-        return CoveredCallRollExecutionResult(
+        result = CoveredCallRollExecutionResult(
             proposal=result_proposal,
             buyback_order=buyback_order,
             sell_order=sell_order,
@@ -1038,6 +1411,7 @@ class CoveredCallStrategyService:
             sequence_status=sequence_status,
             reason=reason,
         )
+        return self._complete_public_action(parent_action_intent_id, result)
 
     def reconcile_pending_lifecycle(
         self,
@@ -1045,6 +1419,7 @@ class CoveredCallStrategyService:
         external_account_id: str,
         as_of: datetime | None = None,
         limit: int = 100,
+        idempotency_key: str | None = None,
     ) -> dict[str, int]:
         if self.order_service is None:
             raise RuntimeError("Covered call lifecycle reconciliation requires an order service.")
@@ -1065,6 +1440,7 @@ class CoveredCallStrategyService:
             "roll_buyback_orders_refreshed": 0,
             "roll_sell_orders_refreshed": 0,
             "roll_sell_orders_submitted": 0,
+            "roll_sell_orders_waiting_confirmation": 0,
             "rolls_executed": 0,
         }
 
@@ -1175,33 +1551,11 @@ class CoveredCallStrategyService:
                 )
                 result["roll_sell_orders_refreshed"] += 1
             else:
-                self._ensure_latest_position_still_covers(
-                    external_account_id=proposal.external_account_id,
-                    candidate=roll_to,
-                )
-                sell_limit = self._optional_decimal(roll_payload.get("sell_limit_price")) or roll_to.call_bid
-                if sell_limit <= Decimal("0"):
-                    continue
-                sell_order = self.order_service.submit_order(
-                    self._covered_call_order_request(
-                        external_account_id=proposal.external_account_id,
-                        mode=proposal.mode,
-                        candidate=roll_to,
-                        side=OrderSide.SELL,
-                        limit_price=sell_limit,
-                        remark="covered-call-roll-open",
-                    )
-                )
-                self._record_roll_lifecycle_run(
-                    proposal=proposal,
-                    buyback_order=buyback_order,
-                    sell_order=sell_order,
-                    roll_from=roll_from,
-                    roll_to=roll_to,
-                    sell_limit=sell_limit,
-                    evaluated_at=evaluated_at,
-                )
-                result["roll_sell_orders_submitted"] += 1
+                # Bulk reconciliation is deliberately read-only in P0. The
+                # proposal-specific roll-continue action owns exact trade
+                # confirmation and the idempotent sell-to-open submission.
+                result["roll_sell_orders_waiting_confirmation"] += 1
+                continue
 
             if self._order_filled(sell_order):
                 self._mark_roll_source_rolled(proposal)
@@ -1558,6 +1912,8 @@ class CoveredCallStrategyService:
         *,
         external_account_id: str,
         candidate: CoveredCallCandidate,
+        mode: ExecutionMode,
+        excluded_proposal_ids: set[str] | None = None,
     ) -> None:
         snapshot = self._get_latest_account_snapshot(external_account_id)
         position = next(
@@ -1569,11 +1925,258 @@ class CoveredCallStrategyService:
             ),
             None,
         )
-        if position is None or int(position.quantity) < candidate.covered_shares:
+        share_quantity = int(position.quantity) if position is not None else 0
+        reserved_shares = self._reserved_covered_call_shares(
+            external_account_id=external_account_id,
+            mode=mode,
+            underlying_symbol=candidate.underlying_symbol,
+            excluded_proposal_ids=excluded_proposal_ids or set(),
+        )
+        available_shares = max(0, share_quantity - reserved_shares)
+        if available_shares < candidate.covered_shares:
             raise ValueError(
-                f"Latest local snapshot no longer covers {candidate.covered_shares} shares of "
-                f"{candidate.underlying_symbol}."
+                f"Latest local snapshot has only {available_shares} unreserved shares of "
+                f"{candidate.underlying_symbol}; {candidate.covered_shares} are required."
             )
+
+    def _reserved_covered_call_shares(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        underlying_symbol: str,
+        excluded_proposal_ids: set[str],
+    ) -> int:
+        active_statuses = {
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
+        }
+        reserved_shares = 0
+        reserved_proposal_ids: set[str] = set()
+        proposals = self.experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            limit=100,
+        )
+        excluded_call_symbols: set[str] = set()
+        for proposal in proposals:
+            if proposal.id not in excluded_proposal_ids or not isinstance(
+                proposal.candidate_payload, dict
+            ):
+                continue
+            try:
+                if proposal.proposed_action == "sell_covered_call":
+                    continue
+                elif proposal.proposed_action == "roll_covered_call":
+                    excluded_candidate, _ = self._parse_roll_payload(
+                        proposal.candidate_payload,
+                        proposal_id=proposal.id,
+                    )
+                else:
+                    continue
+                excluded_call_symbols.add(excluded_candidate.call_symbol.upper())
+            except (TypeError, ValueError):
+                return 2**31 - 1
+        for proposal in proposals:
+            if proposal.id in excluded_proposal_ids:
+                continue
+            if proposal.mode != mode or proposal.status not in active_statuses:
+                continue
+            if (proposal.symbol or "").upper() != underlying_symbol.upper():
+                continue
+            if not isinstance(proposal.candidate_payload, dict):
+                continue
+            try:
+                if proposal.proposed_action == "sell_covered_call":
+                    active_candidate = CoveredCallCandidate.model_validate(proposal.candidate_payload)
+                elif proposal.proposed_action == "roll_covered_call":
+                    _, active_candidate = self._parse_roll_payload(
+                        proposal.candidate_payload,
+                        proposal_id=proposal.id,
+                    )
+                else:
+                    continue
+            except (TypeError, ValueError):
+                # An unreadable active reservation is itself unsafe to ignore.
+                return 2**31 - 1
+            reserved_shares += active_candidate.covered_shares
+            reserved_proposal_ids.add(proposal.id)
+
+        linked_order_ids: set[str] = set()
+        for run in self.experiments.list_runs(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            limit=500,
+        ):
+            if run.proposal_id not in reserved_proposal_ids:
+                continue
+            if run.order_id:
+                linked_order_ids.add(str(run.order_id))
+            metrics = run.metrics_payload if isinstance(run.metrics_payload, dict) else {}
+            for key in ("order_id", "sell_order_id", "buyback_order_id"):
+                if metrics.get(key):
+                    linked_order_ids.add(str(metrics[key]))
+
+        if self.order_service is not None:
+            working_statuses = {
+                OrderStatus.CREATED,
+                OrderStatus.SUBMITTED,
+                OrderStatus.PARTIALLY_FILLED,
+            }
+            local_orders = self.order_service.list_orders(external_account_id=external_account_id)
+            local_order_intent_ids = {
+                order.order_intent_id for order in local_orders if order.order_intent_id is not None
+            }
+            for order in local_orders:
+                if order.id in linked_order_ids:
+                    continue
+                if order.mode != mode or order.side != OrderSide.SELL or order.status not in working_statuses:
+                    continue
+                parsed_order_symbol = parse_us_option_symbol(order.symbol)
+                option_underlying = (
+                    order.option_contract.underlying_symbol
+                    if order.option_contract is not None
+                    else parsed_order_symbol.underlying_symbol
+                    if parsed_order_symbol is not None
+                    else None
+                )
+                option_right = (
+                    order.option_contract.right.value.upper()
+                    if order.option_contract is not None
+                    else parsed_order_symbol.right
+                    if parsed_order_symbol is not None
+                    else None
+                )
+                if option_underlying is None or option_underlying.upper() != underlying_symbol.upper():
+                    continue
+                if option_right not in {"C", OptionRight.CALL.value.upper()}:
+                    continue
+                # A partial fill creates a short-call obligation while the remainder
+                # can still fill, so reserve the full submitted contract quantity.
+                reserved_shares += max(0, order.quantity) * 100
+
+            unresolved_states = {
+                TradingIntentState.PREPARED,
+                TradingIntentState.SUBMITTING,
+                TradingIntentState.BROKER_ACKNOWLEDGED,
+                TradingIntentState.UNKNOWN,
+            }
+            for intent in self.order_service.list_trading_intents(
+                external_account_id=external_account_id,
+                mode=mode,
+                limit=500,
+            ):
+                if intent.id in local_order_intent_ids:
+                    continue
+                if intent.operation != TradingOperation.SUBMIT or intent.state not in unresolved_states:
+                    continue
+                entity_root = (intent.entity_id or "").split(":", 1)[0]
+                if intent.strategy_id == self.strategy_id and entity_root in reserved_proposal_ids:
+                    continue
+                payload = intent.request_payload if isinstance(intent.request_payload, dict) else {}
+                option_contract = payload.get("option_contract")
+                if payload.get("side") != OrderSide.SELL.value or not isinstance(option_contract, dict):
+                    continue
+                if str(option_contract.get("right") or "").lower() != OptionRight.CALL.value:
+                    continue
+                if str(option_contract.get("underlying_symbol") or "").upper() != underlying_symbol.upper():
+                    continue
+                try:
+                    quantity = int(payload.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    return 2**31 - 1
+                reserved_shares += max(0, quantity) * 100
+
+        snapshot = self._get_latest_account_snapshot(external_account_id)
+        for position in snapshot.positions:
+            if position.quantity >= 0 or position.symbol.upper() in excluded_call_symbols:
+                continue
+            parsed_position = parse_us_option_symbol(position.symbol)
+            if (
+                parsed_position is None
+                or parsed_position.right != "C"
+                or parsed_position.underlying_symbol.upper() != underlying_symbol.upper()
+            ):
+                continue
+            # Conservative: a short position is a current share obligation even
+            # when the broker imported it without an option asset type.
+            reserved_shares += abs(int(position.quantity)) * 100
+        return reserved_shares
+
+    def _assert_no_unresolved_entry_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        exclude_action_intent_id: str | None = None,
+    ) -> None:
+        if self.order_service is None:
+            raise ValueError("Covered Call entry is blocked because the trading-intent ledger is unavailable.")
+        try:
+            has_unresolved = self.order_service.has_unresolved_intents(
+                external_account_id,
+                mode=mode,
+                exclude_action_intent_id=exclude_action_intent_id,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "Covered Call entry is blocked because unresolved trading-intent state could not be verified."
+            ) from exc
+        if has_unresolved:
+            raise ValueError(
+                "Covered Call entry is blocked while the account has an unresolved trading intent."
+            )
+
+    def _assert_no_same_day_expiring_option_positions(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        as_of: datetime,
+    ) -> None:
+        snapshot = self._get_latest_account_snapshot(external_account_id)
+        positions = same_day_expiring_option_positions(snapshot, as_of=as_of)
+        if not positions:
+            return
+        payload = {
+            "severity": "critical",
+            "manual_action_required": True,
+            "positions": [
+                {
+                    "symbol": position.symbol,
+                    "quantity": str(position.quantity),
+                    "expiration_date": parsed.expiration_date.isoformat(),
+                    "right": parsed.right,
+                }
+                for position, parsed in positions
+            ],
+        }
+        if self.audit_events is not None:
+            try:
+                self.audit_events.create_event(
+                    CreateStrategyAuditEventRequest(
+                        emitted_at=as_of,
+                        external_account_id=external_account_id,
+                        mode=mode,
+                        source=self.strategy_id,
+                        strategy=self.strategy_id,
+                        action="same_day_option_position_blocked_entry",
+                        warning_code="same_day_option_position_requires_manual_action",
+                        summary=(
+                            "Critical manual action required for a non-zero option position "
+                            "expiring today; Covered Call entry is blocked."
+                        ),
+                        payload=payload,
+                    )
+                )
+            except Exception:
+                logger.exception("Could not persist the same-day option position warning.")
+        symbols = ", ".join(position.symbol for position, _ in positions)
+        raise ValueError(
+            "Covered Call entry is blocked because same-day expiring option positions require "
+            f"manual action: {symbols}."
+        )
 
     def _select_expiration(self, expiry_dates: list[date], evaluated_at: datetime) -> date | None:
         strategy = self.settings.covered_call_strategy
@@ -1873,6 +2476,88 @@ class CoveredCallStrategyService:
             return None
         quote = self._with_top_of_book(quotes[0], mode=mode)
         return self._quote_mid(quote)
+
+    def _refresh_entry_authorization_candidate(
+        self,
+        *,
+        candidate: CoveredCallCandidate,
+        external_account_id: str,
+        mode: ExecutionMode,
+        evaluated_at: datetime,
+    ) -> CoveredCallCandidate:
+        if evaluated_at.tzinfo is None:
+            evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+        underlying = self.longbridge_adapter.get_quote(
+            symbol=candidate.underlying_symbol,
+            mode=mode,
+        )
+        if underlying.data_quality != "live" or underlying.warning_code is not None:
+            raise ValueError("Cached underlying quote cannot authorize a covered call entry.")
+        if not self._quote_timestamp_is_authorization_fresh(
+            timestamp=underlying.timestamp,
+            evaluated_at=evaluated_at,
+        ):
+            raise ValueError("Underlying quote is stale and cannot authorize a covered call entry.")
+
+        quotes = self.longbridge_adapter.get_option_market_snapshots(
+            symbols=[candidate.call_symbol],
+            mode=mode,
+        )
+        quote = next((item for item in quotes if item.symbol == candidate.call_symbol), None)
+        if quote is None:
+            raise ValueError("Selected covered call contract could not be refreshed before execution.")
+        if (
+            quote.right != OptionRight.CALL
+            or quote.underlying_symbol.upper() != candidate.underlying_symbol.upper()
+            or quote.expiration_date != candidate.expiration_date
+            or quote.strike != candidate.call_strike
+        ):
+            raise ValueError("Refreshed covered call contract does not match the approved candidate.")
+        quote = self._with_top_of_book(quote, mode=mode)
+        if not self._quote_timestamp_is_authorization_fresh(
+            timestamp=quote.timestamp,
+            evaluated_at=evaluated_at,
+        ):
+            raise ValueError("Selected covered call quote is stale and cannot authorize entry.")
+        if not self._passes_liquidity_filter(quote):
+            raise ValueError("Selected covered call no longer passes the execution liquidity filter.")
+
+        snapshot = self._get_latest_account_snapshot(external_account_id)
+        position = next(
+            (
+                item
+                for item in snapshot.positions
+                if item.symbol.upper() == candidate.underlying_symbol.upper()
+                and item.asset_type in {AssetType.STOCK, AssetType.ETF}
+            ),
+            None,
+        )
+        if position is None:
+            raise ValueError("Latest local snapshot no longer contains the covered underlying position.")
+        return self._build_candidate(
+            position=position,
+            quote=quote,
+            underlying_price=underlying.last_done,
+            contracts=candidate.contracts,
+            evaluated_at=evaluated_at,
+        )
+
+    def _quote_timestamp_is_authorization_fresh(
+        self,
+        *,
+        timestamp: datetime,
+        evaluated_at: datetime,
+    ) -> bool:
+        quote_time = timestamp if timestamp.tzinfo is not None else timestamp.replace(tzinfo=timezone.utc)
+        reference_time = (
+            evaluated_at
+            if evaluated_at.tzinfo is not None
+            else evaluated_at.replace(tzinfo=timezone.utc)
+        )
+        age_seconds = (
+            reference_time.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
+        ).total_seconds()
+        return -300 <= age_seconds <= self.settings.covered_call_strategy.trade_authorization_max_quote_age_seconds
 
     def _covered_call_order_request(
         self,

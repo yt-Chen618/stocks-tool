@@ -147,13 +147,13 @@ def build_broker_account() -> BrokerAccount:
         options_level=None,
         is_active=True,
         auto_reconcile_enabled=True,
-        account_sync_status=ReconciliationStatus.IDLE,
+        account_sync_status=ReconciliationStatus.SUCCESS,
         account_last_sync_attempt_at=None,
-        account_last_synced_at=None,
+        account_last_synced_at=now,
         account_last_sync_error=None,
-        orders_sync_status=ReconciliationStatus.IDLE,
+        orders_sync_status=ReconciliationStatus.SUCCESS,
         orders_last_sync_attempt_at=None,
-        orders_last_synced_at=None,
+        orders_last_synced_at=now,
         orders_last_sync_error=None,
         created_at=now,
         updated_at=now,
@@ -228,6 +228,37 @@ def build_open_spread(*, last_synced_at: datetime | None = None) -> BullPutSprea
         created_at=now,
         updated_at=now,
     )
+
+
+def test_sync_blocked_spread_emits_risk_alert_without_monitoring_or_orders() -> None:
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=Mock(),
+        longbridge_adapter=Mock(),
+    )
+    audit_events = Mock()
+    coordinator._strategy_audit_events = audit_events
+    spreads = Mock()
+    active = build_open_spread(last_synced_at=None)
+    spreads.list_spreads.side_effect = lambda *, external_account_id, status: (
+        [active] if status == SpreadStatus.OPEN else []
+    )
+
+    coordinator._emit_sync_blocked_spread_risk_alert(
+        external_account_id="LBPT10087357",
+        spreads=spreads,
+        now=datetime(2026, 7, 11, 14, 30, tzinfo=timezone.utc),
+        intent_ready=True,
+        orders_ready=False,
+        account_ready=False,
+        linkage_ready=False,
+    )
+
+    event = audit_events.create_event.call_args.args[0]
+    assert event.action == "bull_put_monitor_blocked_sync"
+    assert event.warning_code == "bull_put_sync_incomplete_risk_alert"
+    assert event.payload["spread_ids"] == [active.id]
+    assert event.payload["orders_ready"] is False
 
 
 def test_reconciliation_scheduler_runs_coordinator_off_event_loop() -> None:
@@ -407,6 +438,11 @@ def patch_covered_call_reconciliation_dependencies(
     experiments: Mock,
     covered_call_service: Mock,
 ) -> None:
+    order_service = Mock()
+    account_service = Mock()
+    order_service.reconcile_unresolved_intents.return_value = SimpleNamespace()
+    order_service.has_unresolved_intents.return_value = False
+    account_service.sync_account.return_value = SimpleNamespace()
     class FakeCoveredCallStrategyService:
         strategy_id = "covered_call_v1"
         open_proposal_actions = {"sell_covered_call", "roll_covered_call"}
@@ -463,6 +499,16 @@ def patch_covered_call_reconciliation_dependencies(
         reconciliation_module,
         "CoveredCallStrategyService",
         FakeCoveredCallStrategyService,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "OrderService",
+        lambda **kwargs: order_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "LongbridgeIntegrationService",
+        lambda **kwargs: account_service,
     )
 
 
@@ -612,11 +658,26 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     spreads = Mock()
     pre_open_runs = Mock()
     strategy_service = Mock()
+    covered_call_service = Mock()
+    account_service = Mock()
+    order_service = Mock()
+    events: list[str] = []
+    account_service.sync_account.side_effect = lambda **kwargs: events.append("account-sync") or SimpleNamespace()
+    order_service.reconcile_unresolved_intents.side_effect = (
+        lambda *args, **kwargs: events.append("intent-reconcile") or SimpleNamespace()
+    )
+    order_service.sync_today_orders.side_effect = lambda **kwargs: events.append("orders-sync") or SimpleNamespace()
+    order_service.has_unresolved_intents.return_value = False
+    strategy_service.monitor_spread.side_effect = lambda *args, **kwargs: events.append("bull-put-monitor")
+    strategy_service.run_entry_scan.side_effect = lambda **kwargs: events.append("bull-put-scan")
+    covered_call_service.reconcile_pending_lifecycle.side_effect = (
+        lambda **kwargs: events.append("covered-call-lifecycle")
+    )
 
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": datetime.now(timezone.utc),
-            "orders_last_sync_attempt_at": datetime.now(timezone.utc),
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts.list_broker_accounts.return_value = [broker_account]
@@ -667,8 +728,25 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
         "BullPutStrategyService",
         lambda **kwargs: strategy_service,
     )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "CoveredCallStrategyService",
+        lambda **kwargs: covered_call_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "LongbridgeIntegrationService",
+        lambda **kwargs: account_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "OrderService",
+        lambda **kwargs: order_service,
+    )
 
-    settings = Settings()
+    settings = Settings(
+        covered_call_strategy={"auto_lifecycle_enabled": True},
+    )
     coordinator = ReconciliationCoordinator(
         settings=settings,
         session_factory=session_factory,
@@ -677,6 +755,15 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
 
     coordinator.run_once()
 
+    assert events[:6] == [
+        "intent-reconcile",
+        "orders-sync",
+        "account-sync",
+        "bull-put-monitor",
+        "covered-call-lifecycle",
+        "bull-put-scan",
+    ]
+
     strategy_service.capture_pre_open_run.assert_called_once()
     strategy_service.review_pre_open_run.assert_called_once()
     strategy_service.run_entry_scan.assert_called_once()
@@ -684,7 +771,11 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     scan_call = strategy_service.run_entry_scan.call_args
     strategy_service.monitor_spread.assert_called_once()
     monitor_call = strategy_service.monitor_spread.call_args
-    assert strategy_service.method_calls[:5] == [
+    assert strategy_service.method_calls[:6] == [
+        call.relink_reconciled_order_intents(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+        ),
         call.monitor_spread("spread-1", as_of=monitor_call.kwargs["as_of"]),
         call.run_entry_scan(
             external_account_id="LBPT10087357",
@@ -709,7 +800,67 @@ def test_reconciliation_coordinator_monitors_due_bull_put_spreads(monkeypatch) -
     assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
 
 
-def test_reconciliation_coordinator_runs_zero_dte_lottery_scan_when_enabled(monkeypatch) -> None:
+def test_scheduler_same_day_option_gate_emits_critical_alert_and_deduplicates() -> None:
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    audit_events = Mock()
+    audit_events.list_events.return_value = []
+    coordinator._strategy_audit_events = audit_events
+    now = datetime(2026, 5, 29, 15, 0, tzinfo=timezone.utc)
+    snapshot = build_account_snapshot().model_copy(
+        update={
+            "captured_at": now,
+            "positions": [
+                PositionSnapshot(
+                    symbol="UNH260529C105000.US",
+                    asset_type=AssetType.STOCK,
+                    quantity=Decimal("-1"),
+                    average_cost=Decimal("1.20"),
+                    market_value=Decimal("-120"),
+                    unrealized_pnl=Decimal("0"),
+                )
+            ],
+        }
+    )
+
+    assert coordinator._guard_same_day_option_positions(snapshot=snapshot, now=now) is True
+    warning = audit_events.create_event.call_args.args[0]
+    assert warning.warning_code == "same_day_option_position_requires_manual_action"
+    assert warning.payload["severity"] == "critical"
+    assert warning.payload["manual_action_required"] is True
+
+    audit_events.list_events.return_value = [
+        SimpleNamespace(
+            warning_code="same_day_option_position_requires_manual_action",
+            emitted_at=now,
+            payload={"position_fingerprint": warning.payload["position_fingerprint"]},
+        )
+    ]
+    assert coordinator._guard_same_day_option_positions(snapshot=snapshot, now=now) is True
+    assert audit_events.create_event.call_count == 1
+
+    next_session = datetime(2026, 6, 1, 15, 0, tzinfo=timezone.utc)
+    next_snapshot = snapshot.model_copy(
+        update={
+            "captured_at": next_session,
+            "positions": [
+                snapshot.positions[0].model_copy(
+                    update={"symbol": "UNH260601C105000.US"}
+                )
+            ],
+        }
+    )
+    assert coordinator._guard_same_day_option_positions(
+        snapshot=next_snapshot,
+        now=next_session,
+    ) is True
+    assert audit_events.create_event.call_count == 2
+
+
+def test_reconciliation_coordinator_never_runs_zero_dte_lottery_execution_scan(monkeypatch) -> None:
     session_factory = MagicMock()
     session_factory.return_value.__enter__.return_value = object()
     session_factory.return_value.__exit__.return_value = False
@@ -804,11 +955,7 @@ def test_reconciliation_coordinator_runs_zero_dte_lottery_scan_when_enabled(monk
 
     coordinator.run_once()
 
-    zero_dte_service.run_scan.assert_called_once()
-    scan_call = zero_dte_service.run_scan.call_args
-    assert scan_call.kwargs["external_account_id"] == "LBPT10087357"
-    assert scan_call.kwargs["mode"] == ExecutionMode.PAPER
-    assert scan_call.kwargs["as_of"] is not None
+    zero_dte_service.run_scan.assert_not_called()
 
 
 def test_reconciliation_coordinator_imports_configured_market_event_csv(
@@ -938,8 +1085,8 @@ def test_reconciliation_coordinator_runs_covered_call_proposal_scan_when_enabled
     now = datetime.now(timezone.utc)
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": now,
-            "orders_last_sync_attempt_at": now,
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts = Mock()
@@ -1036,8 +1183,8 @@ def test_reconciliation_coordinator_monitors_executed_covered_calls_when_enabled
     now = datetime.now(timezone.utc)
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": now,
-            "orders_last_sync_attempt_at": now,
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts = Mock()
@@ -1092,8 +1239,8 @@ def test_reconciliation_coordinator_reconciles_covered_call_lifecycle_when_enabl
     now = datetime.now(timezone.utc)
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": now,
-            "orders_last_sync_attempt_at": now,
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts = Mock()
@@ -1142,12 +1289,17 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
     spreads = Mock()
     pre_open_runs = Mock()
     strategy_service = Mock()
+    order_service = Mock()
+    account_service = Mock()
+    order_service.reconcile_unresolved_intents.return_value = SimpleNamespace()
+    order_service.has_unresolved_intents.return_value = False
+    account_service.sync_account.return_value = SimpleNamespace()
 
     now = datetime.now(timezone.utc)
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": now,
-            "orders_last_sync_attempt_at": now,
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts.list_broker_accounts.return_value = [broker_account]
@@ -1197,6 +1349,16 @@ def test_reconciliation_coordinator_skips_recently_monitored_spreads(monkeypatch
         reconciliation_module,
         "BullPutStrategyService",
         lambda **kwargs: strategy_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "OrderService",
+        lambda **kwargs: order_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "LongbridgeIntegrationService",
+        lambda **kwargs: account_service,
     )
 
     settings = Settings()
@@ -1313,12 +1475,17 @@ def test_reconciliation_coordinator_backs_off_remaining_spread_monitors_after_tr
     spreads = Mock()
     pre_open_runs = Mock()
     strategy_service = Mock()
+    order_service = Mock()
+    account_service = Mock()
+    order_service.reconcile_unresolved_intents.return_value = SimpleNamespace()
+    order_service.has_unresolved_intents.return_value = False
+    account_service.sync_account.return_value = SimpleNamespace()
 
     now = datetime.now(timezone.utc)
     broker_account = build_broker_account().model_copy(
         update={
-            "account_last_sync_attempt_at": now,
-            "orders_last_sync_attempt_at": now,
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
         }
     )
     broker_accounts.list_broker_accounts.return_value = [broker_account]
@@ -1370,6 +1537,16 @@ def test_reconciliation_coordinator_backs_off_remaining_spread_monitors_after_tr
         reconciliation_module,
         "BullPutStrategyService",
         lambda **kwargs: strategy_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "OrderService",
+        lambda **kwargs: order_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "LongbridgeIntegrationService",
+        lambda **kwargs: account_service,
     )
 
     coordinator = ReconciliationCoordinator(

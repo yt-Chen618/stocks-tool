@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 import logging
 import threading
 import time
-from typing import Any
+from typing import Any, Callable, TypeVar
 from zoneinfo import ZoneInfo
 
 from stocks_tool.core.config import Settings
@@ -28,6 +31,9 @@ from stocks_tool.domain.models import (
     BrokerConfigurationStatus,
     CreateOrderRequest,
     HistoricalPriceBar,
+    MarketDataModeRuntime,
+    MarketDataOperationRuntime,
+    MarketDataRuntimeSnapshot,
     OptionChainEntry,
     OptionMarketSnapshot,
     PositionSnapshot,
@@ -35,9 +41,41 @@ from stocks_tool.domain.models import (
     SecurityQuoteSnapshot,
     SessionQuote,
 )
+from stocks_tool.domain.option_symbols import parse_us_option_symbol
 from stocks_tool.ports.broker import BrokerAdapter
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+@dataclass
+class _MarketDataSession:
+    mode: ExecutionMode
+    executor: ThreadPoolExecutor
+    queue_slots: threading.BoundedSemaphore
+    context: Any | None = None
+    sdk: dict[str, Any] | None = None
+    state_lock: threading.Lock = field(default_factory=threading.Lock)
+    reference_cache: OrderedDict[tuple[Any, ...], tuple[float, Any]] = field(
+        default_factory=OrderedDict
+    )
+    metrics_lock: threading.Lock = field(default_factory=threading.Lock)
+    operation_metrics: dict[str, "_MarketDataOperationMetrics"] = field(default_factory=dict)
+    pending_requests: int = 0
+    max_pending_requests: int = 0
+
+
+@dataclass
+class _MarketDataOperationMetrics:
+    request_count: int = 0
+    sdk_call_count: int = 0
+    cache_hit_count: int = 0
+    cache_miss_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    timeout_count: int = 0
+    last_latency_ms: float | None = None
+    max_latency_ms: float | None = None
 
 
 class LongbridgeIntegrationError(RuntimeError):
@@ -50,6 +88,18 @@ class LongbridgeDependencyError(LongbridgeIntegrationError):
 
 class LongbridgeConfigurationError(LongbridgeIntegrationError):
     pass
+
+
+class LongbridgeMutationOutcomeUnknownError(LongbridgeIntegrationError):
+    """The broker mutation may have succeeded, but its final snapshot is unavailable."""
+
+    def __init__(self, message: str, *, external_order_id: str | None = None) -> None:
+        super().__init__(message)
+        self.external_order_id = external_order_id
+
+
+class LongbridgeOrderNotAcceptedError(LongbridgeIntegrationError):
+    """Structured broker evidence confirms the mutation was not accepted."""
 
 
 class LongbridgeBrokerAdapter(BrokerAdapter):
@@ -67,6 +117,22 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         self._circuit_reason_by_key: dict[str, str] = {}
         self._quote_cache_lock = threading.Lock()
         self._quote_cache: dict[tuple[str, str], tuple[float, SecurityQuoteSnapshot]] = {}
+        self._market_sessions_lock = threading.Lock()
+        self._market_sessions: dict[ExecutionMode, _MarketDataSession] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        """Release SDK workers. Safe to call more than once during app shutdown."""
+        with self._market_sessions_lock:
+            if self._closed:
+                return
+            self._closed = True
+            sessions = list(self._market_sessions.values())
+            self._market_sessions.clear()
+        for session in sessions:
+            self._invalidate_market_session(session)
+            session.executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
     @property
     def name(self) -> BrokerName:
@@ -132,22 +198,85 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             live_token_configured=bool(self.settings.longbridge_access_token),
         )
 
+    def prewarm_market_data(
+        self,
+        *,
+        mode: ExecutionMode,
+        symbols: list[str],
+    ) -> None:
+        """Open the read-only market-data session without blocking app startup."""
+        normalized = list(dict.fromkeys(symbol.strip() for symbol in symbols if symbol.strip()))
+        if normalized:
+            self.get_quotes(normalized, mode)
+
+    def get_market_data_runtime_status(self) -> MarketDataRuntimeSnapshot:
+        """Return local metrics without opening a broker connection or reading credentials."""
+        with self._market_sessions_lock:
+            closed = self._closed
+            sessions = list(self._market_sessions.values())
+        snapshots: list[MarketDataModeRuntime] = []
+        for session in sorted(sessions, key=lambda item: item.mode.value):
+            with session.state_lock:
+                context_initialized = session.context is not None
+            with session.metrics_lock:
+                operations = [
+                    MarketDataOperationRuntime(operation=name, **vars(metrics))
+                    for name, metrics in sorted(session.operation_metrics.items())
+                ]
+                snapshots.append(
+                    MarketDataModeRuntime(
+                        mode=session.mode,
+                        context_initialized=context_initialized,
+                        reference_cache_entries=len(session.reference_cache),
+                        pending_requests=session.pending_requests,
+                        max_pending_requests=session.max_pending_requests,
+                        operations=operations,
+                    )
+                )
+        return MarketDataRuntimeSnapshot(closed=closed, sessions=snapshots)
+
+    def get_us_market_calendar(
+        self,
+        local_date: date,
+        mode: ExecutionMode,
+    ) -> tuple[bool, bool]:
+        def _load_calendar(quote_context, sdk) -> tuple[bool, bool]:
+            calendar = quote_context.trading_days(
+                sdk["Market"].US,
+                local_date,
+                local_date,
+            )
+            trading_days = set(calendar.trading_days or [])
+            half_trading_days = set(calendar.half_trading_days or [])
+            return local_date in trading_days, local_date in half_trading_days
+
+        return self._run_market_data_action(
+            f"load US trading calendar for '{local_date.isoformat()}'",
+            mode,
+            _load_calendar,
+            operation="us_market_calendar",
+            cache_key=("us-market-calendar", local_date.isoformat()),
+            cache_ttl_seconds=self.settings.longbridge_reference_data_cache_ttl_seconds,
+        )
+
     def get_quote(
         self,
         symbol: str,
         mode: ExecutionMode,
     ) -> SecurityQuoteSnapshot:
-        def _load_quote() -> SecurityQuoteSnapshot:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_quote(quote_context, _sdk) -> SecurityQuoteSnapshot:
             quotes = quote_context.quote([symbol])
             if not quotes:
                 raise LongbridgeIntegrationError(f"No quote returned for symbol '{symbol}'.")
             return self._map_security_quote(quotes[0])
 
         try:
-            quote = self._run_sdk_action(f"load quote for '{symbol}'", _load_quote)
+            quote = self._run_market_data_action(
+                f"load quote for '{symbol}'",
+                mode,
+                _load_quote,
+                operation="quote",
+            )
         except LongbridgeIntegrationError as exc:
             cached_quote = self._get_cached_quote(symbol=symbol, mode=mode, fallback_detail=str(exc))
             if cached_quote is not None:
@@ -170,10 +299,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if not normalized_symbols:
             return {}
 
-        def _load_quotes() -> dict[str, SecurityQuoteSnapshot]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_quotes(quote_context, _sdk) -> dict[str, SecurityQuoteSnapshot]:
             quotes = quote_context.quote(normalized_symbols)
             return {
                 mapped.symbol: mapped
@@ -182,7 +308,12 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
 
         joined_symbols = ", ".join(normalized_symbols)
         try:
-            quotes = self._run_sdk_action(f"load quotes for {joined_symbols}", _load_quotes)
+            quotes = self._run_market_data_action(
+                f"load quotes for {joined_symbols}",
+                mode,
+                _load_quotes,
+                operation="quotes",
+            )
         except LongbridgeIntegrationError as exc:
             cached_quotes = self._get_cached_quotes(
                 symbols=normalized_symbols,
@@ -206,14 +337,18 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         symbol: str,
         mode: ExecutionMode,
     ) -> list[date]:
-        def _load_expiry_dates() -> list[date]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_expiry_dates(quote_context, _sdk) -> list[date]:
             expiry_dates = quote_context.option_chain_expiry_date_list(symbol)
             return [self._to_date(expiry_date) for expiry_date in expiry_dates]
 
-        return self._run_sdk_action(f"load option expiry dates for '{symbol}'", _load_expiry_dates)
+        return self._run_market_data_action(
+            f"load option expiry dates for '{symbol}'",
+            mode,
+            _load_expiry_dates,
+            operation="option_expiry_dates",
+            cache_key=("option-expiry-dates", symbol.upper()),
+            cache_ttl_seconds=self.settings.longbridge_reference_data_cache_ttl_seconds,
+        )
 
     def list_option_chain(
         self,
@@ -221,10 +356,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         expiry_date: date,
         mode: ExecutionMode,
     ) -> list[OptionChainEntry]:
-        def _load_option_chain() -> list[OptionChainEntry]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_option_chain(quote_context, _sdk) -> list[OptionChainEntry]:
             contracts = quote_context.option_chain_info_by_date(symbol, expiry_date)
             return [
                 OptionChainEntry(
@@ -236,9 +368,13 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 for contract in contracts
             ]
 
-        return self._run_sdk_action(
+        return self._run_market_data_action(
             f"load option chain for '{symbol}' on {expiry_date.isoformat()}",
+            mode,
             _load_option_chain,
+            operation="option_chain",
+            cache_key=("option-chain", symbol.upper(), expiry_date.isoformat()),
+            cache_ttl_seconds=self.settings.longbridge_reference_data_cache_ttl_seconds,
         )
 
     def get_option_market_snapshots(
@@ -249,10 +385,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         if not symbols:
             return []
 
-        def _load_option_snapshots() -> list[OptionMarketSnapshot]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_option_snapshots(quote_context, sdk) -> list[OptionMarketSnapshot]:
             option_quotes = quote_context.option_quote(symbols)
             calc_indexes = quote_context.calc_indexes(
                 symbols,
@@ -280,9 +413,11 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 for quote in option_quotes
             ]
 
-        return self._run_sdk_action(
+        return self._run_market_data_action(
             f"load option market snapshots for {', '.join(symbols)}",
+            mode,
             _load_option_snapshots,
+            operation="option_market_snapshots",
         )
 
     def get_best_bid_ask(
@@ -290,10 +425,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         symbol: str,
         mode: ExecutionMode,
     ) -> tuple[Decimal | None, Decimal | None]:
-        def _load_best_bid_ask() -> tuple[Decimal | None, Decimal | None]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_best_bid_ask(quote_context, _sdk) -> tuple[Decimal | None, Decimal | None]:
             depth = quote_context.depth(symbol)
             best_ask = self._to_optional_decimal(
                 getattr((getattr(depth, "asks", None) or [None])[0], "price", None)
@@ -303,7 +435,12 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             )
             return best_bid, best_ask
 
-        return self._run_sdk_action(f"load best bid/ask for '{symbol}'", _load_best_bid_ask)
+        return self._run_market_data_action(
+            f"load best bid/ask for '{symbol}'",
+            mode,
+            _load_best_bid_ask,
+            operation="best_bid_ask",
+        )
 
     def get_recent_daily_bars(
         self,
@@ -312,10 +449,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         count: int,
         mode: ExecutionMode,
     ) -> list[HistoricalPriceBar]:
-        def _load_daily_bars() -> list[HistoricalPriceBar]:
-            sdk = self._load_sdk()
-            config = self._build_config(mode=mode, sdk=sdk)
-            quote_context = sdk["QuoteContext"](config)
+        def _load_daily_bars(quote_context, sdk) -> list[HistoricalPriceBar]:
             candlesticks = quote_context.candlesticks(
                 symbol,
                 sdk["Period"].Day,
@@ -340,7 +474,14 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 for bar in candlesticks
             ]
 
-        return self._run_sdk_action(f"load recent daily bars for '{symbol}'", _load_daily_bars)
+        return self._run_market_data_action(
+            f"load recent daily bars for '{symbol}'",
+            mode,
+            _load_daily_bars,
+            operation="recent_daily_bars",
+            cache_key=("recent-daily-bars", symbol.upper(), count),
+            cache_ttl_seconds=self.settings.longbridge_reference_data_cache_ttl_seconds,
+        )
 
     def build_account_snapshot(
         self,
@@ -434,7 +575,17 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 trigger_price=request.stop_price,
                 remark=request.remark,
             )
-            order_detail = trade_context.order_detail(submit_response.order_id)
+            external_order_id = str(submit_response.order_id)
+            try:
+                order_detail = trade_context.order_detail(external_order_id)
+            except Exception as exc:
+                raise LongbridgeMutationOutcomeUnknownError(
+                    (
+                        f"Longbridge accepted submit order '{external_order_id}', but its "
+                        f"detail could not be confirmed: {exc}"
+                    ),
+                    external_order_id=external_order_id,
+                ) from exc
             return self._map_order_snapshot(
                 detail=order_detail,
                 mode=request.mode,
@@ -455,7 +606,16 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             config = self._build_config(mode=mode, sdk=sdk)
             trade_context = sdk["TradeContext"](config)
             trade_context.cancel_order(external_order_id)
-            order_detail = trade_context.order_detail(external_order_id)
+            try:
+                order_detail = trade_context.order_detail(external_order_id)
+            except Exception as exc:
+                raise LongbridgeMutationOutcomeUnknownError(
+                    (
+                        f"Longbridge cancel mutation for '{external_order_id}' may have succeeded, "
+                        f"but its detail could not be confirmed: {exc}"
+                    ),
+                    external_order_id=external_order_id,
+                ) from exc
             return self._map_order_snapshot(detail=order_detail, mode=mode)
 
         return self._run_sdk_action(
@@ -484,7 +644,16 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 trigger_price=stop_price,
                 remark=remark,
             )
-            order_detail = trade_context.order_detail(external_order_id)
+            try:
+                order_detail = trade_context.order_detail(external_order_id)
+            except Exception as exc:
+                raise LongbridgeMutationOutcomeUnknownError(
+                    (
+                        f"Longbridge replace mutation for '{external_order_id}' may have succeeded, "
+                        f"but its detail could not be confirmed: {exc}"
+                    ),
+                    external_order_id=external_order_id,
+                ) from exc
             return self._map_order_snapshot(detail=order_detail, mode=mode)
 
         return self._run_sdk_action(
@@ -529,6 +698,30 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             _list_today_orders,
         )
 
+    def list_history_orders(
+        self,
+        mode: ExecutionMode,
+        *,
+        symbol: str | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+    ) -> list[BrokerOrderSnapshot]:
+        def _list_history_orders() -> list[BrokerOrderSnapshot]:
+            sdk = self._load_sdk()
+            config = self._build_config(mode=mode, sdk=sdk)
+            trade_context = sdk["TradeContext"](config)
+            orders = trade_context.history_orders(
+                symbol=symbol,
+                start_at=start_at,
+                end_at=end_at,
+            )
+            return [self._map_order_snapshot(detail=order, mode=mode) for order in orders]
+
+        return self._run_sdk_action(
+            f"list history orders for '{symbol or 'account'}'",
+            _list_history_orders,
+        )
+
     def _load_sdk(self) -> dict[str, Any]:
         try:
             from longbridge.openapi import (
@@ -536,6 +729,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 CalcIndex,
                 Config,
                 Language,
+                Market,
                 OrderSide as LongbridgeOrderSide,
                 OrderType as LongbridgeOrderType,
                 Period,
@@ -554,6 +748,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             "CalcIndex": CalcIndex,
             "Config": Config,
             "Language": Language,
+            "Market": Market,
             "LongbridgeOrderSide": LongbridgeOrderSide,
             "LongbridgeOrderType": LongbridgeOrderType,
             "Period": Period,
@@ -608,6 +803,177 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             "zh-hk": getattr(language_enum, "ZH_HK"),
         }
         return mapping.get(self.settings.longbridge_language.lower(), getattr(language_enum, "EN"))
+
+    def _get_market_session(self, mode: ExecutionMode) -> _MarketDataSession:
+        with self._market_sessions_lock:
+            if self._closed:
+                raise LongbridgeIntegrationError("Longbridge adapter is closed.")
+            session = self._market_sessions.get(mode)
+            if session is None:
+                session = _MarketDataSession(
+                    mode=mode,
+                    executor=ThreadPoolExecutor(
+                        max_workers=1,
+                        thread_name_prefix=f"longbridge-market-{mode.value}",
+                    ),
+                    queue_slots=threading.BoundedSemaphore(
+                        max(1, self.settings.longbridge_market_data_max_pending_requests)
+                    ),
+                )
+                self._market_sessions[mode] = session
+            return session
+
+    def _market_context(self, session: _MarketDataSession) -> tuple[Any, dict[str, Any]]:
+        with session.state_lock:
+            if session.context is None or session.sdk is None:
+                sdk = self._load_sdk()
+                config = self._build_config(mode=session.mode, sdk=sdk)
+                session.context = sdk["QuoteContext"](config)
+                session.sdk = sdk
+            return session.context, session.sdk
+
+    @staticmethod
+    def _invalidate_market_session(
+        session: _MarketDataSession,
+        *,
+        close_context: bool = True,
+    ) -> None:
+        with session.state_lock:
+            context = session.context
+            session.context = None
+            session.sdk = None
+        closer = getattr(context, "close", None) if close_context else None
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                logger.debug("Longbridge QuoteContext close failed.", exc_info=True)
+
+    def _run_market_data_action(
+        self,
+        action: str,
+        mode: ExecutionMode,
+        func: Callable[[Any, dict[str, Any]], T],
+        *,
+        operation: str,
+        cache_key: tuple[Any, ...] | None = None,
+        cache_ttl_seconds: int = 0,
+    ) -> T:
+        circuit_key = "market-data"
+        session = self._get_market_session(mode)
+        started_at = time.perf_counter()
+        with session.metrics_lock:
+            metrics = session.operation_metrics.setdefault(
+                operation,
+                _MarketDataOperationMetrics(),
+            )
+            metrics.request_count += 1
+        try:
+            self._raise_if_circuit_open(action, circuit_key=circuit_key)
+        except LongbridgeIntegrationError:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            with session.metrics_lock:
+                metrics.failure_count += 1
+                metrics.last_latency_ms = elapsed_ms
+                metrics.max_latency_ms = max(metrics.max_latency_ms or 0, elapsed_ms)
+            raise
+        if not session.queue_slots.acquire(blocking=False):
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            with session.metrics_lock:
+                metrics.failure_count += 1
+                metrics.last_latency_ms = elapsed_ms
+                metrics.max_latency_ms = max(metrics.max_latency_ms or 0, elapsed_ms)
+            raise LongbridgeIntegrationError(
+                f"Longbridge market-data queue is full while trying to {action}."
+            )
+        with session.metrics_lock:
+            session.pending_requests += 1
+            session.max_pending_requests = max(
+                session.max_pending_requests,
+                session.pending_requests,
+            )
+
+        def _invoke() -> T:
+            if cache_key is not None and cache_ttl_seconds > 0:
+                with session.metrics_lock:
+                    cached = session.reference_cache.get(cache_key)
+                    if cached is not None:
+                        expires_at, value = cached
+                        if time.monotonic() < expires_at:
+                            session.reference_cache.move_to_end(cache_key)
+                            metrics.cache_hit_count += 1
+                            return deepcopy(value)
+                        session.reference_cache.pop(cache_key, None)
+                    metrics.cache_miss_count += 1
+            with session.metrics_lock:
+                metrics.sdk_call_count += 1
+            context, sdk = self._market_context(session)
+            result = func(context, sdk)
+            if cache_key is not None and cache_ttl_seconds > 0:
+                with session.metrics_lock:
+                    session.reference_cache[cache_key] = (
+                        time.monotonic() + cache_ttl_seconds,
+                        deepcopy(result),
+                    )
+                    session.reference_cache.move_to_end(cache_key)
+                    while (
+                        len(session.reference_cache)
+                        > self.settings.longbridge_reference_data_cache_max_entries
+                    ):
+                        session.reference_cache.popitem(last=False)
+            return result
+
+        def _release_queue_slot(_future) -> None:
+            with session.metrics_lock:
+                session.pending_requests = max(0, session.pending_requests - 1)
+            session.queue_slots.release()
+
+        def _record_completion(*, success: bool, timed_out: bool = False) -> None:
+            elapsed_ms = (time.perf_counter() - started_at) * 1000
+            with session.metrics_lock:
+                if success:
+                    metrics.success_count += 1
+                else:
+                    metrics.failure_count += 1
+                if timed_out:
+                    metrics.timeout_count += 1
+                metrics.last_latency_ms = elapsed_ms
+                metrics.max_latency_ms = max(metrics.max_latency_ms or 0, elapsed_ms)
+
+        try:
+            future = session.executor.submit(_invoke)
+        except Exception:
+            session.queue_slots.release()
+            raise
+        future.add_done_callback(_release_queue_slot)
+        try:
+            result = future.result(timeout=max(1, self.settings.longbridge_request_timeout_seconds))
+            _record_completion(success=True)
+            return result
+        except FuturesTimeoutError as exc:
+            _record_completion(success=False, timed_out=True)
+            future.cancel()
+            # A running SDK call cannot be interrupted safely. Detach its context so
+            # the next queued call reconnects after the owner thread becomes free.
+            self._invalidate_market_session(session, close_context=future.cancelled())
+            reason = (
+                f"Longbridge timed out while trying to {action} after "
+                f"{self.settings.longbridge_request_timeout_seconds}s."
+            )
+            self._open_circuit(circuit_key=circuit_key, reason=reason)
+            raise LongbridgeIntegrationError(reason) from exc
+        except LongbridgeIntegrationError:
+            _record_completion(success=False)
+            raise
+        except Exception as exc:
+            _record_completion(success=False)
+            if self._should_open_circuit(exc):
+                self._invalidate_market_session(session)
+                self._open_circuit(
+                    circuit_key=circuit_key,
+                    reason=f"Longbridge connectivity failed while trying to {action}: {exc}",
+                )
+            raise LongbridgeIntegrationError(f"Longbridge failed to {action}: {exc}") from exc
 
     def _run_sdk_action(self, action: str, func):
         circuit_key = self._circuit_key_for_action(action)
@@ -808,7 +1174,11 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
 
         return PositionSnapshot(
             symbol=getattr(position, "symbol"),
-            asset_type=AssetType.STOCK,
+            asset_type=(
+                AssetType.OPTION
+                if parse_us_option_symbol(str(getattr(position, "symbol", ""))) is not None
+                else AssetType.STOCK
+            ),
             quantity=quantity,
             average_cost=average_cost,
             market_value=market_value,
@@ -977,6 +1347,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             stop_price=self._to_optional_decimal(getattr(detail, "trigger_price", None)),
             executed_quantity=int(self._to_decimal(getattr(detail, "executed_quantity", None))),
             executed_price=self._to_optional_decimal(getattr(detail, "executed_price", None)),
+            remark=getattr(detail, "remark", None),
             submitted_at=self._to_optional_datetime(getattr(detail, "submitted_at", None)),
             updated_at=self._to_optional_datetime(getattr(detail, "updated_at", None)),
             raw_payload=self._serialize_order_payload(detail),
@@ -1148,6 +1519,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 "last_done",
                 "trigger_price",
                 "msg",
+                "remark",
                 "tag",
                 "time_in_force",
                 "expire_date",

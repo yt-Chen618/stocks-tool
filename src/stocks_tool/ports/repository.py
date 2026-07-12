@@ -2,6 +2,8 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
+    BrokerName,
+    ExecutionMode,
     JournalEntryType,
     MarketEventType,
     OrderStatus,
@@ -40,6 +42,10 @@ from stocks_tool.domain.models import (
     TradePlan,
     Watchlist,
 )
+
+
+class ConcurrentSpreadUpdateError(RuntimeError):
+    pass
 
 
 class TradePlanRepository(ABC):
@@ -159,7 +165,13 @@ class OrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_by_external_order_id(self, external_order_id: str) -> Order | None:
+    def get_by_external_order_id(
+        self,
+        external_order_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+    ) -> Order | None:
         raise NotImplementedError
 
     @abstractmethod
@@ -231,13 +243,27 @@ class BullPutSpreadRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_spread(self, spread: BullPutSpread) -> BullPutSpread:
+    def update_spread(
+        self,
+        spread: BullPutSpread,
+        *,
+        expected_version: int | None = None,
+    ) -> BullPutSpread:
         raise NotImplementedError
 
 
 class BullPutStrategyRuntimeRepository(ABC):
     @abstractmethod
     def get_runtime_state(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str = "paper_bull_put_v1",
+    ) -> BullPutStrategyRuntimeState | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def lock_for_entry(
         self,
         *,
         external_account_id: str,

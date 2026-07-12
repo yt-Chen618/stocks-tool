@@ -57,6 +57,7 @@ from stocks_tool.ports.repository import (
     TradePlanRepository,
     WatchlistRepository,
 )
+from stocks_tool.ports.trading_intent_ledger import TradingIntentLedger
 from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import (
     SQLAlchemyBullPutSpreadRepository,
 )
@@ -65,6 +66,9 @@ from stocks_tool.repositories.sqlalchemy_bull_put_strategy_runtime_repository im
 )
 from stocks_tool.repositories.sqlalchemy_order_repository import (
     SQLAlchemyOrderRepository,
+)
+from stocks_tool.repositories.sqlalchemy_trading_intent_ledger import (
+    SQLAlchemyTradingIntentLedger,
 )
 from stocks_tool.repositories.sqlalchemy_execution_repository import (
     SQLAlchemyExecutionRepository,
@@ -174,6 +178,12 @@ def get_order_repository(
     return SQLAlchemyOrderRepository(session)
 
 
+def get_trading_intent_ledger(
+    session: Session = Depends(get_db_session),
+) -> TradingIntentLedger:
+    return SQLAlchemyTradingIntentLedger(session)
+
+
 def get_execution_repository(
     session: Session = Depends(get_db_session),
 ) -> ExecutionRepository:
@@ -252,6 +262,7 @@ def get_order_service(
     orders: OrderRepository = Depends(get_order_repository),
     executions: ExecutionRepository = Depends(get_execution_repository),
     audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
+    intent_ledger: TradingIntentLedger = Depends(get_trading_intent_ledger),
     adapter: BrokerOrderGateway = Depends(get_longbridge_adapter),
 ) -> OrderService:
     settings: Settings = get_settings()
@@ -263,6 +274,7 @@ def get_order_service(
         executions=executions,
         longbridge_adapter=adapter,
         audit_events=audit_events,
+        intent_ledger=intent_ledger,
     )
 
 
@@ -313,6 +325,7 @@ def get_covered_call_strategy_service(
     market_events: MarketEventRepository = Depends(get_market_event_repository),
     order_service: OrderService = Depends(get_order_service),
     adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
+    audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
 ) -> CoveredCallStrategyService:
     settings: Settings = get_settings()
     return CoveredCallStrategyService(
@@ -323,6 +336,7 @@ def get_covered_call_strategy_service(
         longbridge_adapter=adapter,
         order_service=order_service,
         market_events=market_events,
+        audit_events=audit_events,
     )
 
 

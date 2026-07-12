@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
@@ -6,7 +6,13 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeIntegrationError,
 )
 from stocks_tool.api.dependencies import get_order_service
-from stocks_tool.application.services.orders import OrderService
+from stocks_tool.api.idempotency import require_idempotency_key
+from stocks_tool.application.services.orders import (
+    OrderService,
+    TradingIntentConflictError,
+    TradingIntentError,
+    TradingIntentOutcomeUnknownError,
+)
 from stocks_tool.domain.enums import ExecutionMode
 from stocks_tool.domain.models import (
     CreateOrderRequest,
@@ -16,6 +22,19 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+def _raise_intent_http_error(exc: TradingIntentError) -> None:
+    if isinstance(exc, TradingIntentConflictError):
+        code = "idempotency_conflict"
+    elif isinstance(exc, TradingIntentOutcomeUnknownError):
+        code = "order_outcome_unknown"
+    else:
+        code = "order_intent_rejected"
+    raise HTTPException(
+        status_code=409,
+        detail={"code": code, "intent_id": exc.intent_id, "retryable": False},
+    ) from exc
 
 
 @router.get("", response_model=list[Order])
@@ -40,10 +59,17 @@ def get_order(
 @router.post("/submit", response_model=Order, status_code=201)
 def submit_order(
     request: CreateOrderRequest,
+    response: Response,
+    idempotency_key: str = Depends(require_idempotency_key),
     service: OrderService = Depends(get_order_service),
 ) -> Order:
     try:
-        return service.submit_order(request)
+        order = service.submit_order(request, idempotency_key=idempotency_key)
+        if order.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return order
+    except TradingIntentError as exc:
+        _raise_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -69,6 +95,8 @@ def refresh_order(
         return service.refresh_order(order_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
@@ -84,12 +112,21 @@ def refresh_order(
 @router.post("/{order_id}/cancel", response_model=Order)
 def cancel_order(
     order_id: str,
+    response: Response,
+    idempotency_key: str = Depends(require_idempotency_key),
     service: OrderService = Depends(get_order_service),
 ) -> Order:
     try:
-        return service.cancel_order(order_id)
+        order = service.cancel_order(order_id, idempotency_key=idempotency_key)
+        if order.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return order
+    except TradingIntentError as exc:
+        _raise_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
@@ -106,12 +143,21 @@ def cancel_order(
 def replace_order(
     order_id: str,
     request: ReplaceOrderRequest,
+    response: Response,
+    idempotency_key: str = Depends(require_idempotency_key),
     service: OrderService = Depends(get_order_service),
 ) -> Order:
     try:
-        return service.replace_order(order_id, request)
+        order = service.replace_order(order_id, request, idempotency_key=idempotency_key)
+        if order.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return order
+    except TradingIntentError as exc:
+        _raise_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:

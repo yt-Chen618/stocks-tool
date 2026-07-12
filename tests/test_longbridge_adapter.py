@@ -1,6 +1,8 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from types import SimpleNamespace
+import threading
 import time
 from unittest.mock import Mock
 
@@ -11,6 +13,7 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
     LongbridgeDependencyError,
     LongbridgeIntegrationError,
+    LongbridgeMutationOutcomeUnknownError,
 )
 from stocks_tool.application.services.broker_gateway import (
     BrokerGatewayFailureKind,
@@ -18,8 +21,17 @@ from stocks_tool.application.services.broker_gateway import (
     classify_broker_exception,
 )
 from stocks_tool.core.config import Settings
-from stocks_tool.domain.enums import ExecutionMode
-from stocks_tool.domain.models import AccountSnapshot, SecurityQuoteSnapshot
+from stocks_tool.domain.enums import (
+    AssetType,
+    ExecutionMode,
+    OrderSide,
+    OrderType,
+)
+from stocks_tool.domain.models import (
+    AccountSnapshot,
+    CreateOrderRequest,
+    SecurityQuoteSnapshot,
+)
 from stocks_tool.ports.broker_gateway import (
     BrokerAccountGateway,
     BrokerMarketDataGateway,
@@ -146,7 +158,7 @@ def test_get_quote_uses_recent_cache_after_transient_failure() -> None:
         turnover=Decimal("600000000"),
         trade_status="Normal",
     )
-    adapter._run_sdk_action = Mock(
+    adapter._run_market_data_action = Mock(
         side_effect=[
             cached_quote,
             LongbridgeIntegrationError("Longbridge timed out while trying to load quote for 'SPY.US' after 6s."),
@@ -164,7 +176,266 @@ def test_get_quote_uses_recent_cache_after_transient_failure() -> None:
     assert second.warning_code == "quote_cache_fallback"
     assert "timed out" in (second.warning_detail or "")
     assert second.cache_age_seconds is not None
-    adapter._executor.shutdown(wait=False, cancel_futures=True)
+    adapter.close()
+
+
+def test_market_data_reuses_one_quote_context_per_mode_on_owner_thread() -> None:
+    adapter = build_adapter()
+    created_modes: list[object] = []
+    call_threads: list[int] = []
+    quote_calls = 0
+    raw_quote = SimpleNamespace(symbol="SPY.US")
+    mapped_quote = SecurityQuoteSnapshot(
+        symbol="SPY.US",
+        last_done=Decimal("600"),
+        prev_close=Decimal("599"),
+        open=Decimal("599"),
+        high=Decimal("601"),
+        low=Decimal("598"),
+        timestamp=datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc),
+        volume=1,
+        turnover=Decimal("600"),
+        trade_status="Normal",
+    )
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            created_modes.append(config)
+
+        def quote(self, symbols):
+            nonlocal quote_calls
+            quote_calls += 1
+            call_threads.append(threading.get_ident())
+            return [raw_quote]
+
+        def option_chain_expiry_date_list(self, symbol):
+            call_threads.append(threading.get_ident())
+            return [datetime(2026, 7, 17, tzinfo=timezone.utc)]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(side_effect=lambda mode, sdk: mode)
+    adapter._map_security_quote = Mock(return_value=mapped_quote)
+
+    assert adapter.get_quote("SPY.US", ExecutionMode.PAPER) == mapped_quote
+    assert adapter.get_quote("SPY.US", ExecutionMode.PAPER) == mapped_quote
+    assert adapter.list_option_expiry_dates("SPY.US", ExecutionMode.PAPER) == [
+        datetime(2026, 7, 17, tzinfo=timezone.utc).date()
+    ]
+    assert len(created_modes) == 1
+    assert len(set(call_threads)) == 1
+    assert quote_calls == 2
+
+    adapter.get_quote("SPY.US", ExecutionMode.LIVE)
+    assert len(created_modes) == 2
+    adapter.close()
+
+
+def test_market_data_session_is_not_blocked_by_trade_executor_work() -> None:
+    adapter = build_adapter()
+    trade_started = threading.Event()
+    release_trade = threading.Event()
+    mapped_quote = SecurityQuoteSnapshot(
+        symbol="SPY.US",
+        last_done=Decimal("600"),
+        prev_close=Decimal("599"),
+        open=Decimal("599"),
+        high=Decimal("601"),
+        low=Decimal("598"),
+        timestamp=datetime(2026, 7, 11, 14, 0, tzinfo=timezone.utc),
+        volume=1,
+        turnover=Decimal("600"),
+        trade_status="Normal",
+    )
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            pass
+
+        def quote(self, symbols):
+            return [SimpleNamespace(symbol=symbols[0])]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(return_value=object())
+    adapter._map_security_quote = Mock(return_value=mapped_quote)
+
+    def slow_trade_action():
+        trade_started.set()
+        release_trade.wait(timeout=1)
+        return "trade-finished"
+
+    with ThreadPoolExecutor(max_workers=1) as caller:
+        trade_future = caller.submit(
+            adapter._run_sdk_action,
+            "list today orders for 'account'",
+            slow_trade_action,
+        )
+        assert trade_started.wait(timeout=1)
+        assert adapter.get_quote("SPY.US", ExecutionMode.PAPER) == mapped_quote
+        assert trade_future.done() is False
+        release_trade.set()
+        assert trade_future.result(timeout=1) == "trade-finished"
+    adapter.close()
+
+
+def test_reference_data_cache_coalesces_concurrent_expiry_reads() -> None:
+    adapter = build_adapter(longbridge_reference_data_cache_ttl_seconds=300)
+    sdk_started = threading.Event()
+    release_sdk = threading.Event()
+    sdk_calls = 0
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            pass
+
+        def option_chain_expiry_date_list(self, symbol):
+            nonlocal sdk_calls
+            sdk_calls += 1
+            sdk_started.set()
+            release_sdk.wait(timeout=1)
+            return [datetime(2026, 7, 17, tzinfo=timezone.utc)]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(return_value=object())
+
+    with ThreadPoolExecutor(max_workers=2) as callers:
+        first = callers.submit(
+            adapter.list_option_expiry_dates,
+            "SPY.US",
+            ExecutionMode.PAPER,
+        )
+        assert sdk_started.wait(timeout=1)
+        second = callers.submit(
+            adapter.list_option_expiry_dates,
+            "SPY.US",
+            ExecutionMode.PAPER,
+        )
+        release_sdk.set()
+        assert first.result(timeout=1) == [date(2026, 7, 17)]
+        assert second.result(timeout=1) == [date(2026, 7, 17)]
+
+    assert sdk_calls == 1
+    runtime = adapter.get_market_data_runtime_status()
+    paper = next(item for item in runtime.sessions if item.mode == ExecutionMode.PAPER)
+    expiry_stats = next(
+        item for item in paper.operations if item.operation == "option_expiry_dates"
+    )
+    assert expiry_stats.request_count == 2
+    assert expiry_stats.sdk_call_count == 1
+    assert expiry_stats.cache_hit_count == 1
+    assert expiry_stats.cache_miss_count == 1
+    assert paper.reference_cache_entries == 1
+    assert paper.max_pending_requests == 2
+    adapter.close()
+
+
+def test_reference_data_cache_returns_defensive_option_chain_copies() -> None:
+    adapter = build_adapter(longbridge_reference_data_cache_ttl_seconds=300)
+    sdk_calls = 0
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            pass
+
+        def option_chain_info_by_date(self, symbol, expiry_date):
+            nonlocal sdk_calls
+            sdk_calls += 1
+            return [
+                SimpleNamespace(
+                    price=Decimal("600"),
+                    call_symbol="SPY260717C600000.US",
+                    put_symbol="SPY260717P600000.US",
+                    standard=True,
+                )
+            ]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(return_value=object())
+
+    first = adapter.list_option_chain("SPY.US", date(2026, 7, 17), ExecutionMode.PAPER)
+    first[0].strike = Decimal("1")
+    second = adapter.list_option_chain("SPY.US", date(2026, 7, 17), ExecutionMode.PAPER)
+
+    assert second[0].strike == Decimal("600")
+    assert sdk_calls == 1
+    adapter.close()
+
+
+def test_reference_data_cache_is_bounded_and_evicts_oldest_entry() -> None:
+    adapter = build_adapter(
+        longbridge_reference_data_cache_ttl_seconds=300,
+        longbridge_reference_data_cache_max_entries=1,
+    )
+    sdk_calls = 0
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            pass
+
+        def option_chain_expiry_date_list(self, symbol):
+            nonlocal sdk_calls
+            sdk_calls += 1
+            return [datetime(2026, 7, 17, tzinfo=timezone.utc)]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(return_value=object())
+
+    adapter.list_option_expiry_dates("SPY.US", ExecutionMode.PAPER)
+    adapter.list_option_expiry_dates("QQQ.US", ExecutionMode.PAPER)
+    adapter.list_option_expiry_dates("SPY.US", ExecutionMode.PAPER)
+
+    assert sdk_calls == 3
+    adapter.close()
+
+
+def test_prewarm_market_data_only_loads_read_only_quotes() -> None:
+    adapter = build_adapter()
+    adapter.get_quotes = Mock(return_value={})
+
+    adapter.prewarm_market_data(
+        mode=ExecutionMode.PAPER,
+        symbols=["SPY.US", "QQQ.US"],
+    )
+
+    adapter.get_quotes.assert_called_once_with(["SPY.US", "QQQ.US"], ExecutionMode.PAPER)
+    adapter.close()
+
+
+def test_market_data_runtime_status_does_not_initialize_a_session() -> None:
+    adapter = build_adapter()
+
+    runtime = adapter.get_market_data_runtime_status()
+
+    assert runtime.closed is False
+    assert runtime.sessions == []
+    adapter.close()
+
+
+def test_market_data_runtime_records_timeout_and_circuit_rejection() -> None:
+    adapter = build_adapter()
+
+    class SlowQuoteContext:
+        def __init__(self, config) -> None:
+            pass
+
+        def quote(self, symbols):
+            time.sleep(2)
+            return []
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": SlowQuoteContext})
+    adapter._build_config = Mock(return_value=object())
+
+    with pytest.raises(LongbridgeIntegrationError, match="timed out"):
+        adapter.get_quote("SPY.US", ExecutionMode.PAPER)
+    with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
+        adapter.get_quote("SPY.US", ExecutionMode.PAPER)
+
+    runtime = adapter.get_market_data_runtime_status()
+    quote_stats = runtime.sessions[0].operations[0]
+    assert quote_stats.operation == "quote"
+    assert quote_stats.request_count == 2
+    assert quote_stats.failure_count == 2
+    assert quote_stats.timeout_count == 1
+    adapter.close()
 
 
 def test_trade_order_listing_uses_timeout_guard() -> None:
@@ -187,6 +458,93 @@ def test_trade_order_listing_uses_timeout_guard() -> None:
     with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
         adapter.list_today_orders(mode=ExecutionMode.PAPER)
 
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_history_order_listing_exposes_recovery_remark() -> None:
+    adapter = build_adapter()
+    detail = SimpleNamespace(
+        order_id="external-order-1",
+        symbol="UNH.US",
+        side="BUY",
+        quantity=Decimal("1"),
+        order_type="LO",
+        time_in_force="DAY",
+        status="NEW",
+        price=Decimal("321.00"),
+        trigger_price=None,
+        executed_quantity=Decimal("0"),
+        executed_price=None,
+        remark="st:0123456789abcdef operator note",
+        submitted_at=datetime(2026, 7, 11, 14, 30, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 11, 14, 31, tzinfo=timezone.utc),
+    )
+
+    class TradeContext:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def history_orders(self, *, symbol=None, start_at=None, end_at=None):
+            return [detail]
+
+    adapter._load_sdk = Mock(return_value={"TradeContext": TradeContext})
+    adapter._build_config = Mock(return_value=object())
+
+    orders = adapter.list_history_orders(mode=ExecutionMode.PAPER)
+
+    assert orders[0].remark == "st:0123456789abcdef operator note"
+    assert orders[0].raw_payload["remark"] == "st:0123456789abcdef operator note"
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_submit_detail_failure_after_order_id_is_explicitly_unknown() -> None:
+    adapter = build_adapter()
+
+    class TradeContext:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def submit_order(self, **kwargs):
+            return SimpleNamespace(order_id="external-order-after-submit")
+
+        def order_detail(self, external_order_id):
+            raise RuntimeError("broker rejected detail lookup")
+
+    adapter._load_sdk = Mock(return_value={"TradeContext": TradeContext})
+    adapter._build_config = Mock(return_value=object())
+    adapter._map_submit_order_type = Mock(return_value=object())
+    adapter._map_submit_time_in_force = Mock(return_value=object())
+    adapter._map_submit_side = Mock(return_value=object())
+
+    with pytest.raises(LongbridgeMutationOutcomeUnknownError) as caught:
+        adapter.submit_order(
+            CreateOrderRequest(
+                external_account_id="LBPT10087357",
+                symbol="UNH260626C105000.US",
+                asset_type=AssetType.OPTION,
+                side=OrderSide.SELL,
+                quantity=1,
+                order_type=OrderType.LIMIT,
+                mode=ExecutionMode.PAPER,
+                limit_price=Decimal("1.20"),
+            )
+        )
+
+    assert caught.value.external_order_id == "external-order-after-submit"
+    adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_position_symbol_recognizes_option_even_when_position_channel_has_no_asset_type() -> None:
+    adapter = build_adapter()
+    position = SimpleNamespace(
+        symbol="UNH260626C105000.US",
+        quantity=Decimal("-1"),
+        cost_price=Decimal("1.20"),
+    )
+
+    snapshot = adapter._map_position_snapshot(position, quote=None)
+
+    assert snapshot.asset_type == AssetType.OPTION
     adapter._executor.shutdown(wait=False, cancel_futures=True)
 
 

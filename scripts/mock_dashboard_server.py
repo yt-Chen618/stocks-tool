@@ -46,6 +46,11 @@ MOCK_SCENARIOS = {
     "repair-available",
     "quote-cache-fallback",
     "scheduler-lease-active",
+    "auxiliary-data-failure",
+    "core-data-failure",
+    "covered-call-data-failure",
+    "accounts-data-failure",
+    "unknown-intent",
 }
 
 
@@ -59,6 +64,11 @@ class MockDashboardState:
         self._order_counter = 1000
         self._journal_counter = 2000
         self._spread_counter = 3000
+        self._market_events_request_count = 0
+        self._orders_request_count = 0
+        self._broker_accounts_request_count = 0
+        self._covered_call_activity_request_count = 0
+        self._unknown_intent_created = False
         self.account = build_mock_account(self.account_id)
         self.watchlists = build_mock_watchlists(self.symbol)
         self.configuration = build_mock_configuration()
@@ -515,7 +525,37 @@ class MockDashboardState:
                 "checks": ["candidate_token", "minimum_net_credit", "quote_freshness"],
                 "created_at": "2026-05-29T14:45:00Z",
                 "updated_at": "2026-05-29T14:45:00Z",
-            }
+            },
+            {
+                "id": "mock-covered-call-0001",
+                "strategy_id": "covered_call_v1",
+                "external_account_id": self.account_id,
+                "mode": "paper",
+                "symbol": "MSFT.US",
+                "title": "MSFT covered call lifecycle",
+                "proposed_action": "sell_covered_call",
+                "thesis": "Mock covered-call lifecycle fixture.",
+                "rationale": "Keeps the lifecycle reconcile control visible in browser safety tests.",
+                "status": "executed",
+                "confidence": "0.700000",
+                "expected_max_loss": None,
+                "expected_max_profit": "125.0000",
+                "approval_required": True,
+                "approved_at": "2026-05-28T14:00:00Z",
+                "rejected_at": None,
+                "expires_at": "2026-06-26T20:00:00Z",
+                "source": "mock-ui",
+                "source_run_id": None,
+                "candidate_payload": {
+                    "call_symbol": "MSFT260626C540000.US",
+                    "contracts": 1,
+                    "limit_price": "1.25",
+                },
+                "risk_payload": {"max_contracts": 1},
+                "checks": ["approved", "covered_shares", "paper_only"],
+                "created_at": "2026-05-28T13:45:00Z",
+                "updated_at": "2026-05-29T14:40:00Z",
+            },
         ]
         self.strategy_runs = [
             {
@@ -2013,6 +2053,60 @@ class MockDashboardState:
             "reason": None,
         }
 
+    def execute_bound_bull_put(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("external_account_id") != self.account_id:
+            raise KeyError(str(payload.get("external_account_id")))
+        if payload.get("mode") != "paper" or payload.get("confirm_paper_order") is not True:
+            raise ValueError("Mock Bull Put execution requires confirmed paper mode.")
+        if payload.get("symbol") != "QQQ.US":
+            raise ValueError("Mock Bull Put symbol does not match the readiness candidate.")
+        if payload.get("candidate_token") != "mock-qqq-candidate-token":
+            raise ValueError("Mock Bull Put candidate token changed before execution.")
+        if str(payload.get("minimum_net_credit")) != "0.52":
+            raise ValueError("Mock Bull Put minimum credit does not match the readiness candidate.")
+
+        self._spread_counter += 1
+        now = iso_now()
+        spread = deepcopy(self.spreads[0])
+        spread.update(
+            {
+                "id": f"mock-spread-{self._spread_counter}",
+                "underlying_symbol": "QQQ.US",
+                "expiration_date": "2026-06-26",
+                "contracts": 1,
+                "width": "3.0000",
+                "long_symbol": "QQQ260626P705000.US",
+                "long_strike": "705.0000",
+                "short_symbol": "QQQ260626P708000.US",
+                "short_strike": "708.0000",
+                "status": "open",
+                "long_entry_order_id": "mock-bound-long-entry",
+                "short_entry_order_id": "mock-bound-short-entry",
+                "long_exit_order_id": None,
+                "short_exit_order_id": None,
+                "entry_long_price": "1.8800",
+                "entry_short_price": "2.4000",
+                "entry_net_credit": "0.5200",
+                "max_profit": "52.0000",
+                "max_loss": "248.0000",
+                "break_even": "707.4800",
+                "exit_reason": None,
+                "lifecycle_warning_code": None,
+                "manual_action_required": False,
+                "latest_monitor_should_close": False,
+                "latest_close_order_status": None,
+                "raw_payload": {"candidate_token": payload["candidate_token"]},
+                "entry_started_at": now,
+                "opened_at": now,
+                "closed_at": None,
+                "last_synced_at": now,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        self.spreads.append(spread)
+        return deepcopy(spread)
+
     def run_review(self, external_account_id: str, *, force: bool) -> dict[str, Any]:
         if external_account_id != self.account_id:
             raise KeyError(external_account_id)
@@ -2141,6 +2235,9 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
 
     @app.get("/broker-accounts")
     def broker_accounts() -> list[dict[str, Any]]:
+        state._broker_accounts_request_count += 1
+        if state.scenario == "accounts-data-failure" and state._broker_accounts_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock broker accounts failure.")
         return [deepcopy(state.account)]
 
     @app.get("/brokers/profiles")
@@ -2174,6 +2271,40 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         if external_account_id != state.account_id or mode != "paper":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock operator status not found.")
         return state.operator_status_snapshot()
+
+    @app.get("/ops/trading-intents")
+    def trading_intents(
+        external_account_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
+        limit: int = Query(default=100),
+    ) -> list[dict[str, Any]]:
+        _ = (external_account_id, mode, limit)
+        if state.scenario != "unknown-intent" or not state._unknown_intent_created:
+            return []
+        now = iso_now()
+        return [
+            {
+                "id": "mock-unknown-intent-1",
+                "trade_action_intent_id": "mock-unknown-action-1",
+                "external_account_id": state.account_id,
+                "broker": "longbridge",
+                "mode": "paper",
+                "idempotency_key": "ui-order-submit-unknown-0001",
+                "request_hash": "a" * 64,
+                "operation": "submit",
+                "action": "order_submit",
+                "broker_marker": "st:0123456789abcdef",
+                "state": "unknown",
+                "request_payload": {"symbol": "MOCK.US"},
+                "last_error": "Mock broker response timed out.",
+                "created_at": now,
+                "updated_at": now,
+            }
+        ]
+
+    @app.get("/ops/trade-actions")
+    def trade_actions() -> list[dict[str, Any]]:
+        return []
 
     @app.get("/ops/audit")
     def ops_audit(
@@ -2295,10 +2426,34 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         external_account_id: str | None = Query(default=None),
         limit: int = Query(default=12, ge=1, le=100),
     ) -> dict[str, Any]:
+        state._covered_call_activity_request_count += 1
+        if state.scenario == "covered-call-data-failure" and state._covered_call_activity_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock covered-call activity failure.")
         return state.covered_call_activity_snapshot(
             external_account_id=external_account_id,
             limit=limit,
         )
+
+    @app.post("/strategies/covered-call/lifecycle/{external_account_id}/reconcile")
+    def reconcile_covered_call_lifecycle(
+        external_account_id: str,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, Any]:
+        _ = limit
+        if external_account_id != state.account_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock account not found.")
+        return {
+            "external_account_id": external_account_id,
+            "sell_orders_refreshed": 1,
+            "sell_orders_executed": 0,
+            "close_orders_refreshed": 0,
+            "closed_proposals": 0,
+            "roll_buyback_orders_refreshed": 0,
+            "roll_sell_orders_refreshed": 0,
+            "roll_sell_orders_submitted": 0,
+            "roll_sell_orders_waiting_confirmation": 0,
+            "rolls_executed": 0,
+        }
 
     @app.get("/strategies/zero-dte-lottery/runtime")
     def zero_dte_lottery_runtime(
@@ -2424,6 +2579,9 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         symbol: str | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> list[dict[str, Any]]:
+        state._market_events_request_count += 1
+        if state.scenario == "auxiliary-data-failure" and state._market_events_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock auxiliary market-events failure.")
         return state.list_market_events(symbol=symbol, limit=limit)
 
     @app.post("/strategies/pre-open-runs/{external_account_id}/capture")
@@ -2457,6 +2615,9 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
 
     @app.get("/orders")
     def orders(external_account_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
+        state._orders_request_count += 1
+        if state.scenario == "core-data-failure" and state._orders_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock required orders failure.")
         return state.list_orders(external_account_id)
 
     @app.get("/strategies/bull-put/spreads")
@@ -2465,6 +2626,68 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         status: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
         return state.list_spreads(external_account_id=external_account_id, status=status)
+
+    @app.get("/strategies/bull-put/readiness")
+    def bull_put_readiness(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        if external_account_id != state.account_id or mode != "paper":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock readiness not found.")
+        scanned_at = iso_now()
+        preview = {
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "scanned_at": scanned_at,
+            "eligible": True,
+            "reasons": [],
+            "warnings": [],
+            "symbol": "QQQ.US",
+            "underlying_price": "501.25",
+            "candidate_token": "mock-qqq-candidate-token",
+            "candidate": {
+                "expiration_date": "2026-06-26",
+                "width": "3.00",
+                "short_put": {
+                    "symbol": "QQQ260626P708000.US",
+                    "strike": "708.00",
+                    "bid": "2.40",
+                    "ask": "2.45",
+                    "quote_timestamp": scanned_at,
+                },
+                "long_put": {
+                    "symbol": "QQQ260626P705000.US",
+                    "strike": "705.00",
+                    "bid": "1.82",
+                    "ask": "1.88",
+                    "quote_timestamp": scanned_at,
+                },
+                "conservative_credit": "0.52",
+                "mid_credit": "0.57",
+            },
+            "risk": {
+                "status": "pass",
+                "max_profit": "52.00",
+                "max_loss": "248.00",
+                "break_even": "707.48",
+                "account_risk_pct": "0.0025",
+                "reasons": [],
+                "warnings": [],
+            },
+            "timing_ms": {},
+        }
+        return {
+            "strategy_id": "paper_bull_put_v1",
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "evaluated_at": scanned_at,
+            "ready": True,
+            "status": "ready",
+            "checks": [],
+            "previews": [preview],
+            "preferred_symbol": "QQQ.US",
+            "next_action": "Review the locked QQQ.US candidate.",
+        }
 
     @app.get("/strategies/bull-put/spreads/{spread_id}/recover-close/eligibility")
     def recover_close_eligibility(
@@ -2530,6 +2753,17 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
 
     @app.post("/orders/submit", status_code=status.HTTP_201_CREATED)
     def submit_order(payload: dict[str, Any]) -> dict[str, Any]:
+        if state.scenario == "unknown-intent":
+            state._unknown_intent_created = True
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "order_outcome_unknown",
+                    "message": "Broker order outcome is unknown; reconciliation is required.",
+                    "intent_id": "mock-unknown-intent-1",
+                    "retryable": False,
+                },
+            )
         return state.submit_order(payload)
 
     @app.post("/orders/{order_id}/refresh")
@@ -2605,6 +2839,18 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Runtime state for '{external_account_id}' was not found.",
             ) from error
+
+    @app.post("/strategies/bull-put/execute", status_code=status.HTTP_201_CREATED)
+    def execute_bull_put(payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return state.execute_bound_bull_put(payload)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Runtime state for '{payload.get('external_account_id')}' was not found.",
+            ) from error
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
     @app.post("/strategies/bull-put/runtime/{external_account_id}/review")
     def review_bull_put_runtime(

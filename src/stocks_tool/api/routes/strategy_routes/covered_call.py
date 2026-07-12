@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
@@ -11,7 +11,13 @@ from stocks_tool.api.dependencies import (
     get_covered_call_strategy_service,
     get_strategy_experiment_service,
 )
+from stocks_tool.api.idempotency import require_idempotency_key
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
+from stocks_tool.application.services.orders import (
+    TradingIntentConflictError,
+    TradingIntentError,
+    TradingIntentOutcomeUnknownError,
+)
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.domain.enums import ExecutionMode
 from stocks_tool.domain.models import (
@@ -31,6 +37,18 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter()
+
+
+def _raise_strategy_intent_http_error(exc: TradingIntentError) -> None:
+    code = "order_intent_rejected"
+    if isinstance(exc, TradingIntentConflictError):
+        code = "idempotency_conflict"
+    elif isinstance(exc, TradingIntentOutcomeUnknownError):
+        code = "order_outcome_unknown"
+    raise HTTPException(
+        status_code=409,
+        detail={"code": code, "intent_id": exc.intent_id, "retryable": False},
+    ) from exc
 
 
 @router.get("/covered-call/preview", response_model=CoveredCallPreviewResult)
@@ -91,10 +109,21 @@ def propose_covered_call(
 def execute_covered_call_proposal(
     proposal_id: str,
     request: ExecuteCoveredCallProposalRequest,
+    response: Response,
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> CoveredCallExecutionResult:
     try:
-        return service.execute_approved_proposal(proposal_id, request)
+        result = service.execute_approved_proposal(
+            proposal_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
+        if result.order.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -158,10 +187,23 @@ def propose_covered_call_roll(
 def execute_covered_call_roll_proposal(
     proposal_id: str,
     request: ExecuteCoveredCallRollProposalRequest,
+    response: Response,
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> CoveredCallRollExecutionResult:
     try:
-        return service.execute_approved_roll_proposal(proposal_id, request)
+        result = service.execute_approved_roll_proposal(
+            proposal_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
+        if result.buyback_order.idempotent_replayed or (
+            result.sell_order is not None and result.sell_order.idempotent_replayed
+        ):
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -180,10 +222,23 @@ def execute_covered_call_roll_proposal(
 def continue_covered_call_roll_proposal(
     proposal_id: str,
     request: ContinueCoveredCallRollRequest,
+    response: Response,
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> CoveredCallRollExecutionResult:
     try:
-        return service.continue_roll_proposal(proposal_id, request)
+        result = service.continue_roll_proposal(
+            proposal_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
+        if result.buyback_order.idempotent_replayed or (
+            result.sell_order is not None and result.sell_order.idempotent_replayed
+        ):
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -202,10 +257,21 @@ def continue_covered_call_roll_proposal(
 def close_covered_call_proposal(
     proposal_id: str,
     request: CloseCoveredCallProposalRequest,
+    response: Response,
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
+    idempotency_key: str = Depends(require_idempotency_key),
 ) -> CoveredCallCloseResult:
     try:
-        return service.close_proposal(proposal_id, request)
+        result = service.close_proposal(
+            proposal_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
+        if result.order.idempotent_replayed:
+            response.headers["Idempotent-Replayed"] = "true"
+        return result
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
@@ -246,6 +312,8 @@ def reconcile_covered_call_lifecycle(
             external_account_id=external_account_id,
             limit=limit,
         )
+    except TradingIntentError as exc:
+        _raise_strategy_intent_http_error(exc)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

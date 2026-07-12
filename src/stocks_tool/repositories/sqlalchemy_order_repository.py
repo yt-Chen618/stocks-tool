@@ -20,8 +20,15 @@ from stocks_tool.ports.repository import OrderRepository
 
 
 class SQLAlchemyOrderRepository(OrderRepository):
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, attach_intent_ledger: bool = True) -> None:
         self.session = session
+        self.trading_intent_ledger = None
+        if attach_intent_ledger:
+            from stocks_tool.repositories.sqlalchemy_trading_intent_ledger import (
+                SQLAlchemyTradingIntentLedger,
+            )
+
+            self.trading_intent_ledger = SQLAlchemyTradingIntentLedger(session)
 
     def create_order(self, order: Order) -> Order:
         record = OrderRecord(id=order.id or str(uuid4()))
@@ -41,11 +48,21 @@ class SQLAlchemyOrderRepository(OrderRepository):
             return None
         return self._to_domain(record)
 
-    def get_by_external_order_id(self, external_order_id: str) -> Order | None:
+    def get_by_external_order_id(
+        self,
+        external_order_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+    ) -> Order | None:
         record = self.session.execute(
             select(OrderRecord)
             .options(selectinload(OrderRecord.broker_account))
-            .where(OrderRecord.external_order_id == external_order_id)
+            .where(
+                OrderRecord.external_order_id == external_order_id,
+                OrderRecord.broker == broker.value,
+                OrderRecord.execution_mode == mode.value,
+            )
         ).scalar_one_or_none()
         if record is None:
             return None
@@ -91,6 +108,7 @@ class SQLAlchemyOrderRepository(OrderRepository):
         record.trade_plan_id = order.trade_plan_id
         record.external_order_id = order.external_order_id
         record.client_order_id = order.client_order_id
+        record.order_intent_id = order.order_intent_id
         record.symbol = order.symbol
         record.asset_type = order.asset_type.value if order.asset_type is not None else None
         record.side = order.side.value
@@ -101,6 +119,8 @@ class SQLAlchemyOrderRepository(OrderRepository):
         record.limit_price = order.limit_price
         record.stop_price = order.stop_price
         record.status = order.status.value
+        record.executed_quantity = order.executed_quantity
+        record.executed_price = order.executed_price
         record.raw_payload = order.raw_payload
         record.submitted_at = order.submitted_at
 
@@ -142,6 +162,7 @@ class SQLAlchemyOrderRepository(OrderRepository):
             trade_plan_id=record.trade_plan_id,
             external_order_id=record.external_order_id,
             client_order_id=record.client_order_id,
+            order_intent_id=record.order_intent_id,
             symbol=record.symbol,
             asset_type=AssetType(record.asset_type) if record.asset_type is not None else None,
             side=OrderSide(record.side),
@@ -150,6 +171,8 @@ class SQLAlchemyOrderRepository(OrderRepository):
             time_in_force=TimeInForce(record.time_in_force),
             mode=ExecutionMode(record.execution_mode),
             status=OrderStatus(record.status),
+            executed_quantity=record.executed_quantity,
+            executed_price=Decimal(record.executed_price) if record.executed_price is not None else None,
             limit_price=Decimal(record.limit_price) if record.limit_price is not None else None,
             stop_price=Decimal(record.stop_price) if record.stop_price is not None else None,
             option_contract=option_contract,

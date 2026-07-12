@@ -1,10 +1,13 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock, call
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
+from stocks_tool.application.services.orders import TradingIntentConflictError
+from stocks_tool.application.services.strategy_idempotency import strategy_order_identity
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -21,9 +24,12 @@ from stocks_tool.domain.enums import (
     StrategyRunStatus,
     StrategySignalType,
     TimeInForce,
+    TradingIntentState,
+    TradingOperation,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
+    BrokerOrderIntent,
     BrokerAccount,
     CloseCoveredCallProposalRequest,
     ContinueCoveredCallRollRequest,
@@ -32,13 +38,16 @@ from stocks_tool.domain.models import (
     ExecuteCoveredCallRollProposalRequest,
     MarketEvent,
     OptionChainEntry,
+    OptionContractRef,
     OptionMarketSnapshot,
     Order,
     PositionSnapshot,
+    PreparedTradeActionIntent,
     SecurityQuoteSnapshot,
     StrategyProposal,
     StrategyRun,
     StrategySignal,
+    TradeActionIntent,
 )
 
 
@@ -258,6 +267,26 @@ def build_adapter() -> Mock:
     return adapter
 
 
+def build_roll_adapter() -> Mock:
+    adapter = build_adapter()
+    base_quote = adapter.get_option_market_snapshots.return_value[0]
+    roll_quote = base_quote.model_copy(
+        update={
+            "symbol": "UNH260710C110000.US",
+            "expiration_date": date(2026, 7, 10),
+            "strike": Decimal("110"),
+            "bid": Decimal("1.05"),
+            "ask": Decimal("1.15"),
+            "open_interest": 900,
+            "volume": 35,
+        }
+    )
+    adapter.get_option_market_snapshots.side_effect = lambda symbols, mode: [
+        roll_quote if symbols[0] == roll_quote.symbol else base_quote
+    ]
+    return adapter
+
+
 def build_candidate_payload(
     *,
     call_symbol: str = "UNH260626C105000.US",
@@ -320,7 +349,12 @@ def build_service(
     order_service: Mock | None = None,
     adapter: Mock | None = None,
     market_events: FakeMarketEvents | None = None,
+    audit_events: Mock | None = None,
 ) -> CoveredCallStrategyService:
+    if order_service is not None:
+        order_service.has_unresolved_intents.return_value = False
+        order_service.list_orders.return_value = []
+        order_service.list_trading_intents.return_value = []
     return CoveredCallStrategyService(
         settings=Settings(),
         broker_accounts=FakeBrokerAccounts(),
@@ -329,7 +363,67 @@ def build_service(
         longbridge_adapter=adapter or build_adapter(),
         order_service=order_service,
         market_events=market_events,
+        audit_events=audit_events,
+        authorization_clock=lambda: NOW,
     )
+
+
+def configure_parent_action(
+    order_service: Mock,
+    *,
+    action_id: str,
+    idempotency_key: str,
+    entity_id: str = "proposal-2",
+    created: bool = True,
+    state: TradingIntentState = TradingIntentState.PREPARED,
+    response_payload: dict | None = None,
+) -> None:
+    order_service.prepare_trade_action.side_effect = None
+    order_service.prepare_trade_action.return_value = PreparedTradeActionIntent(
+        intent=TradeActionIntent(
+            id=action_id,
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key=idempotency_key,
+            request_hash="parent-request-hash",
+            action="covered_call_roll_execute",
+            strategy_id="covered_call_v1",
+            entity_id=entity_id,
+            state=state,
+            request_payload={},
+            response_payload=response_payload,
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        created=created,
+    )
+
+
+def test_strategy_order_identity_scopes_public_idempotency_namespace() -> None:
+    baseline, _ = strategy_order_identity(
+        strategy_id="covered_call_v1",
+        entity_id="proposal-1",
+        action="covered_call_open",
+        leg="short_call_open",
+    )
+    first, first_context = strategy_order_identity(
+        strategy_id="covered_call_v1",
+        entity_id="proposal-1",
+        action="covered_call_open",
+        leg="short_call_open",
+        request_namespace="covered-call-request-0001",
+    )
+    second, _ = strategy_order_identity(
+        strategy_id="covered_call_v1",
+        entity_id="proposal-1",
+        action="covered_call_open",
+        leg="short_call_open",
+        request_namespace="covered-call-request-0002",
+    )
+
+    assert len({baseline, first, second}) == 3
+    assert first_context.entity_id.startswith("proposal-1:")
 
 
 def test_covered_call_preview_selects_liquid_otm_call() -> None:
@@ -533,11 +627,28 @@ def test_covered_call_execute_requires_approved_proposal_and_submits_option_orde
         created_at=NOW,
         updated_at=NOW,
     )
-    service = build_service(experiments=experiments, order_service=order_service)
+    adapter = build_adapter()
+    adapter.get_option_market_snapshots.return_value = [
+        adapter.get_option_market_snapshots.return_value[0].model_copy(
+            update={"bid": Decimal("1.10"), "ask": Decimal("1.20")}
+        )
+    ]
+    service = build_service(
+        experiments=experiments,
+        order_service=order_service,
+        adapter=adapter,
+    )
+    configure_parent_action(
+        order_service,
+        action_id="covered-parent-1",
+        idempotency_key="covered-public-key-0001",
+        entity_id="proposal-1",
+    )
 
     result = service.execute_approved_proposal(
         "proposal-1",
         request=ExecuteCoveredCallProposalRequest(),
+        idempotency_key="covered-public-key-0001",
     )
 
     assert result.proposal.status == StrategyProposalStatus.EXECUTED
@@ -546,9 +657,59 @@ def test_covered_call_execute_requires_approved_proposal_and_submits_option_orde
     assert request.symbol == "UNH260626C105000.US"
     assert request.asset_type == AssetType.OPTION
     assert request.side == OrderSide.SELL
-    assert request.limit_price == Decimal("1.20")
+    assert request.limit_price == Decimal("1.10")
     assert request.option_contract.underlying_symbol == "UNH.US"
+    assert order_service.submit_order.call_args.kwargs["idempotency_key"].startswith("strategy:")
+    assert order_service.submit_order.call_args.kwargs["action_context"].leg == "short_call_open"
+    assert order_service.submit_order.call_args.kwargs["action_context"].entity_id == "proposal-1"
+    assert order_service.submit_order.call_args.kwargs["parent_action_intent_id"] == "covered-parent-1"
+    assert order_service.has_unresolved_intents.call_args.kwargs[
+        "exclude_action_intent_id"
+    ] == "covered-parent-1"
+    order_service.complete_trade_action.assert_called_once()
     assert experiments.updated_status == StrategyProposalStatus.EXECUTED
+
+
+def test_covered_call_execute_blocks_cached_underlying_before_submit() -> None:
+    proposal = StrategyProposal(
+        id="proposal-cached-quote",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    adapter = build_adapter()
+    adapter.get_quote.return_value = adapter.get_quote.return_value.model_copy(
+        update={"data_quality": "cached", "warning_code": "quote_cache_fallback"}
+    )
+    order_service = Mock()
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+        adapter=adapter,
+    )
+    configure_parent_action(
+        order_service,
+        action_id="covered-parent-cached",
+        idempotency_key="covered-cached-key-0001",
+        entity_id=proposal.id,
+    )
+
+    with pytest.raises(ValueError, match="Cached underlying quote"):
+        service.execute_approved_proposal(
+            proposal.id,
+            request=ExecuteCoveredCallProposalRequest(),
+            idempotency_key="covered-cached-key-0001",
+        )
+
+    order_service.submit_order.assert_not_called()
 
 
 def test_covered_call_execute_keeps_working_sell_order_approved() -> None:
@@ -598,6 +759,356 @@ def test_covered_call_execute_keeps_working_sell_order_approved() -> None:
     assert experiments.updated_status is None
     assert experiments.run_request.metrics_payload["sequence_status"] == "sell_submitted_waiting_fill"
     assert experiments.run_request.metrics_payload["sell_status"] == "submitted"
+
+
+def test_covered_call_execute_blocks_same_day_option_position_mapped_as_stock() -> None:
+    proposal = StrategyProposal(
+        id="proposal-same-day",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    snapshot = build_snapshot()
+    expiry_token = datetime.now(ZoneInfo("America/New_York")).strftime("%y%m%d")
+    snapshot.positions.append(
+        PositionSnapshot(
+            symbol=f"UNH{expiry_token}C105000.US",
+            asset_type=AssetType.STOCK,
+            quantity=Decimal("-1"),
+            average_cost=Decimal("1.20"),
+            market_value=Decimal("-120"),
+            unrealized_pnl=Decimal("0"),
+        )
+    )
+    order_service = Mock()
+    audit_events = Mock()
+    service = build_service(
+        snapshot=snapshot,
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+        audit_events=audit_events,
+    )
+    configure_parent_action(
+        order_service,
+        action_id="covered-parent-same-day",
+        idempotency_key="covered-same-day-key-0001",
+        entity_id=proposal.id,
+    )
+
+    with pytest.raises(ValueError, match="same-day expiring option positions"):
+        service.execute_approved_proposal(
+            proposal.id,
+            request=ExecuteCoveredCallProposalRequest(),
+            idempotency_key="covered-same-day-key-0001",
+        )
+
+    order_service.submit_order.assert_not_called()
+    order_service.mark_trade_action_rejected.assert_called_once()
+    warning = audit_events.create_event.call_args.args[0]
+    assert warning.warning_code == "same_day_option_position_requires_manual_action"
+    assert warning.payload["severity"] == "critical"
+    assert warning.payload["manual_action_required"] is True
+
+
+def test_covered_call_different_public_key_reuses_same_child_identity() -> None:
+    proposal = StrategyProposal(
+        id="proposal-repeat",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    working_order = Order(
+        id="working-repeat-order",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-working-repeat-order",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.SELL,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.SUBMITTED,
+        limit_price=Decimal("1.20"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    order_service = Mock()
+    order_service.submit_order.return_value = working_order
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+    )
+    configure_parent_action(
+        order_service,
+        action_id="covered-parent-repeat-1",
+        idempotency_key="covered-repeat-key-0001",
+        entity_id=proposal.id,
+    )
+    service.execute_approved_proposal(
+        proposal.id,
+        ExecuteCoveredCallProposalRequest(),
+        idempotency_key="covered-repeat-key-0001",
+    )
+    first_child_key = order_service.submit_order.call_args.kwargs["idempotency_key"]
+
+    configure_parent_action(
+        order_service,
+        action_id="covered-parent-repeat-2",
+        idempotency_key="covered-repeat-key-0002",
+        entity_id=proposal.id,
+    )
+    order_service.submit_order.side_effect = ValueError(
+        "Existing deterministic child belongs to the first parent action."
+    )
+    with pytest.raises(ValueError, match="first parent action"):
+        service.execute_approved_proposal(
+            proposal.id,
+            ExecuteCoveredCallProposalRequest(),
+            idempotency_key="covered-repeat-key-0002",
+        )
+
+    second_child_key = order_service.submit_order.call_args.kwargs["idempotency_key"]
+    assert second_child_key == first_child_key
+    assert order_service.submit_order.call_count == 2
+    order_service.mark_trade_action_rejected.assert_called_with(
+        "covered-parent-repeat-2",
+        "Existing deterministic child belongs to the first parent action.",
+    )
+
+
+def test_covered_call_execute_reserves_shares_for_other_working_short_call() -> None:
+    current = StrategyProposal(
+        id="proposal-current",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Current covered call",
+        proposed_action="sell_covered_call",
+        rationale="Current action.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    other_working = current.model_copy(
+        update={
+            "id": "proposal-working",
+            "title": "Working covered call",
+        }
+    )
+    experiments = FakeExperiments([current, other_working])
+    order_service = Mock()
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(ValueError, match="0 unreserved shares"):
+        service.execute_approved_proposal(
+            current.id,
+            request=ExecuteCoveredCallProposalRequest(),
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_execute_blocks_unlinked_working_short_call_order() -> None:
+    proposal = StrategyProposal(
+        id="proposal-current",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Current covered call",
+        proposed_action="sell_covered_call",
+        rationale="Current action.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    order_service = Mock()
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+    )
+    order_service.list_orders.return_value = [
+        Order(
+            id="unlinked-working-call",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-unlinked-working-call",
+            symbol="UNH260626C110000.US",
+            asset_type=AssetType.STOCK,
+            side=OrderSide.SELL,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.SUBMITTED,
+            limit_price=Decimal("0.80"),
+            option_contract=None,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    ]
+
+    with pytest.raises(ValueError, match="0 unreserved shares"):
+        service.execute_approved_proposal(
+            proposal.id,
+            request=ExecuteCoveredCallProposalRequest(),
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_execute_blocks_when_trading_intent_is_unresolved() -> None:
+    proposal = StrategyProposal(
+        id="proposal-current",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Current covered call",
+        proposed_action="sell_covered_call",
+        rationale="Current action.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    order_service = Mock()
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+    )
+    order_service.has_unresolved_intents.return_value = True
+
+    with pytest.raises(ValueError, match="unresolved trading intent"):
+        service.execute_approved_proposal(
+            proposal.id,
+            request=ExecuteCoveredCallProposalRequest(),
+        )
+
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_reserves_unlinked_unknown_sell_call_intent_without_local_order() -> None:
+    proposal = StrategyProposal(
+        id="proposal-current",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Current covered call",
+        proposed_action="sell_covered_call",
+        rationale="Current action.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    order_service = Mock()
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+    )
+    order_service.list_trading_intents.return_value = [
+        BrokerOrderIntent(
+            id="unknown-call-intent",
+            trade_action_intent_id="unknown-call-action",
+            external_account_id="LBPT10087357",
+            broker=BrokerName.LONGBRIDGE,
+            mode=ExecutionMode.PAPER,
+            idempotency_key="generic-call-key-0001",
+            request_hash="request-hash",
+            operation=TradingOperation.SUBMIT,
+            action="order_submit",
+            broker_marker="st:0123456789abcdef",
+            state=TradingIntentState.UNKNOWN,
+            request_payload={
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "side": "sell",
+                "quantity": 1,
+                "option_contract": {
+                    "underlying_symbol": "UNH.US",
+                    "expiration_date": "2026-06-26",
+                    "strike": "110",
+                    "right": "call",
+                },
+            },
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    ]
+
+    reserved = service._reserved_covered_call_shares(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        underlying_symbol="UNH.US",
+        excluded_proposal_ids={proposal.id},
+    )
+
+    assert reserved == 100
+
+
+def test_covered_call_reserves_short_call_position_imported_as_stock() -> None:
+    proposal = StrategyProposal(
+        id="proposal-current",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Current covered call",
+        proposed_action="sell_covered_call",
+        rationale="Current action.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    snapshot = build_snapshot(quantity=Decimal("200"))
+    snapshot.positions.append(
+        PositionSnapshot(
+            symbol="UNH260626C110000.US",
+            asset_type=AssetType.STOCK,
+            quantity=Decimal("-1"),
+            average_cost=Decimal("0.80"),
+            market_value=Decimal("-80"),
+            unrealized_pnl=Decimal("0"),
+        )
+    )
+    service = build_service(
+        snapshot=snapshot,
+        experiments=FakeExperiments(proposal),
+        order_service=Mock(),
+    )
+
+    reserved = service._reserved_covered_call_shares(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        underlying_symbol="UNH.US",
+        excluded_proposal_ids={proposal.id},
+    )
+
+    assert reserved == 100
 
 
 def test_covered_call_execute_blocks_advisor_source_without_local_checks() -> None:
@@ -976,7 +1487,16 @@ def test_covered_call_roll_execute_submits_sell_to_open_after_buyback_fills() ->
             updated_at=NOW,
         ),
     ]
-    service = build_service(experiments=experiments, order_service=order_service)
+    service = build_service(
+        experiments=experiments,
+        order_service=order_service,
+        adapter=build_roll_adapter(),
+    )
+    configure_parent_action(
+        order_service,
+        action_id="roll-parent-1",
+        idempotency_key="roll-public-key-0001",
+    )
 
     result = service.execute_approved_roll_proposal(
         "proposal-2",
@@ -984,6 +1504,7 @@ def test_covered_call_roll_execute_submits_sell_to_open_after_buyback_fills() ->
             buyback_limit_price=Decimal("0.55"),
             sell_limit_price=Decimal("1.10"),
         ),
+        idempotency_key="roll-public-key-0001",
     )
 
     assert result.sequence_status == "roll_filled"
@@ -992,6 +1513,21 @@ def test_covered_call_roll_execute_submits_sell_to_open_after_buyback_fills() ->
     assert result.sell_order is not None
     assert result.sell_order.id == "roll-open-order-1"
     assert order_service.submit_order.call_count == 2
+    assert {
+        call_args.kwargs["parent_action_intent_id"]
+        for call_args in order_service.submit_order.call_args_list
+    } == {"roll-parent-1"}
+    assert {
+        call_args.kwargs["action_context"].entity_id
+        for call_args in order_service.submit_order.call_args_list
+    } == {"proposal-2"}
+    child_keys = {
+        call_args.kwargs["idempotency_key"]
+        for call_args in order_service.submit_order.call_args_list
+    }
+    assert len(child_keys) == 2
+    assert "roll-public-key-0001" not in child_keys
+    order_service.complete_trade_action.assert_called_once()
     buyback_request = order_service.submit_order.call_args_list[0].args[0]
     sell_request = order_service.submit_order.call_args_list[1].args[0]
     assert buyback_request.symbol == "UNH260626C105000.US"
@@ -1003,6 +1539,131 @@ def test_covered_call_roll_execute_submits_sell_to_open_after_buyback_fills() ->
     assert experiments.updated_statuses["proposal-2"] == StrategyProposalStatus.EXECUTED
     assert experiments.run_request.run_type == "roll_execution"
     assert experiments.signal_request.signal_type == StrategySignalType.EXECUTION
+
+    order_service.submit_order.reset_mock()
+    configure_parent_action(
+        order_service,
+        action_id="roll-parent-1",
+        idempotency_key="roll-public-key-0001",
+        created=False,
+        state=TradingIntentState.PERSISTED,
+        response_payload=result.model_dump(mode="json"),
+    )
+    replay = service.execute_approved_roll_proposal(
+        "proposal-2",
+        ExecuteCoveredCallRollProposalRequest(
+            buyback_limit_price=Decimal("0.55"),
+            sell_limit_price=Decimal("1.10"),
+        ),
+        idempotency_key="roll-public-key-0001",
+    )
+
+    assert replay.model_dump() == result.model_dump()
+    assert replay.buyback_order.idempotent_replayed is True
+    assert replay.sell_order is not None and replay.sell_order.idempotent_replayed is True
+    order_service.submit_order.assert_not_called()
+
+    order_service.prepare_trade_action.side_effect = TradingIntentConflictError("roll-parent-1")
+    with pytest.raises(TradingIntentConflictError) as exc_info:
+        service.execute_approved_roll_proposal(
+            "proposal-2",
+            ExecuteCoveredCallRollProposalRequest(
+                buyback_limit_price=Decimal("0.55"),
+                sell_limit_price=Decimal("1.15"),
+            ),
+            idempotency_key="roll-public-key-0001",
+        )
+    assert exc_info.value.intent_id == "roll-parent-1"
+
+
+def test_covered_call_roll_closes_old_call_before_same_day_gate_blocks_new_sell() -> None:
+    proposal = StrategyProposal(
+        id="proposal-roll-same-day",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "roll_from": build_candidate_payload(),
+            "roll_to": build_candidate_payload(
+                call_symbol="UNH260710C110000.US",
+                expiration_date="2026-07-10",
+                call_strike="110",
+                call_bid="1.10",
+                call_ask="1.20",
+                call_mid="1.15",
+                premium_income="110.00",
+            ),
+            "source_proposal_id": "proposal-source",
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    snapshot = build_snapshot()
+    expiry_token = datetime.now(ZoneInfo("America/New_York")).strftime("%y%m%d")
+    snapshot.positions.append(
+        PositionSnapshot(
+            symbol=f"SPY{expiry_token}P600000.US",
+            asset_type=AssetType.STOCK,
+            quantity=Decimal("1"),
+            average_cost=Decimal("1.00"),
+            market_value=Decimal("100"),
+            unrealized_pnl=Decimal("0"),
+        )
+    )
+    order_service = Mock()
+    order_service.submit_order.return_value = Order(
+        id="same-day-buyback",
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id="external-same-day-buyback",
+        symbol="UNH260626C105000.US",
+        asset_type=AssetType.OPTION,
+        side=OrderSide.BUY,
+        quantity=1,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=OrderStatus.FILLED,
+        limit_price=Decimal("0.55"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    audit_events = Mock()
+    service = build_service(
+        snapshot=snapshot,
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+        audit_events=audit_events,
+    )
+    configure_parent_action(
+        order_service,
+        action_id="roll-parent-same-day",
+        idempotency_key="roll-same-day-key-0001",
+        entity_id=proposal.id,
+    )
+
+    result = service.execute_approved_roll_proposal(
+        proposal.id,
+        ExecuteCoveredCallRollProposalRequest(
+            buyback_limit_price=Decimal("0.55"),
+            sell_limit_price=Decimal("1.10"),
+        ),
+        idempotency_key="roll-same-day-key-0001",
+    )
+
+    assert result.sequence_status == "roll_sell_blocked_manual_action"
+    assert result.sell_order is None
+    assert result.buyback_order.side == OrderSide.BUY
+    assert order_service.submit_order.call_count == 1
+    assert "Buyback filled" in (result.reason or "")
+    warning = audit_events.create_event.call_args.args[0]
+    assert warning.warning_code == "same_day_option_position_requires_manual_action"
+    order_service.complete_trade_action.assert_called_once()
 
 
 def test_covered_call_roll_execute_waits_when_buyback_does_not_fill() -> None:
@@ -1190,7 +1851,11 @@ def test_covered_call_roll_continue_submits_sell_after_buyback_refresh_fills() -
         created_at=NOW,
         updated_at=NOW,
     )
-    service = build_service(experiments=experiments, order_service=order_service)
+    service = build_service(
+        experiments=experiments,
+        order_service=order_service,
+        adapter=build_roll_adapter(),
+    )
 
     result = service.continue_roll_proposal(
         "proposal-2",
@@ -1591,7 +2256,7 @@ def test_covered_call_lifecycle_reconcile_records_working_sell_refresh() -> None
     ).isoformat()
 
 
-def test_covered_call_lifecycle_reconcile_submits_roll_sell_after_buyback_fills() -> None:
+def test_covered_call_lifecycle_reconcile_waits_for_confirmed_roll_continue() -> None:
     proposal = StrategyProposal(
         id="proposal-2",
         strategy_id="covered_call_v1",
@@ -1676,11 +2341,11 @@ def test_covered_call_lifecycle_reconcile_submits_roll_sell_after_buyback_fills(
     )
 
     assert result["roll_buyback_orders_refreshed"] == 1
-    assert result["roll_sell_orders_submitted"] == 1
+    assert result["roll_sell_orders_submitted"] == 0
+    assert result["roll_sell_orders_waiting_confirmation"] == 1
     assert result["rolls_executed"] == 0
     assert experiments.updated_status is None
-    assert experiments.run_request.run_type == "roll_continuation"
-    assert experiments.run_request.metrics_payload["sell_order_id"] == "roll-open-order-1"
+    order_service.submit_order.assert_not_called()
 
 
 def test_covered_call_lifecycle_reconcile_executes_filled_roll_sell() -> None:

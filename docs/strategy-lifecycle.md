@@ -1,6 +1,6 @@
 # Strategy Lifecycle
 
-Last updated: 2026-06-15
+Last updated: 2026-07-11
 
 ## Purpose
 
@@ -31,6 +31,10 @@ Callers may include extra context such as linked order ids, broker order status,
 | `exit_pending_long` spread | short close is filled and long close intent/order is linked | manual action if long leg is still exposed unexpectedly |
 | Closed / rolled-back spread | no working close order is expected | warning only if stale working order is still linked |
 | Entry candidate execution | candidate token and minimum credit constraints still match preview | reject execution if candidate drifted |
+| Terminal spread | `closed`, `rolled_back`, and `entry_failed` never transition back to `open` | late fill requires manual action |
+| Exit pending long | filled entry legs never overwrite the exit state | remain exit-pending until the long close is reconciled |
+| Concurrent lifecycle worker | update succeeds only when the persisted `version` still matches | reload and re-evaluate after CAS conflict |
+| Multi-leg action | one parent trade-action intent owns each leg's child order intent | unknown child keeps the parent and account blocked |
 
 ## Covered Call Invariants
 
@@ -41,15 +45,16 @@ Callers may include extra context such as linked order ids, broker order status,
 | Pending close | buy-to-close order exists and can be refreshed | manual action if canceled/rejected without replacement |
 | Pending roll buyback | buyback order exists before any new sell-to-open | duplicate-order prevention warning |
 | Pending roll open | buyback is filled and sell-to-open order exists or awaits explicit continuation | manual continuation warning |
+| Covered shares | working short-call orders and unresolved sell-call intents consume the same share capacity as filled calls | reject over-allocation before submit |
 
 ## Zero-DTE Lottery Invariants
 
 | Invariant | Expected State | Warning |
 | --- | --- | --- |
-| Auto-order switch | disabled by default and paper-only when enabled | block live mode |
-| Daily cap | at most one lottery trade per account/session | reject duplicate session trade |
-| Premium cap | ask/limit premium remains within cap | reject execution |
-| Order confirmation | `confirm_paper_order=true` required for order placement | reject execution |
+| Preview | read-only candidate evaluation remains available | surface degraded broker data without submitting |
+| Execute / force scan | disabled pending expiration lifecycle | return `zero_dte_execution_disabled_pending_lifecycle` |
+| Auto-order switch | cannot be enabled | keep scheduler order calls at zero |
+| Existing same-day position | visible as critical manual action | block new strategy entries |
 
 ## Current Canonical Consumers
 

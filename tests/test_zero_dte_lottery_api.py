@@ -73,7 +73,7 @@ def test_zero_dte_lottery_preview_route_returns_preview() -> None:
     assert request["as_of"] == NOW
 
 
-def test_zero_dte_lottery_execute_route_returns_paper_order() -> None:
+def test_zero_dte_lottery_execute_route_is_disabled_before_service_call() -> None:
     service = Mock()
     preview = ZeroDteLotteryPreviewResult(
         external_account_id="LBPT10087357",
@@ -125,15 +125,9 @@ def test_zero_dte_lottery_execute_route_returns_paper_order() -> None:
     finally:
         clear_overrides()
 
-    assert response.status_code == 201
-    body = response.json()
-    assert body["order"]["symbol"] == "QQQ260604C736000.US"
-    assert body["order"]["side"] == "buy"
-    request = service.execute.call_args.args[0]
-    assert request.external_account_id == "LBPT10087357"
-    assert request.direction == "call"
-    assert request.mode == ExecutionMode.PAPER
-    assert request.confirm_paper_order is True
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "zero_dte_execution_disabled_pending_lifecycle"
+    service.execute.assert_not_called()
 
 
 def test_zero_dte_lottery_runtime_route_returns_state() -> None:
@@ -170,7 +164,7 @@ def test_zero_dte_lottery_runtime_route_returns_state() -> None:
     assert request["mode"] == ExecutionMode.PAPER
 
 
-def test_zero_dte_lottery_runtime_update_route_enables_auto_ordering() -> None:
+def test_zero_dte_lottery_runtime_update_route_rejects_auto_ordering() -> None:
     service = Mock()
     service.update_runtime_state.return_value = ZeroDteLotteryRuntimeState(
         external_account_id="LBPT10087357",
@@ -196,13 +190,9 @@ def test_zero_dte_lottery_runtime_update_route_enables_auto_ordering() -> None:
     finally:
         clear_overrides()
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["auto_execute_enabled"] is True
-    request = service.update_runtime_state.call_args.kwargs
-    assert request["external_account_id"] == "LBPT10087357"
-    assert request["mode"] == ExecutionMode.PAPER
-    assert request["request"].auto_execute_enabled is True
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "zero_dte_execution_disabled_pending_lifecycle"
+    service.update_runtime_state.assert_not_called()
 
 
 def test_zero_dte_lottery_scan_route_returns_scan_result() -> None:
@@ -240,3 +230,20 @@ def test_zero_dte_lottery_scan_route_returns_scan_result() -> None:
     assert request["direction"] == "auto"
     assert request["force"] is False
     assert request["as_of"] == NOW
+
+
+def test_zero_dte_lottery_force_scan_is_disabled_before_service_call() -> None:
+    service = Mock()
+    app.dependency_overrides[get_zero_dte_lottery_strategy_service] = lambda: service
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/strategies/zero-dte-lottery/runtime/LBPT10087357/scan",
+            params={"mode": "paper", "force": "true"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "zero_dte_execution_disabled_pending_lifecycle"
+    service.run_scan.assert_not_called()

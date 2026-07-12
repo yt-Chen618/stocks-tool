@@ -37,6 +37,16 @@ def test_worktree_release_inventory_classifies_known_slices() -> None:
     assert classify_path("src/stocks_tool/application/services/operator_consistency.py") == (
         "operator_status_audit_scheduler"
     )
+    assert classify_path("src/stocks_tool/api/routes/orders.py") == "operator_status_audit_scheduler"
+    assert classify_path("src/stocks_tool/api/idempotency.py") == "operator_status_audit_scheduler"
+    assert classify_path("src/stocks_tool/core/config.py") == "operator_status_audit_scheduler"
+    assert classify_path("src/stocks_tool/application/services/order_preflight.py") == (
+        "operator_status_audit_scheduler"
+    )
+    assert classify_path("src/stocks_tool/application/services/strategy_idempotency.py") == (
+        "strategy_workflow_hardening"
+    )
+    assert classify_path(".env.example") == "docs_tests"
     assert classify_path("src/stocks_tool/ui/static/app.js") == "dashboard_mock_regression"
     assert classify_path(".playwright-cli/page.yml") == "generated_cleanup"
     assert classify_path(".vscode/PythonImportHelper-v2-Completion.json") == "generated_cleanup"

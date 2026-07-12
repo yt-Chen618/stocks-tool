@@ -14,8 +14,10 @@ SCRIPT_BY_WORKFLOW = {
     "bull-put-readiness": ROOT / "scripts" / "run_bull_put_readiness_check.py",
     "bull-put-real-paper": ROOT / "scripts" / "run_bull_put_real_paper_smoke.py",
     "consistency-report": ROOT / "scripts" / "run_consistency_report.py",
+    "market-data-runtime": ROOT / "scripts" / "run_market_data_runtime_report.py",
     "mock-ui": ROOT / "scripts" / "run_mock_ui_order_regression.py",
     "operator-platform-v8": ROOT / "scripts" / "run_operator_platform_v8_gate.py",
+    "p0-safety": ROOT / "scripts" / "run_p0_safety_gate.py",
     "data-hygiene-audit": ROOT / "scripts" / "run_data_hygiene_audit.py",
     "paper-session-gate": ROOT / "scripts" / "run_paper_session_gate.py",
     "real-paper": ROOT / "scripts" / "run_real_paper_order_smoke.py",
@@ -38,6 +40,7 @@ def parse_args() -> argparse.Namespace:
             "read-only close recovery eligibility evidence, "
             "`bull-put-real-paper` for real Longbridge bull put preview smoke, `consistency-report` for read-only "
             "strategy/order ledger consistency evidence, `operator-platform-v8` for the aggregate local gate, "
+            "`p0-safety` for the broker-read-only exact-once and dashboard safety gate with an isolated temporary database, "
             "`real-paper` for the stock-order paper smoke flow, "
             "`real-preopen-board` for live localhost pre-open board checks, `real-ui-refresh` for repeated reload "
             "timing checks against an already running localhost dashboard, `audit-export` for read-only audit evidence, "

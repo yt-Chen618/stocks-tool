@@ -35,7 +35,7 @@ def render_dashboard() -> HTMLResponse:
                 <title>Stocks Tool Workbench</title>
                 <link rel="stylesheet" href="{app_css_url}" />
               </head>
-              <body>
+              <body data-view-mode="focus">
                 <div class="shell">
                   <header class="topbar">
                     <div class="brand">
@@ -46,6 +46,10 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </div>
                     <div class="topbar-actions">
+                      <div class="view-switch" aria-label="Information density">
+                        <button class="view-option" type="button" data-view-mode-option="focus" aria-pressed="true">Focus</button>
+                        <button class="view-option" type="button" data-view-mode-option="all" aria-pressed="false">All</button>
+                      </div>
                       <div class="language-switch" aria-label="Language">
                         <button class="lang-option" type="button" data-lang-option="zh">中文</button>
                         <button class="lang-option" type="button" data-lang-option="en">EN</button>
@@ -61,6 +65,10 @@ def render_dashboard() -> HTMLResponse:
                     <a href="#portfolio-section">Portfolio</a>
                     <a href="#execution-section">Execution</a>
                   </nav>
+
+                  <div id="desktop-trading-notice" class="desktop-trading-notice" role="note">
+                    Broker-writing actions are disabled on screens 780px wide or smaller. Use the desktop workbench to trade.
+                  </div>
 
                   <main class="workspace">
                     <section id="account-section" class="band account-band">
@@ -157,7 +165,7 @@ def render_dashboard() -> HTMLResponse:
                         </article>
                       </div>
 
-                      <div id="status-banner" class="status-banner">Ready</div>
+                      <div id="status-banner" class="status-banner" role="status" aria-live="polite" aria-atomic="true">Ready</div>
                     </section>
 
                     <section id="strategy-section" class="band strategy-band">
@@ -228,9 +236,9 @@ def render_dashboard() -> HTMLResponse:
                               </label>
                             </div>
                             <div class="form-foot">
-                              <p id="strategy-controls-hint" class="form-hint">Strategy controls apply to new bull put entries only. Existing spreads remain monitored.</p>
+                              <p id="strategy-controls-hint" class="form-hint" role="status" aria-live="polite">Strategy controls apply to new bull put entries only. Existing spreads remain monitored.</p>
                               <div class="inline-actions">
-                                <button id="save-strategy-controls" class="icon-button" type="submit">
+                                <button id="save-strategy-controls" class="icon-button" type="submit" data-broker-mutation="true" data-action-key="bull-put-controls">
                                   <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24" focusable="false">
                                       <path d="M5 5h11l3 3v11H5z"/>
@@ -240,14 +248,14 @@ def render_dashboard() -> HTMLResponse:
                                   </span>
                                   <span>Save Controls</span>
                                 </button>
-                                <button id="run-strategy-scan" class="icon-button accent" type="button">
+                                <button id="run-strategy-scan" class="icon-button accent" type="button" data-broker-mutation="true" data-action-key="bull-put-force-scan">
                                   <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24" focusable="false">
                                       <path d="M3 12h18"/>
                                       <path d="m13 6 6 6-6 6"/>
                                     </svg>
                                   </span>
-                                  <span>Run Scan</span>
+                                  <span>Execute Preview</span>
                                 </button>
                                 <button id="run-strategy-review" class="icon-button" type="button">
                                   <span class="icon" aria-hidden="true">
@@ -264,7 +272,7 @@ def render_dashboard() -> HTMLResponse:
                             </div>
                           </form>
 
-                          <div class="strategy-notes-grid">
+                          <div class="strategy-notes-grid" data-view-priority="secondary">
                             <article class="strategy-note-card">
                               <div class="form-header">
                                 <span class="section-kicker">Last Skip</span>
@@ -295,7 +303,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-view-priority="secondary">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Zero-DTE</span>
@@ -304,9 +312,9 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                           <div id="zero-dte-lottery-strip" class="mini-metric-strip strategy-summary-strip">
                             <article class="mini-metric-tile">
-                              <span class="metric-label">Auto Order</span>
-                              <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">No runtime state loaded.</span>
+                              <span class="metric-label">Execution</span>
+                              <strong class="mini-metric-value">Preview Only</strong>
+                              <span class="mini-metric-detail">Zero-DTE ordering is disabled.</span>
                             </article>
                             <article class="mini-metric-tile">
                               <span class="metric-label">Max Premium</span>
@@ -316,7 +324,7 @@ def render_dashboard() -> HTMLResponse:
                             <article class="mini-metric-tile">
                               <span class="metric-label">Scan Window</span>
                               <strong class="mini-metric-value">--</strong>
-                              <span class="mini-metric-detail">Automation is off by default.</span>
+                              <span class="mini-metric-detail">Read-only candidate evaluation.</span>
                             </article>
                             <article class="mini-metric-tile">
                               <span class="metric-label">Daily Cap</span>
@@ -328,10 +336,9 @@ def render_dashboard() -> HTMLResponse:
                           <form id="zero-dte-lottery-controls-form" class="ticket-form">
                             <div class="ticket-grid">
                               <label class="field">
-                                <span>Auto Order</span>
-                                <select id="zero-dte-lottery-auto-order">
-                                  <option value="false">Disabled</option>
-                                  <option value="true">Enabled</option>
+                                <span>Execution</span>
+                                <select id="zero-dte-lottery-auto-order" disabled aria-disabled="true">
+                                  <option value="false">Preview Only</option>
                                 </select>
                               </label>
                               <label class="field">
@@ -348,18 +355,8 @@ def render_dashboard() -> HTMLResponse:
                               </label>
                             </div>
                             <div class="form-foot">
-                              <p id="zero-dte-lottery-hint" class="form-hint">Paper-only same-day long option. Auto-order is disabled by default and capped at $150.</p>
+                              <p id="zero-dte-lottery-hint" class="form-hint">Preview only. Zero-DTE execution and automatic ordering stay disabled until the expiry lifecycle is implemented.</p>
                               <div class="inline-actions">
-                                <button id="save-zero-dte-lottery-controls" class="icon-button" type="submit">
-                                  <span class="icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" focusable="false">
-                                      <path d="M5 5h11l3 3v11H5z"/>
-                                      <path d="M8 5v6h8"/>
-                                      <path d="M8 19v-6h8v6"/>
-                                    </svg>
-                                  </span>
-                                  <span>Save Lottery Controls</span>
-                                </button>
                                 <button id="preview-zero-dte-lottery" class="icon-button" type="button">
                                   <span class="icon" aria-hidden="true">
                                     <svg viewBox="0 0 24 24" focusable="false">
@@ -370,15 +367,6 @@ def render_dashboard() -> HTMLResponse:
                                     </svg>
                                   </span>
                                   <span>Preview Lottery</span>
-                                </button>
-                                <button id="run-zero-dte-lottery-scan" class="icon-button accent" type="button">
-                                  <span class="icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" focusable="false">
-                                      <path d="M3 12h18"/>
-                                      <path d="m13 6 6 6-6 6"/>
-                                    </svg>
-                                  </span>
-                                  <span>Force Scan</span>
                                 </button>
                               </div>
                             </div>
@@ -397,7 +385,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-view-priority="secondary">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Risk Calendar</span>
@@ -417,7 +405,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-view-priority="secondary">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Experiment</span>
@@ -452,6 +440,7 @@ def render_dashboard() -> HTMLResponse:
                                 <span class="section-kicker">Covered Calls</span>
                                 <h3>Activity History</h3>
                               </div>
+                              <p id="covered-call-action-status" class="form-hint local-action-status" role="status" aria-live="polite"></p>
                               <div id="covered-call-activity-card" class="strategy-note-body empty">
                                 No covered-call activity yet.
                               </div>
@@ -559,7 +548,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-view-priority="secondary">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Live Macro</span>
@@ -759,8 +748,11 @@ def render_dashboard() -> HTMLResponse:
                               </label>
                             </div>
                             <div class="form-foot">
-                              <p id="order-form-hint" class="form-hint"></p>
-                              <button id="submit-order" class="icon-button accent" type="submit">
+                              <div>
+                                <p id="order-form-hint" class="form-hint"></p>
+                                <p id="order-action-status" class="form-hint local-action-status" role="status" aria-live="polite"></p>
+                              </div>
+                              <button id="submit-order" class="icon-button accent" type="submit" data-broker-mutation="true" data-action-key="order-submit">
                                 <span class="icon" aria-hidden="true">
                                   <svg viewBox="0 0 24 24" focusable="false">
                                     <path d="M12 5v14"/>
@@ -862,7 +854,7 @@ def render_dashboard() -> HTMLResponse:
                             </div>
                             <div class="form-foot">
                               <p id="replace-form-hint" class="form-hint"></p>
-                              <button class="icon-button" type="submit">
+                              <button class="icon-button" type="submit" data-broker-mutation="true" data-action-key="order-replace">
                                 <span class="icon" aria-hidden="true">
                                   <svg viewBox="0 0 24 24" focusable="false">
                                     <path d="M20 7H9"/>
@@ -907,6 +899,25 @@ def render_dashboard() -> HTMLResponse:
                     </section>
                   </main>
                 </div>
+
+                <dialog id="trade-confirm-dialog" class="trade-confirm-dialog" aria-labelledby="trade-confirm-title">
+                  <form method="dialog" class="trade-confirm-shell">
+                    <div class="trade-confirm-head">
+                      <div>
+                        <span class="section-kicker">Paper Trading Confirmation</span>
+                        <h2 id="trade-confirm-title">Confirm broker action</h2>
+                      </div>
+                      <span class="mode-pill">Paper</span>
+                    </div>
+                    <p id="trade-confirm-summary" class="trade-confirm-summary"></p>
+                    <dl id="trade-confirm-details" class="trade-confirm-details"></dl>
+                    <p class="trade-confirm-warning">Review every value. Closing this dialog cancels the action and sends no request.</p>
+                    <div class="inline-actions trade-confirm-actions">
+                      <button id="trade-confirm-cancel" class="icon-button" type="submit" value="cancel">Cancel</button>
+                      <button id="trade-confirm-accept" class="icon-button accent" type="submit" value="confirm">Confirm Paper Action</button>
+                    </div>
+                  </form>
+                </dialog>
 
                 <script src="{lifecycle_warning_js_url}" defer></script>
                 <script src="{api_client_js_url}" defer></script>

@@ -130,6 +130,22 @@ class OrderStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class TradingIntentState(str, Enum):
+    PREPARED = "prepared"
+    SUBMITTING = "submitting"
+    BROKER_ACKNOWLEDGED = "broker_acknowledged"
+    PERSISTED = "persisted"
+    REJECTED = "rejected"
+    UNKNOWN = "unknown"
+    RESOLVED_NO_ORDER = "resolved_no_order"
+
+
+class TradingOperation(str, Enum):
+    SUBMIT = "submit"
+    CANCEL = "cancel"
+    REPLACE = "replace"
+
+
 class PlanStatus(str, Enum):
     DRAFT = "draft"
     APPROVED = "approved"

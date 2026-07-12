@@ -144,18 +144,16 @@ Use:
 
 Use `--call-deepseek` only when external data sharing is intentional. Record Output only writes local proposal/review rows and marks the matching advisor run recorded. Advisor proposals must keep `approval_required=true` and cannot submit, cancel, replace, or recover broker orders.
 
-## When a Zero-DTE Paper Drill Is Requested
+## When a Zero-DTE Check Is Requested
 
-Keep zero-DTE as a controlled paper drill:
+Zero-DTE is Preview only in P0:
 
-- preview first
-- use `scripts\run_regression.py zero-dte-lottery-drill` for the default preview-only evidence path
-- use force scan only for explicit manual validation with both `--force-scan` and `--confirm-paper-scan`
-- keep `auto_execute_enabled=false` unless intentionally testing the switch
-- require `confirm_paper_order=true` for execution
-- preserve the `$150` premium cap and one-trade-per-session guard
+- use `scripts\run_regression.py zero-dte-lottery-drill` for read-only preview evidence
+- the legacy force-scan flags only verify the stable lifecycle-disabled `409`
+- do not enable `auto_execute_enabled` or attempt manual execution
+- keep all order-service call counters at zero
 
-Do not treat zero-DTE as stable unattended automation until repeated paper sessions prove the posture and evidence are reliable.
+Reopen execution only after close-before-cutoff, DNE, exercise/assignment, and resulting stock-position reconciliation are implemented and tested.
 
 ## Data Hygiene and Cleanup Policy
 

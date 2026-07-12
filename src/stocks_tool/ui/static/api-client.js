@@ -1,6 +1,11 @@
 (function () {
   async function fetchJson(url, options = {}) {
-    const { timeoutMs = null, signal: providedSignal, ...requestOptions } = options;
+    const {
+      timeoutMs = null,
+      signal: providedSignal,
+      headers: providedHeaders = {},
+      ...requestOptions
+    } = options;
     const controller = new AbortController();
     const signal = mergeAbortSignals(controller.signal, providedSignal);
     let timeoutId = null;
@@ -10,11 +15,11 @@
 
     try {
       const response = await fetch(url, {
+        ...requestOptions,
         headers: {
           "Content-Type": "application/json",
-          ...(requestOptions.headers || {}),
+          ...providedHeaders,
         },
-        ...requestOptions,
         signal,
       });
 
@@ -23,12 +28,24 @@
         try {
           const payload = await response.json();
           if (payload?.detail) {
-            detail = payload.detail;
+            detail = typeof payload.detail === "string" ? payload.detail : payload.detail.message || detail;
+            const error = new Error(detail);
+            error.status = response.status;
+            error.code = payload.detail.code || payload.code || null;
+            error.intentId = payload.detail.intent_id || payload.intent_id || null;
+            error.retryable = payload.detail.retryable ?? payload.retryable;
+            error.payload = payload;
+            throw error;
           }
-        } catch {
+        } catch (error) {
+          if (error instanceof Error && error.status) {
+            throw error;
+          }
           // Keep the status-based detail when the error payload is not JSON.
         }
-        throw new Error(detail);
+        const error = new Error(detail);
+        error.status = response.status;
+        throw error;
       }
 
       return response.json();

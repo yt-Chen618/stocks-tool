@@ -32,6 +32,13 @@
       advisorDraft: null,
       advisorRuns: [],
       operatorStatus: null,
+      unresolvedTradingIntents: [],
+      coreDataHealthy: false,
+      accountListHealthy: false,
+      accountLoadGeneration: 0,
+      coreLoadFailures: [],
+      panelLoadErrors: {},
+      pendingActionKeys: new Set(),
       advisorStatus: createOverlayStatus(
         "idle",
         "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app.",

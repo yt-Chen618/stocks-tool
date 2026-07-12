@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -31,11 +32,44 @@ from stocks_tool.application.services.reconciliation import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
+async def _prewarm_longbridge_market_data(settings) -> None:
+    adapter = get_longbridge_adapter()
+    symbols = [
+        symbol.strip()
+        for symbol in settings.longbridge_market_data_prewarm_symbols.split(",")
+        if symbol.strip()
+    ]
+    try:
+        if settings.longbridge_market_data_prewarm_delay_seconds:
+            await asyncio.sleep(settings.longbridge_market_data_prewarm_delay_seconds)
+        await asyncio.to_thread(
+            adapter.prewarm_market_data,
+            mode=settings.execution_mode,
+            symbols=symbols,
+        )
+    except Exception:
+        logger.warning("Longbridge market-data prewarm failed; startup remains available.", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     scheduler = None
     scheduler_task = None
+    prewarm_task = None
+
+    if settings.longbridge_market_data_prewarm_enabled:
+        configuration = get_longbridge_adapter().get_configuration_status()
+        token_ready = (
+            configuration.paper_token_configured
+            if settings.execution_mode.value == "paper"
+            else configuration.live_token_configured
+        )
+        if configuration.app_key_configured and configuration.app_secret_configured and token_ready:
+            prewarm_task = asyncio.create_task(_prewarm_longbridge_market_data(settings))
 
     if (
         settings.reconciliation_scheduler_enabled
@@ -57,6 +91,7 @@ async def lifespan(app: FastAPI):
 
     app.state.reconciliation_scheduler = scheduler
     app.state.reconciliation_scheduler_task = scheduler_task
+    app.state.longbridge_market_data_prewarm_task = prewarm_task
 
     try:
         yield
@@ -64,6 +99,11 @@ async def lifespan(app: FastAPI):
         if scheduler is not None and scheduler_task is not None:
             await scheduler.stop()
             await scheduler_task
+        if prewarm_task is not None:
+            await prewarm_task
+        if get_longbridge_adapter.cache_info().currsize:
+            get_longbridge_adapter().close()
+            get_longbridge_adapter.cache_clear()
 
 
 def create_app() -> FastAPI:

@@ -6,6 +6,10 @@ const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
 const COLLAPSED_MODULES_STORAGE_KEY = "stocks-tool-collapsed-modules";
+const VIEW_MODE_STORAGE_KEY = "stocks-tool-view-mode";
+const DEFAULT_VIEW_MODE = "focus";
+const IDEMPOTENCY_STORAGE_PREFIX = "stocks-tool-idempotency:";
+const MOBILE_TRADING_QUERY = "(max-width: 780px)";
 const {
   toNumber,
   toFiniteNumber,
@@ -50,8 +54,10 @@ let languageFrame = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
+  initializeViewMode();
   enhanceCollapsibleModules();
   wireEvents();
+  bindTradingViewportGuard();
   startLanguageObserver();
   updateLanguageControls();
   applyLanguage();
@@ -62,8 +68,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
 function bindElements() {
   els.languageOptions = Array.from(document.querySelectorAll("[data-lang-option]"));
+  els.viewModeOptions = Array.from(document.querySelectorAll("[data-view-mode-option]"));
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
+  els.desktopTradingNotice = document.getElementById("desktop-trading-notice");
   els.reconciliationStrip = document.getElementById("reconciliation-strip");
   els.metricsStrip = document.getElementById("metrics-strip");
   els.positionsSummaryStrip = document.getElementById("positions-summary-strip");
@@ -88,12 +96,11 @@ function bindElements() {
   els.zeroDteLotterySymbol = document.getElementById("zero-dte-lottery-symbol");
   els.zeroDteLotteryDirection = document.getElementById("zero-dte-lottery-direction");
   els.zeroDteLotteryHint = document.getElementById("zero-dte-lottery-hint");
-  els.saveZeroDteLotteryControls = document.getElementById("save-zero-dte-lottery-controls");
   els.previewZeroDteLottery = document.getElementById("preview-zero-dte-lottery");
-  els.runZeroDteLotteryScan = document.getElementById("run-zero-dte-lottery-scan");
   els.zeroDteLotteryResultCard = document.getElementById("zero-dte-lottery-result-card");
   els.strategyExperimentStrip = document.getElementById("strategy-experiment-strip");
   els.coveredCallActivityCard = document.getElementById("covered-call-activity-card");
+  els.coveredCallActionStatus = document.getElementById("covered-call-action-status");
   els.strategyProposalsCard = document.getElementById("strategy-proposals-card");
   els.strategyRunsCard = document.getElementById("strategy-runs-card");
   els.strategySignalsCard = document.getElementById("strategy-signals-card");
@@ -136,6 +143,7 @@ function bindElements() {
   els.orderStopPrice = document.getElementById("order-stop-price");
   els.orderRemark = document.getElementById("order-remark");
   els.orderFormHint = document.getElementById("order-form-hint");
+  els.orderActionStatus = document.getElementById("order-action-status");
   els.submitOrder = document.getElementById("submit-order");
   els.selectedOrderCard = document.getElementById("selected-order-card");
   els.selectedOrderExecution = document.getElementById("selected-order-execution");
@@ -155,9 +163,20 @@ function bindElements() {
   els.replaceStopPrice = document.getElementById("replace-stop-price");
   els.replaceRemark = document.getElementById("replace-remark");
   els.replaceFormHint = document.getElementById("replace-form-hint");
+  els.replaceSubmit = els.replaceOrderForm?.querySelector("button[type='submit']") || null;
+  els.tradeConfirmDialog = document.getElementById("trade-confirm-dialog");
+  els.tradeConfirmTitle = document.getElementById("trade-confirm-title");
+  els.tradeConfirmSummary = document.getElementById("trade-confirm-summary");
+  els.tradeConfirmDetails = document.getElementById("trade-confirm-details");
 }
 
 function wireEvents() {
+  for (const button of els.viewModeOptions) {
+    button.addEventListener("click", () => {
+      setViewMode(button.dataset.viewModeOption || DEFAULT_VIEW_MODE);
+    });
+  }
+
   for (const button of els.languageOptions) {
     button.addEventListener("click", () => {
       setLanguage(button.dataset.langOption || DEFAULT_LANGUAGE);
@@ -167,7 +186,23 @@ function wireEvents() {
   els.accountSelect.addEventListener("change", async (event) => {
     state.selectedAccountId = event.target.value;
     resetAdvisorState();
-    await loadAccountData();
+    setStatus(`Loading account ${state.selectedAccountId}...`, "warning");
+    const loadResult = await loadAccountData();
+    if (loadResult.discarded) {
+      return;
+    }
+    if (!loadResult.coreHealthy) {
+      setStatus(`Core account data is stale: ${loadResult.requiredFailures.join(", ")}.`, "error");
+    } else if ((state.unresolvedTradingIntents || []).length > 0) {
+      setStatus(
+        `Trading blocked: ${state.unresolvedTradingIntents.length} unresolved trading intent(s) require reconciliation.`,
+        "error"
+      );
+    } else if (loadResult.optionalFailures.length) {
+      setStatus(`Account loaded with auxiliary failures: ${loadResult.optionalFailures.join(", ")}.`, "warning");
+    } else {
+      setStatus(`Account ${state.selectedAccountId} loaded.`, "success");
+    }
   });
 
   els.refreshDashboard.addEventListener("click", async () => {
@@ -234,11 +269,11 @@ function wireEvents() {
 
   els.strategyControlsForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await saveStrategyControls();
+    await saveStrategyControls(els.saveStrategyControls);
   });
 
   els.runStrategyScan.addEventListener("click", async () => {
-    await runStrategyScan();
+    await runStrategyScan(els.runStrategyScan);
   });
 
   els.runStrategyReview.addEventListener("click", async () => {
@@ -246,21 +281,14 @@ function wireEvents() {
   });
 
   if (els.zeroDteLotteryControlsForm) {
-    els.zeroDteLotteryControlsForm.addEventListener("submit", async (event) => {
+    els.zeroDteLotteryControlsForm.addEventListener("submit", (event) => {
       event.preventDefault();
-      await saveZeroDteLotteryControls();
     });
   }
 
   if (els.previewZeroDteLottery) {
     els.previewZeroDteLottery.addEventListener("click", async () => {
       await previewZeroDteLottery();
-    });
-  }
-
-  if (els.runZeroDteLotteryScan) {
-    els.runZeroDteLotteryScan.addEventListener("click", async () => {
-      await runZeroDteLotteryScan();
     });
   }
 
@@ -288,7 +316,7 @@ function wireEvents() {
 
   els.orderTicketForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await submitOrder();
+    await submitOrder(els.submitOrder);
   });
 
   els.ordersBody.addEventListener("click", async (event) => {
@@ -313,7 +341,7 @@ function wireEvents() {
     }
 
     if (orderAction === "cancel") {
-      await cancelOrder(orderId);
+      await cancelOrder(orderId, button);
     }
   });
 
@@ -334,7 +362,7 @@ function wireEvents() {
     }
 
     if (spreadAction === "monitor") {
-      await monitorSpread(spreadId);
+      await monitorSpread(spreadId, button);
     }
   });
 
@@ -344,7 +372,7 @@ function wireEvents() {
       return;
     }
     event.preventDefault();
-    await recoverCloseSpread(form.dataset.recoverCloseForm, new FormData(form));
+    await recoverCloseSpread(form.dataset.recoverCloseForm, new FormData(form), event.submitter);
   });
 
   if (els.strategyProposalsCard) {
@@ -358,7 +386,7 @@ function wireEvents() {
       if (!proposalAction || !proposalId) {
         return;
       }
-      await handleStrategyProposalAction(proposalAction, proposalId);
+      await handleStrategyProposalAction(proposalAction, proposalId, button);
     });
   }
 
@@ -374,12 +402,7 @@ function wireEvents() {
         return;
       }
 
-      button.disabled = true;
-      try {
-        await reconcileCoveredCallLifecycle();
-      } finally {
-        button.disabled = false;
-      }
+      await reconcileCoveredCallLifecycle(button);
     });
   }
 
@@ -401,19 +424,47 @@ function wireEvents() {
     }
 
     if (action === "cancel") {
-      await cancelOrder(order.id);
+      await cancelOrder(order.id, button);
     }
   });
 
   els.replaceOrderForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    await replaceSelectedOrder();
+    await replaceSelectedOrder(event.submitter);
   });
 
   els.journalEntryForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     await submitJournalEntry();
   });
+}
+
+function initializeViewMode() {
+  let stored = DEFAULT_VIEW_MODE;
+  try {
+    stored = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY) || DEFAULT_VIEW_MODE;
+  } catch {
+    stored = DEFAULT_VIEW_MODE;
+  }
+  setViewMode(stored, { persist: false });
+}
+
+function setViewMode(viewMode, { persist = true } = {}) {
+  const normalized = viewMode === "all" ? "all" : DEFAULT_VIEW_MODE;
+  document.body.dataset.viewMode = normalized;
+  for (const button of els.viewModeOptions || []) {
+    const active = button.dataset.viewModeOption === normalized;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  }
+  if (!persist) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, normalized);
+  } catch {
+    // View mode still applies for this page load when storage is unavailable.
+  }
 }
 
 function enhanceCollapsibleModules() {
@@ -748,13 +799,292 @@ function translateElementAttributes(root) {
   }
 }
 
+function bindTradingViewportGuard() {
+  const mediaQuery = window.matchMedia?.(MOBILE_TRADING_QUERY);
+  if (mediaQuery?.addEventListener) {
+    mediaQuery.addEventListener("change", applyTradingSafetyState);
+  }
+  applyTradingSafetyState();
+}
+
+function isMobileTradingViewport() {
+  return window.matchMedia?.(MOBILE_TRADING_QUERY).matches ?? window.innerWidth <= 780;
+}
+
+function applyTradingSafetyState() {
+  const mobileBlocked = isMobileTradingViewport();
+  const coreBlocked = !state.coreDataHealthy;
+  const intentBlocked = (state.unresolvedTradingIntents || []).length > 0;
+  document.querySelectorAll("button[data-broker-mutation='true']").forEach((button) => {
+    const pending = state.pendingActionKeys.has(button.dataset.actionKey || "");
+    const businessDisabled = button.dataset.businessDisabled === "true";
+    const blocked = mobileBlocked || coreBlocked || intentBlocked || pending || businessDisabled;
+    button.disabled = blocked;
+    button.setAttribute("aria-disabled", String(blocked));
+    button.setAttribute("aria-busy", String(pending));
+    if ((mobileBlocked || coreBlocked || intentBlocked) && !button.dataset.safetyOriginalTitle) {
+      button.dataset.safetyOriginalTitle = button.title || "";
+    }
+    if (mobileBlocked) {
+      button.title = "Use the desktop workbench for broker-writing actions.";
+    } else if (coreBlocked) {
+      button.title = "Required account data is stale. Refresh the dashboard before trading.";
+    } else if (intentBlocked) {
+      button.title = "An unresolved trading intent blocks all broker-writing actions.";
+    } else if (button.dataset.safetyOriginalTitle !== undefined) {
+      button.title = button.dataset.safetyOriginalTitle;
+      delete button.dataset.safetyOriginalTitle;
+    }
+  });
+}
+
+function setBusinessDisabled(button, disabled, title = "") {
+  if (!button) {
+    return;
+  }
+  button.dataset.businessDisabled = String(Boolean(disabled));
+  button.title = title;
+}
+
+function setActionStatus(element, message, tone = "") {
+  if (!element) {
+    return;
+  }
+  element.textContent = message;
+  element.classList.remove("success", "warning", "error");
+  if (tone) {
+    element.classList.add(tone);
+  }
+}
+
+function tradingBlockedMessage() {
+  if (isMobileTradingViewport()) {
+    return "Broker-writing actions are desktop-only. No request was sent.";
+  }
+  if (!state.coreDataHealthy) {
+    return "Required account data is stale. Refresh the dashboard before trading.";
+  }
+  if ((state.unresolvedTradingIntents || []).length > 0) {
+    return "An unresolved trading intent blocks broker-writing actions until reconciliation completes.";
+  }
+  return "";
+}
+
+async function runConfirmedBrokerMutation(
+  { actionKey, button, confirmation, requestSignature, statusElement },
+  operation
+) {
+  const blockedMessage = tradingBlockedMessage();
+  if (blockedMessage) {
+    setActionStatus(statusElement, blockedMessage, "error");
+    setStatus(blockedMessage, "error");
+    return { executed: false, blocked: true };
+  }
+  if (state.pendingActionKeys.has(actionKey)) {
+    return { executed: false, duplicate: true };
+  }
+
+  state.pendingActionKeys.add(actionKey);
+  applyTradingSafetyState();
+  try {
+    setActionStatus(statusElement, "Review the paper action confirmation.", "warning");
+    const confirmed = await showTradeConfirmation(confirmation);
+    if (!confirmed) {
+      const message = "Paper action canceled. No request was sent.";
+      setActionStatus(statusElement, message, "warning");
+      setStatus(message, "warning");
+      return { executed: false, canceled: true };
+    }
+
+    const idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature);
+    const result = await operation(idempotencyKey);
+    clearIdempotencyKey(actionKey);
+    return { executed: true, result };
+  } catch (error) {
+    if (error?.code === "order_outcome_unknown") {
+      const intentId = error.intentId || "unknown";
+      state.unresolvedTradingIntents = [
+        { id: intentId, state: "unknown", source: "broker-mutation-response" },
+        ...(state.unresolvedTradingIntents || []).filter((intent) => intent.id !== intentId),
+      ];
+      setActionStatus(
+        statusElement,
+        "Order outcome is unknown. Trading is locked pending reconciliation.",
+        "error"
+      );
+    }
+    if (isTerminalMutationError(error)) {
+      clearIdempotencyKey(actionKey);
+    }
+    throw error;
+  } finally {
+    state.pendingActionKeys.delete(actionKey);
+    if (button) {
+      button.setAttribute("aria-busy", "false");
+    }
+    applyTradingSafetyState();
+  }
+}
+
+function showTradeConfirmation({ title, summary, details }) {
+  const dialog = els.tradeConfirmDialog;
+  if (!dialog || typeof dialog.showModal !== "function") {
+    return Promise.resolve(false);
+  }
+  els.tradeConfirmTitle.textContent = title || "Confirm broker action";
+  els.tradeConfirmSummary.textContent = summary || "Confirm this paper-account broker action.";
+  els.tradeConfirmDetails.innerHTML = Object.entries(details || {})
+    .map(
+      ([label, value]) => `
+        <div>
+          <dt>${escapeHtml(label)}</dt>
+          <dd>${escapeHtml(value ?? "--")}</dd>
+        </div>
+      `
+    )
+    .join("");
+  dialog.returnValue = "cancel";
+  return new Promise((resolve) => {
+    dialog.addEventListener("close", () => resolve(dialog.returnValue === "confirm"), { once: true });
+    dialog.showModal();
+  });
+}
+
+function getOrCreateIdempotencyKey(actionKey, requestSignature) {
+  const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`;
+  let existing = null;
+  try {
+    existing = JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
+  } catch (error) {
+    throw new Error(`Session storage is unavailable; broker action blocked: ${error.message}`);
+  }
+  if (existing?.key) {
+    if (existing.requestSignature !== requestSignature) {
+      throw new Error("A previous request for this action is unresolved. Retry with the same inputs after reconciliation.");
+    }
+    return existing.key;
+  }
+  const randomId = window.crypto?.randomUUID?.();
+  if (!randomId) {
+    throw new Error("Secure idempotency key generation is unavailable; broker action blocked.");
+  }
+  const safeAction = String(actionKey).toLowerCase().replace(/[^a-z0-9._:-]/g, "-").slice(0, 32);
+  const key = `ui:${safeAction}:${randomId}`;
+  try {
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ key, requestSignature }));
+  } catch (error) {
+    throw new Error(`Could not persist the idempotency key; broker action blocked: ${error.message}`);
+  }
+  return key;
+}
+
+function clearIdempotencyKey(actionKey) {
+  try {
+    window.sessionStorage.removeItem(`${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function isTerminalMutationError(error) {
+  return Number.isFinite(error?.status) && error.status >= 400 && error.status < 500 && error.code !== "order_outcome_unknown";
+}
+
+function renderPanelLoadStates(errors) {
+  const targets = {
+    latestSnapshot: els.metricsStrip,
+    orders: els.ordersBody,
+    spreads: els.spreadsBody,
+    runtime: els.strategyRuntimeStrip,
+    operatorStatus: els.reconciliationStrip,
+    zeroDteLotteryRuntime: els.zeroDteLotteryStrip,
+    strategyExperiment: els.strategyExperimentStrip,
+    coveredCallActivity: els.coveredCallActivityCard,
+    advisorRuns: els.advisorOutputCard,
+    marketEvents: els.marketEventsCard,
+    executions: els.selectedOrderExecution,
+    journals: els.selectedOrderJournal,
+    preOpenRuns: els.preOpenRunReview,
+  };
+  Object.entries(targets).forEach(([key, target]) => markPanelLoadState(key, target, errors[key] || ""));
+}
+
+function markPanelLoadState(key, target, errorMessage) {
+  if (!target) {
+    return;
+  }
+  target.dataset.loadState = errorMessage ? "stale" : "fresh";
+  const panel = target.closest(".strategy-note-card, .panel, .band");
+  if (!panel) {
+    return;
+  }
+  let marker = panel.querySelector(`[data-panel-load-key="${key}"]`);
+  if (!errorMessage) {
+    marker?.remove();
+    return;
+  }
+  if (!marker) {
+    marker = document.createElement("p");
+    marker.className = "panel-load-status";
+    marker.dataset.panelLoadKey = key;
+    const header = panel.querySelector(":scope > .form-header, :scope > .panel-header, :scope > .band-header");
+    if (header) {
+      header.insertAdjacentElement("afterend", marker);
+    } else {
+      target.insertAdjacentElement("beforebegin", marker);
+    }
+  }
+  marker.textContent = `${formatPanelLoadLabel(key)} is stale; prior data is preserved. ${errorMessage}`;
+}
+
+function formatPanelLoadLabel(key) {
+  const labels = {
+    latestSnapshot: "Account snapshot",
+    orders: "Orders",
+    spreads: "Bull Put spreads",
+    runtime: "Bull Put runtime",
+    operatorStatus: "Operator status",
+    tradingIntents: "Trading intents",
+    tradeActions: "Trade actions",
+    zeroDteLotteryRuntime: "Zero-DTE runtime",
+    strategyExperiment: "Strategy experiment",
+    coveredCallActivity: "Covered Call activity",
+    advisorRuns: "Advisor runs",
+    marketEvents: "Market events",
+    executions: "Executions",
+    journals: "Journals",
+    preOpenRuns: "Stored macro review",
+  };
+  return labels[key] || key;
+}
+
 async function loadDashboard() {
   setStatus("Loading dashboard...", "warning");
   try {
     await refreshAccounts();
-    await loadAccountData();
+    const loadResult = await loadAccountData();
+    if (loadResult.discarded) {
+      return;
+    }
     prepareMarketOverlayPanels();
-    setStatus("Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.", "success");
+    if (!loadResult.coreHealthy) {
+      setStatus(
+        `Core account data is stale: ${loadResult.requiredFailures.join(", ")}. Broker-writing actions are disabled.`,
+        "error"
+      );
+    } else if ((state.unresolvedTradingIntents || []).length > 0) {
+      setStatus(
+        `Trading blocked: ${state.unresolvedTradingIntents.length} unresolved trading intent(s) require reconciliation.`,
+        "error"
+      );
+    } else if (loadResult.optionalFailures.length) {
+      setStatus(
+        `Core account data updated. Auxiliary panels unavailable: ${loadResult.optionalFailures.join(", ")}.`,
+        "warning"
+      );
+    } else {
+      setStatus("Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.", "success");
+    }
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load dashboard.", "error");
@@ -762,7 +1092,9 @@ async function loadDashboard() {
 }
 
 async function loadAccountData() {
-  if (!state.selectedAccountId) {
+  const loadGeneration = ++state.accountLoadGeneration;
+  const selectedAccountId = state.selectedAccountId;
+  if (!selectedAccountId) {
     state.orders = [];
     state.spreads = [];
     state.runtime = null;
@@ -775,6 +1107,10 @@ async function loadAccountData() {
     state.advisorDraft = null;
     state.advisorRuns = [];
     state.operatorStatus = null;
+    state.unresolvedTradingIntents = [];
+    state.coreDataHealthy = false;
+    state.coreLoadFailures = ["account selection"];
+    state.panelLoadErrors = {};
     state.advisorStatus = buildOverlayStatus(
       "idle",
       "Select a broker account before loading advisor context."
@@ -806,90 +1142,138 @@ async function loadAccountData() {
     updateSyncButtons();
     updateOrderTicketAvailability();
     updatePreOpenButtons();
-    return;
+    applyTradingSafetyState();
+    return { coreHealthy: false, requiredFailures: ["account selection"], optionalFailures: [], discarded: false };
   }
 
-  try {
-    const [
-      latestSnapshot,
-      orders,
-      spreads,
-      runtime,
-      zeroDteLotteryRuntime,
-      strategyExperiment,
-      coveredCallActivity,
-      advisorRuns,
-      marketEvents,
-      executions,
-      journals,
-      preOpenRuns,
-      operatorStatus,
-    ] = await Promise.all([
-      fetchJson(`/account-snapshots/latest?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/orders?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/strategies/bull-put/spreads?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/strategies/bull-put/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/strategies/zero-dte-lottery/runtime?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`).catch((error) => {
-        console.error(error);
-        return null;
-      }),
-      fetchJson(`/strategies/experiment?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=6`),
-      fetchJson(`/strategies/covered-call/activity?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=8`).catch((error) => {
-        console.error(error);
-        return { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
-      }),
-      fetchJson(`/strategies/advisor/run-cards?external_account_id=${encodeURIComponent(state.selectedAccountId)}&source=deepseek&limit=5`).catch(() => []),
-      fetchJson("/market-events?limit=8"),
-      fetchJson(`/executions?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/journals?external_account_id=${encodeURIComponent(state.selectedAccountId)}`),
-      fetchJson(`/strategies/pre-open-runs?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=1`),
-      fetchJson(`/ops/unattended-status?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`).catch((error) => {
-        console.error(error);
-        return null;
-      }),
-    ]);
-    state.orders = orders;
-    state.spreads = spreads;
-    state.recoverCloseEligibility = await loadRecoverCloseEligibility(spreads);
-    state.runtime = runtime;
-    state.zeroDteLotteryRuntime = zeroDteLotteryRuntime;
-    state.strategyExperiment = strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
-    state.coveredCallActivity = coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
-    state.advisorRuns = Array.isArray(advisorRuns) ? advisorRuns : [];
-    state.marketEvents = Array.isArray(marketEvents) ? marketEvents : [];
-    state.executions = executions;
-    state.journals = journals;
-    state.preOpenRuns = preOpenRuns;
-    state.operatorStatus = operatorStatus;
-    state.latestSnapshot = latestSnapshot;
-    seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
+  state.coreDataHealthy = false;
+  state.coreLoadFailures = ["Account data loading"];
+  applyTradingSafetyState();
 
-    if (!orders.some((order) => order.id === state.selectedOrderId)) {
-      state.selectedOrderId = orders[0]?.id || "";
+  const accountId = encodeURIComponent(selectedAccountId);
+  const requestSpecs = [
+    ["latestSnapshot", true, `/account-snapshots/latest?external_account_id=${accountId}`],
+    ["orders", true, `/orders?external_account_id=${accountId}`],
+    ["spreads", true, `/strategies/bull-put/spreads?external_account_id=${accountId}`],
+    ["runtime", true, `/strategies/bull-put/runtime?external_account_id=${accountId}`],
+    ["operatorStatus", true, `/ops/unattended-status?external_account_id=${accountId}&mode=paper`],
+    ["tradingIntents", true, `/ops/trading-intents?external_account_id=${accountId}&mode=paper&limit=100`],
+    ["tradeActions", true, `/ops/trade-actions?external_account_id=${accountId}&mode=paper&limit=100`],
+    ["zeroDteLotteryRuntime", false, `/strategies/zero-dte-lottery/runtime?external_account_id=${accountId}&mode=paper`],
+    ["strategyExperiment", true, `/strategies/experiment?external_account_id=${accountId}&limit=6`],
+    ["coveredCallActivity", true, `/strategies/covered-call/activity?external_account_id=${accountId}&limit=8`],
+    ["advisorRuns", false, `/strategies/advisor/run-cards?external_account_id=${accountId}&source=deepseek&limit=5`],
+    ["marketEvents", false, "/market-events?limit=8"],
+    ["executions", false, `/executions?external_account_id=${accountId}`],
+    ["journals", false, `/journals?external_account_id=${accountId}`],
+    ["preOpenRuns", false, `/strategies/pre-open-runs?external_account_id=${accountId}&limit=1`],
+  ];
+  const settled = await Promise.allSettled(requestSpecs.map(([, , url]) => fetchJson(url)));
+  const values = {};
+  const errors = {};
+  settled.forEach((result, index) => {
+    const [key] = requestSpecs[index];
+    if (result.status === "fulfilled") {
+      values[key] = result.value;
+    } else {
+      console.error(result.reason);
+      errors[key] = result.reason?.message || "Request failed.";
     }
-
-    renderReconciliationStatus();
-    renderMetrics();
-    renderHoldings();
-    renderPreOpenAssessment();
-    renderLatestPreOpenRun();
-    renderStrategyRuntime();
-    renderZeroDteLottery();
-    renderCoveredCallActivity();
-    renderStrategyExperiment();
-    renderAdvisorPanel();
-    renderMarketEvents();
-    renderSpreads();
-    renderOrders();
-    renderPositions();
-    renderSelectedOrder();
-    updateSyncButtons();
-    updateOrderTicketAvailability();
-    updatePreOpenButtons();
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Failed to load account data.", "error");
+  });
+  if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
+    return {
+      coreHealthy: state.coreDataHealthy,
+      requiredFailures: [],
+      optionalFailures: [],
+      discarded: true,
+    };
   }
+  if (values.latestSnapshot === null || values.operatorStatus === null) {
+    for (const key of ["latestSnapshot", "operatorStatus"]) {
+      if (values[key] === null) {
+        delete values[key];
+        errors[key] = "Required account data was empty.";
+      }
+    }
+  }
+
+  const nextSpreads = "spreads" in values ? (Array.isArray(values.spreads) ? values.spreads : []) : null;
+  const nextRecoverCloseEligibility = nextSpreads
+    ? await loadRecoverCloseEligibility(nextSpreads)
+    : null;
+  if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
+    return {
+      coreHealthy: state.coreDataHealthy,
+      requiredFailures: [],
+      optionalFailures: [],
+      discarded: true,
+    };
+  }
+
+  if ("orders" in values) state.orders = Array.isArray(values.orders) ? values.orders : [];
+  if (nextSpreads !== null) {
+    state.spreads = nextSpreads;
+    state.recoverCloseEligibility = nextRecoverCloseEligibility || {};
+  }
+  if ("runtime" in values) state.runtime = values.runtime;
+  if ("operatorStatus" in values) state.operatorStatus = values.operatorStatus;
+  if ("tradingIntents" in values && "tradeActions" in values) {
+    const unresolvedStates = new Set(["prepared", "submitting", "broker_acknowledged", "unknown"]);
+    state.unresolvedTradingIntents = [
+      ...(Array.isArray(values.tradingIntents) ? values.tradingIntents : []),
+      ...(Array.isArray(values.tradeActions) ? values.tradeActions : []),
+    ].filter((intent) => unresolvedStates.has(intent?.state));
+  }
+  if ("latestSnapshot" in values) state.latestSnapshot = values.latestSnapshot;
+  if ("zeroDteLotteryRuntime" in values) state.zeroDteLotteryRuntime = values.zeroDteLotteryRuntime;
+  if ("strategyExperiment" in values) {
+    state.strategyExperiment = values.strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
+  }
+  if ("coveredCallActivity" in values) {
+    state.coveredCallActivity = values.coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
+  }
+  if ("advisorRuns" in values) state.advisorRuns = Array.isArray(values.advisorRuns) ? values.advisorRuns : [];
+  if ("marketEvents" in values) state.marketEvents = Array.isArray(values.marketEvents) ? values.marketEvents : [];
+  if ("executions" in values) state.executions = Array.isArray(values.executions) ? values.executions : [];
+  if ("journals" in values) state.journals = Array.isArray(values.journals) ? values.journals : [];
+  if ("preOpenRuns" in values) state.preOpenRuns = Array.isArray(values.preOpenRuns) ? values.preOpenRuns : [];
+
+  const requiredFailures = requestSpecs
+    .filter(([key, required]) => required && errors[key])
+    .map(([key]) => formatPanelLoadLabel(key));
+  const optionalFailures = requestSpecs
+    .filter(([key, required]) => !required && errors[key])
+    .map(([key]) => formatPanelLoadLabel(key));
+  state.coreDataHealthy = state.accountListHealthy && requiredFailures.length === 0;
+  state.coreLoadFailures = requiredFailures;
+  state.panelLoadErrors = errors;
+
+  if ("preOpenRuns" in values) seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
+  if ("orders" in values && !state.orders.some((order) => order.id === state.selectedOrderId)) {
+    state.selectedOrderId = state.orders[0]?.id || "";
+  }
+
+  renderReconciliationStatus();
+  renderMetrics();
+  renderHoldings();
+  renderPreOpenAssessment();
+  renderLatestPreOpenRun();
+  renderStrategyRuntime();
+  renderZeroDteLottery();
+  renderCoveredCallActivity();
+  renderStrategyExperiment();
+  renderAdvisorPanel();
+  renderMarketEvents();
+  renderSpreads();
+  renderOrders();
+  renderPositions();
+  renderSelectedOrder();
+  renderPanelLoadStates(errors);
+  updateSyncButtons();
+  updateOrderTicketAvailability();
+  updatePreOpenButtons();
+  applyTradingSafetyState();
+  return { coreHealthy: state.coreDataHealthy, requiredFailures, optionalFailures, discarded: false };
 }
 
 async function loadRecoverCloseEligibility(spreads) {
@@ -1144,7 +1528,7 @@ async function syncOrders() {
   }
 }
 
-async function saveStrategyControls() {
+async function saveStrategyControls(button = els.saveStrategyControls) {
   if (!state.selectedAccountId) {
     setStatus("Select a broker account before updating strategy controls.", "warning");
     return;
@@ -1157,41 +1541,154 @@ async function saveStrategyControls() {
     paused_symbols: parseSymbolList(els.strategyPausedSymbols.value),
   };
 
-  setStatus(`Saving bull put controls for ${state.selectedAccountId}...`, "warning");
   try {
-    await fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey: "bull-put-controls",
+        button,
+        requestSignature: JSON.stringify(payload),
+        statusElement: els.strategyControlsHint,
+        confirmation: {
+          title: "Confirm Bull Put controls",
+          summary: payload.auto_entry_enabled ? "Enable paper Bull Put entry automation" : "Update Bull Put entry controls",
+          details: {
+            Account: state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: payload.paused_symbols.length ? payload.paused_symbols.join(", ") : "Configured universe",
+            "Side / Legs": "Protective put first / short put second",
+            Quantity: "1 spread maximum per entry",
+            Price: "Server-validated candidate limits",
+            "Max Risk": "Server risk cap",
+            "Quote Time": "Fresh quote required at execution",
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Saving bull put controls for ${state.selectedAccountId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload),
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
     await loadAccountData();
+    setActionStatus(els.strategyControlsHint, `Bull put controls updated for ${state.selectedAccountId}.`, "success");
     setStatus(`Bull put controls updated for ${state.selectedAccountId}.`, "success");
   } catch (error) {
     console.error(error);
+    setActionStatus(els.strategyControlsHint, error.message || "Bull put controls update failed.", "error");
     setStatus(error.message || "Bull put controls update failed.", "error");
   }
 }
 
-async function runStrategyScan() {
+async function runStrategyScan(button = els.runStrategyScan) {
   if (!state.selectedAccountId) {
     setStatus("Select a broker account before running a bull put scan.", "warning");
     return;
   }
 
-  setStatus(`Running bull put scan for ${state.selectedAccountId}...`, "warning");
   try {
-    const result = await fetchJson(
-      `/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}/scan?mode=paper&force=true`,
+    const accountId = state.selectedAccountId;
+    setActionStatus(els.strategyControlsHint, "Loading a fresh Bull Put candidate for confirmation...", "warning");
+    const readiness = await fetchJson(
+      `/strategies/bull-put/readiness?external_account_id=${encodeURIComponent(accountId)}&mode=paper`,
+      { timeoutMs: BROKER_REQUEST_TIMEOUT_MS }
+    );
+    if (state.selectedAccountId !== accountId) {
+      setActionStatus(els.strategyControlsHint, "Account changed while loading the Bull Put candidate; reload before trading.", "warning");
+      return;
+    }
+    const previews = Array.isArray(readiness?.previews) ? readiness.previews : [];
+    const preview = previews.find(
+      (candidatePreview) =>
+        candidatePreview?.eligible &&
+        candidatePreview?.candidate &&
+        (!readiness.preferred_symbol || candidatePreview.symbol === readiness.preferred_symbol)
+    );
+    if (!readiness?.ready || !preview?.candidate || !preview?.risk) {
+      const message = readiness?.next_action || "No eligible Bull Put candidate is available for confirmation.";
+      setActionStatus(els.strategyControlsHint, message, "warning");
+      setStatus(message, "warning");
+      return;
+    }
+    const candidate = preview.candidate;
+    const risk = preview.risk;
+    const quoteTime =
+      candidate.short_put?.quote_timestamp ||
+      candidate.long_put?.quote_timestamp ||
+      preview.scanned_at;
+    const actionKey = `bull-put-execute:${accountId}`;
+    if (button) {
+      button.dataset.actionKey = actionKey;
+    }
+    const mutation = await runConfirmedBrokerMutation(
       {
-        method: "POST",
+        actionKey,
+        button,
+        requestSignature: JSON.stringify({
+          account: accountId,
+          mode: "paper",
+          force: true,
+          symbol: preview.symbol,
+          candidateToken: preview.candidate_token,
+          minimumNetCredit: candidate.conservative_credit,
+        }),
+        statusElement: els.strategyControlsHint,
+        confirmation: {
+          title: "Confirm Bull Put paper order",
+          summary: "Open the exact previewed two-leg Bull Put spread in the paper account",
+          details: {
+            Account: accountId,
+            Mode: "Paper",
+            Symbol: preview.symbol,
+            "Side / Legs": `Buy ${candidate.long_put?.symbol || "protective put"}, then sell ${candidate.short_put?.symbol || "short put"}`,
+            Quantity: "1 spread",
+            Price: `Minimum net credit ${formatCurrency(candidate.conservative_credit, "USD")}`,
+            "Max Risk": formatCurrency(risk.max_loss, "USD"),
+            "Quote Time": formatDateTime(quoteTime),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        if (state.selectedAccountId !== accountId) {
+          throw new Error("Account changed after confirmation; the Bull Put order was not sent.");
+        }
+        setStatus(`Opening the previewed bull put spread for ${accountId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/execute`, {
+          method: "POST",
+          headers: {
+            "Idempotency-Key": idempotencyKey,
+            "X-Confirm-Paper-Order": "true",
+          },
+          body: JSON.stringify({
+            external_account_id: accountId,
+            symbol: preview.symbol,
+            mode: "paper",
+            candidate_token: preview.candidate_token,
+            minimum_net_credit: candidate.conservative_credit,
+            confirm_paper_order: true,
+            remark: "dashboard-bull-put",
+          }),
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
       }
     );
+    if (!mutation.executed) {
+      return;
+    }
+    const result = mutation.result;
     await loadAccountData();
-    const message = result.executed
-      ? `Bull put scan opened ${result.executed_spread?.underlying_symbol || "a spread"}.`
-      : result.reason || "Bull put scan completed without a new spread.";
-    setStatus(message, result.executed ? "success" : "warning");
+    const message = `Bull put paper order opened ${result?.underlying_symbol || preview.symbol}.`;
+    const tone = "success";
+    setActionStatus(els.strategyControlsHint, message, tone);
+    setStatus(message, tone);
   } catch (error) {
     console.error(error);
+    setActionStatus(els.strategyControlsHint, error.message || "Bull put scan failed.", "error");
     setStatus(error.message || "Bull put scan failed.", "error");
   }
 }
@@ -1216,33 +1713,6 @@ async function runStrategyReview() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
-  }
-}
-
-async function saveZeroDteLotteryControls() {
-  if (!state.selectedAccountId) {
-    setStatus("Select a broker account before updating lottery controls.", "warning");
-    return;
-  }
-
-  const payload = {
-    auto_execute_enabled: els.zeroDteLotteryAutoOrder.value === "true",
-  };
-
-  setStatus(`Saving zero-DTE lottery controls for ${state.selectedAccountId}...`, "warning");
-  try {
-    state.zeroDteLotteryRuntime = await fetchJson(
-      `/strategies/zero-dte-lottery/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`,
-      {
-        method: "POST",
-        body: JSON.stringify(payload),
-      }
-    );
-    renderZeroDteLottery();
-    setStatus(`Zero-DTE lottery auto-order ${payload.auto_execute_enabled ? "enabled" : "disabled"}.`, "success");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Zero-DTE lottery controls update failed.", "error");
   }
 }
 
@@ -1277,52 +1747,6 @@ async function previewZeroDteLottery() {
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Zero-DTE lottery preview failed.", "error");
-  }
-}
-
-async function runZeroDteLotteryScan() {
-  if (!state.selectedAccountId) {
-    setStatus("Select a broker account before running zero-DTE lottery scan.", "warning");
-    return;
-  }
-  let symbol = "";
-  try {
-    symbol = normalizeLotterySymbol();
-  } catch (error) {
-    setStatus(error.message || "Zero-DTE lottery symbol is required.", "error");
-    return;
-  }
-  const direction = els.zeroDteLotteryDirection.value || "auto";
-  if (!window.confirm(`Force a paper zero-DTE lottery scan for ${symbol}? If eligible, this can submit one paper buy-limit option order.`)) {
-    return;
-  }
-
-  setStatus(`Running zero-DTE lottery force scan for ${symbol}...`, "warning");
-  updateZeroDteLotteryButtons(true);
-  try {
-    const params = new URLSearchParams();
-    params.set("symbol", symbol);
-    params.set("direction", direction);
-    params.set("mode", "paper");
-    params.set("force", "true");
-    state.zeroDteLotteryScanResult = await fetchJson(
-      `/strategies/zero-dte-lottery/runtime/${encodeURIComponent(state.selectedAccountId)}/scan?${params.toString()}`,
-      {
-        method: "POST",
-        timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-      }
-    );
-    state.zeroDteLotteryPreview = state.zeroDteLotteryScanResult.preview || state.zeroDteLotteryPreview;
-    await loadAccountData();
-    const message = state.zeroDteLotteryScanResult.executed
-      ? `Zero-DTE lottery paper order submitted: ${state.zeroDteLotteryScanResult.execution?.order?.symbol || symbol}.`
-      : state.zeroDteLotteryScanResult.reason || "Zero-DTE lottery scan completed without an order.";
-    setStatus(message, state.zeroDteLotteryScanResult.executed ? "success" : "warning");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Zero-DTE lottery scan failed.", "error");
-  } finally {
-    updateZeroDteLotteryButtons(false);
   }
 }
 
@@ -1454,30 +1878,44 @@ function upsertAdvisorRun(run) {
   ].slice(0, 5);
 }
 
-async function reconcileCoveredCallLifecycle() {
+async function reconcileCoveredCallLifecycle(button = null) {
   if (!state.selectedAccountId) {
     setStatus("Select a broker account first.", "warning");
     return;
   }
 
-  setStatus(`Refreshing covered-call lifecycle for ${state.selectedAccountId}...`, "warning");
   try {
+    const accountId = state.selectedAccountId;
+    if (button) {
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+    }
+    setStatus(`Refreshing covered-call lifecycle for ${accountId} (read-only)...`, "warning");
     const result = await fetchJson(
-      `/strategies/covered-call/lifecycle/${encodeURIComponent(state.selectedAccountId)}/reconcile?limit=20`,
+      `/strategies/covered-call/lifecycle/${encodeURIComponent(accountId)}/reconcile?limit=20`,
       {
         method: "POST",
         timeoutMs: COVERED_CALL_LIFECYCLE_TIMEOUT_MS,
       }
     );
+    if (state.selectedAccountId !== accountId) {
+      return;
+    }
     await loadAccountData();
-    setStatus(`Covered-call lifecycle refreshed: ${formatCoveredCallLifecycleResult(result)}.`, "success");
+    setStatus(`Covered-call lifecycle refreshed read-only: ${formatCoveredCallLifecycleResult(result)}.`, "success");
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Covered-call lifecycle refresh failed.", "error");
+  } finally {
+    if (button) {
+      button.removeAttribute("aria-busy");
+      button.disabled = false;
+    }
+    applyBrokerMutationSafetyLocks();
   }
 }
 
-async function handleStrategyProposalAction(action, proposalId) {
+async function handleStrategyProposalAction(action, proposalId, button = null) {
   const actionLabels = {
     approve: "Approving strategy proposal",
     reject: "Rejecting strategy proposal",
@@ -1488,56 +1926,125 @@ async function handleStrategyProposalAction(action, proposalId) {
     roll_execute: "Executing covered call roll proposal",
     roll_continue: "Continuing covered call roll proposal",
   };
-  setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
   try {
-    let result = null;
     const requestPayload = buildStrategyProposalActionPayload(action);
     if (requestPayload.canceled) {
       setStatus("Strategy proposal action canceled.", "warning");
       return;
     }
-    if (action === "approve" || action === "reject") {
-      result = await fetchJson(`/strategies/proposals/${encodeURIComponent(proposalId)}/${action}`, {
-        method: "POST",
-      });
-    } else if (action === "execute_covered_call") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/execute`, {
-        method: "POST",
-        body: JSON.stringify(requestPayload.body),
-      });
-    } else if (action === "monitor_covered_call") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/monitor`, {
-        method: "POST",
-      });
-    } else if (action === "close_covered_call") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/close`, {
-        method: "POST",
-        body: JSON.stringify(requestPayload.body),
-      });
-    } else if (action === "roll_propose") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-propose`, {
-        method: "POST",
-        body: JSON.stringify(requestPayload.body),
-      });
-    } else if (action === "roll_execute") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-execute`, {
-        method: "POST",
-        body: JSON.stringify(requestPayload.body),
-      });
-    } else if (action === "roll_continue") {
-      result = await fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/roll-continue`, {
-        method: "POST",
-        body: JSON.stringify(requestPayload.body),
-      });
+    let result = null;
+    if (isCoveredCallBrokerMutation(action)) {
+      const actionKey = `covered-call:${proposalId}:${action}`;
+      const proposal = findStrategyProposal(proposalId);
+      const mutation = await runConfirmedBrokerMutation(
+        {
+          actionKey,
+          button,
+          requestSignature: JSON.stringify({ proposal_id: proposalId, action, ...requestPayload.body }),
+          statusElement: els.coveredCallActionStatus,
+          confirmation: buildCoveredCallConfirmation(action, proposal, requestPayload.body),
+        },
+        async (idempotencyKey) => {
+          setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
+          return sendStrategyProposalActionRequest(action, proposalId, requestPayload.body, idempotencyKey);
+        }
+      );
+      if (!mutation.executed) {
+        return;
+      }
+      result = mutation.result;
     } else {
-      throw new Error(`Unsupported proposal action: ${action}`);
+      setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
+      result = await sendStrategyProposalActionRequest(action, proposalId, requestPayload.body, null);
     }
     await loadAccountData();
-    setStatus(formatStrategyProposalActionResult(action, result), "success");
+    const message = formatStrategyProposalActionResult(action, result);
+    if (isCoveredCallBrokerMutation(action)) {
+      setActionStatus(els.coveredCallActionStatus, message, "success");
+    }
+    setStatus(message, "success");
   } catch (error) {
     console.error(error);
+    if (isCoveredCallBrokerMutation(action)) {
+      setActionStatus(els.coveredCallActionStatus, error.message || "Covered Call action failed.", "error");
+    }
     setStatus(error.message || "Strategy proposal action failed.", "error");
   }
+}
+
+function sendStrategyProposalActionRequest(action, proposalId, body, idempotencyKey) {
+  const headers = idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {};
+  const options = { method: "POST", headers };
+  if (action === "approve" || action === "reject") {
+    return fetchJson(`/strategies/proposals/${encodeURIComponent(proposalId)}/${action}`, options);
+  }
+  const suffixes = {
+    execute_covered_call: "execute",
+    monitor_covered_call: "monitor",
+    close_covered_call: "close",
+    roll_propose: "roll-propose",
+    roll_execute: "roll-execute",
+    roll_continue: "roll-continue",
+  };
+  const suffix = suffixes[action];
+  if (!suffix) {
+    throw new Error(`Unsupported proposal action: ${action}`);
+  }
+  if (action !== "monitor_covered_call") {
+    options.body = JSON.stringify(body || {});
+  }
+  if (idempotencyKey) {
+    options.timeoutMs = BROKER_REQUEST_TIMEOUT_MS;
+  }
+  return fetchJson(`/strategies/covered-call/proposals/${encodeURIComponent(proposalId)}/${suffix}`, options);
+}
+
+function findStrategyProposal(proposalId) {
+  const proposals = [
+    ...(state.strategyExperiment?.proposals || []),
+    ...(state.coveredCallActivity?.proposals || []),
+  ];
+  return proposals.find((proposal) => proposal.id === proposalId) || { id: proposalId };
+}
+
+function buildCoveredCallConfirmation(action, proposal, body) {
+  const candidate = objectPayload(proposal?.candidate_payload);
+  const risk = objectPayload(proposal?.risk_payload);
+  const rollFrom = objectPayload(candidate.roll_from);
+  const rollTo = objectPayload(candidate.roll_to);
+  const activeCandidate = rollTo.call_symbol ? rollTo : candidate;
+  const contracts = candidate.contracts || rollTo.contracts || 1;
+  const actionLabels = {
+    execute_covered_call: "Sell covered call",
+    monitor_covered_call: "Monitor covered call; exit rules may submit an order",
+    close_covered_call: "Buy covered call to close",
+    roll_execute: "Buy old call and sell rolled call",
+    roll_continue: "Continue rolled-call execution",
+  };
+  const price = body.limit_price || body.buyback_limit_price || body.sell_limit_price || activeCandidate.call_bid;
+  const legDescriptions = {
+    execute_covered_call: `SELL ${candidate.call_symbol || "approved call"}`,
+    monitor_covered_call: `Monitor ${candidate.call_symbol || "approved short call"}`,
+    close_covered_call: `BUY ${candidate.call_symbol || "short call"} TO CLOSE`,
+    roll_execute: `BUY ${rollFrom.call_symbol || "old short call"}, then SELL ${rollTo.call_symbol || "new call"}`,
+    roll_continue: body.sell_order_id
+      ? `Refresh sell order ${body.sell_order_id} for ${rollTo.call_symbol || "new call"}`
+      : `After buyback ${body.buyback_order_id || "confirmation"}, SELL ${rollTo.call_symbol || "new call"}`,
+  };
+  return {
+    title: "Confirm Covered Call broker action",
+    summary: actionLabels[action] || "Covered Call action",
+    details: {
+      Account: proposal?.external_account_id || state.selectedAccountId,
+      Mode: "Paper",
+      Symbol: proposal?.symbol || candidate.underlying_symbol || "--",
+      "Side / Legs": legDescriptions[action] || actionLabels[action] || action,
+      Quantity: `${contracts} contract`,
+      Price: price ? formatCurrency(price, "USD") : "Fresh broker/strategy price",
+      "Max Risk": formatCurrency(risk.max_loss_if_zero || proposal?.expected_max_loss, "USD"),
+      "Quote Time": formatDateTime(activeCandidate.quote_timestamp || activeCandidate.evaluated_at || proposal?.updated_at),
+    },
+  };
 }
 
 function buildStrategyProposalActionPayload(action) {
@@ -1549,22 +2056,22 @@ function buildStrategyProposalActionPayload(action) {
     });
   }
   if (action === "close_covered_call") {
-    return buildOptionalLimitPayload({
+    return buildRequiredLimitPayload({
       field: "limit_price",
-      promptText: "Optional buy-to-close limit price. Leave blank to use the current call mark:",
+      promptText: "Required buy-to-close limit price shown in the confirmation:",
       label: "Covered call close limit price",
     });
   }
   if (action === "roll_execute") {
-    const buyback = promptOptionalPositiveNumber(
-      "Optional buyback limit price for the old short call. Leave blank to use the current call mark:",
+    const buyback = promptRequiredPositiveNumber(
+      "Required buyback limit price for the old short call:",
       "Covered call roll buyback limit price"
     );
     if (buyback.canceled) {
       return { canceled: true, body: {} };
     }
-    const sell = promptOptionalPositiveNumber(
-      "Optional sell limit price for the new short call. Leave blank to use the candidate bid:",
+    const sell = promptRequiredPositiveNumber(
+      "Required sell limit price for the new short call:",
       "Covered call roll sell limit price"
     );
     if (sell.canceled) {
@@ -1584,8 +2091,8 @@ function buildStrategyProposalActionPayload(action) {
     if (sellOrderId === null) {
       return { canceled: true, body: {} };
     }
-    const sell = promptOptionalPositiveNumber(
-      "Optional sell limit price for the new short call. Leave blank to use the candidate bid:",
+    const sell = promptRequiredPositiveNumber(
+      "Required sell limit price for the new short call if continuation submits it:",
       "Covered call roll continuation sell limit price"
     );
     if (sell.canceled) {
@@ -1611,6 +2118,14 @@ function buildOptionalLimitPayload({ field, promptText, label }) {
   return { canceled: false, body };
 }
 
+function buildRequiredLimitPayload({ field, promptText, label }) {
+  const limit = promptRequiredPositiveNumber(promptText, label);
+  if (limit.canceled) {
+    return { canceled: true, body: {} };
+  }
+  return { canceled: false, body: { [field]: limit.value } };
+}
+
 function promptOptionalPositiveNumber(promptText, label) {
   const value = window.prompt(promptText);
   if (value === null) {
@@ -1622,6 +2137,17 @@ function promptOptionalPositiveNumber(promptText, label) {
   };
 }
 
+function promptRequiredPositiveNumber(promptText, label) {
+  const value = window.prompt(promptText);
+  if (value === null) {
+    return { canceled: true, value: null };
+  }
+  return {
+    canceled: false,
+    value: parsePositiveNumber(value, label, true),
+  };
+}
+
 function addOptionalNumberField(payload, field, value) {
   if (value !== null && value !== undefined) {
     payload[field] = value;
@@ -1630,8 +2156,17 @@ function addOptionalNumberField(payload, field, value) {
 }
 
 async function refreshAccounts() {
-  const accounts = await fetchJson("/broker-accounts");
-  applyAccounts(accounts);
+  try {
+    const accounts = await fetchJson("/broker-accounts");
+    state.accountListHealthy = true;
+    applyAccounts(accounts);
+  } catch (error) {
+    state.accountListHealthy = false;
+    state.coreDataHealthy = false;
+    state.coreLoadFailures = ["Broker accounts"];
+    applyTradingSafetyState();
+    throw error;
+  }
 }
 
 async function refreshAccountsSilently() {
@@ -1657,7 +2192,7 @@ function applyAccounts(accounts) {
   updateOrderTicketAvailability();
 }
 
-async function submitOrder() {
+async function submitOrder(button = els.submitOrder) {
   if (!state.selectedAccountId) {
     setStatus("Select a broker account before submitting an order.", "warning");
     return;
@@ -1665,18 +2200,58 @@ async function submitOrder() {
 
   try {
     const payload = buildCreateOrderPayload();
-    setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
-    const created = await fetchJson("/orders/submit", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const price = payload.limit_price
+      ? `Limit ${formatCurrency(payload.limit_price, "USD")}`
+      : payload.stop_price
+        ? `Stop ${formatCurrency(payload.stop_price, "USD")}`
+        : "Market / unbounded";
+    const boundedNotional = payload.side === "buy" && payload.limit_price
+      ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD")
+      : "Not bounded in ticket";
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey: "order-submit",
+        button,
+        requestSignature: JSON.stringify(payload),
+        statusElement: els.orderActionStatus,
+        confirmation: {
+          title: "Confirm paper order",
+          summary: `${payload.side.toUpperCase()} ${payload.quantity} ${payload.symbol}`,
+          details: {
+            Account: state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: payload.symbol,
+            Side: payload.side.toUpperCase(),
+            Quantity: String(payload.quantity),
+            Price: price,
+            "Max Risk": boundedNotional,
+            "Quote Time": matchingQuoteTime(payload.symbol),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
+        return fetchJson("/orders/submit", {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload),
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
+    const created = mutation.result;
     state.selectedOrderId = created.id;
     els.orderRemark.value = "";
     await loadAccountData();
     setSelectedOrder(created.id);
+    setActionStatus(els.orderActionStatus, `Order submitted for ${created.symbol}.`, "success");
     setStatus(`Order submitted for ${created.symbol}.`, "success");
   } catch (error) {
     console.error(error);
+    setActionStatus(els.orderActionStatus, error.message || "Order submission failed.", "error");
     setStatus(error.message || "Order submission failed.", "error");
   }
 }
@@ -1713,25 +2288,61 @@ async function refreshSpread(spreadId) {
   }
 }
 
-async function monitorSpread(spreadId) {
+async function monitorSpread(spreadId, button = null) {
   const spread = state.spreads.find((item) => item.id === spreadId);
-  setStatus(`Monitoring spread ${spread?.underlying_symbol || spreadId}...`, "warning");
   try {
-    const result = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
-      method: "POST",
-    });
+    const actionKey = `bull-put-monitor:${spreadId}`;
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey,
+        button,
+        requestSignature: JSON.stringify({ spread_id: spreadId, action: "monitor" }),
+        statusElement: els.strategyControlsHint,
+        confirmation: {
+          title: "Confirm Bull Put monitor",
+          summary: `Monitor ${spread?.underlying_symbol || spreadId}; exit rules may submit closing orders`,
+          details: {
+            Account: spread?.external_account_id || state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: spread?.underlying_symbol || spreadId,
+            "Side / Legs": `${spread?.long_symbol || "Long put"} / ${spread?.short_symbol || "Short put"}`,
+            Quantity: `${spread?.contracts || 1} spread`,
+            Price: spread?.raw_payload?.monitor?.estimated_exit_debit
+              ? `Estimated debit ${formatCurrency(spread.raw_payload.monitor.estimated_exit_debit, "USD")}`
+              : "Fresh exit limits",
+            "Max Risk": formatCurrency(spread?.max_loss, "USD"),
+            "Quote Time": formatDateTime(spread?.raw_payload?.monitor?.evaluated_at || spread?.last_synced_at),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Monitoring spread ${spread?.underlying_symbol || spreadId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
+    const result = mutation.result;
     await loadAccountData();
     const action = result.should_close
       ? `Exit action ${formatSpreadExitReason(result.exit_reason)} evaluated for ${result.spread.underlying_symbol}.`
       : `Spread ${result.spread.underlying_symbol} remains within thresholds.`;
-    setStatus(action, result.should_close ? "success" : "warning");
+    const tone = result.should_close ? "success" : "warning";
+    setActionStatus(els.strategyControlsHint, action, tone);
+    setStatus(action, tone);
   } catch (error) {
     console.error(error);
+    setActionStatus(els.strategyControlsHint, error.message || "Spread monitor failed.", "error");
     setStatus(error.message || "Spread monitor failed.", "error");
   }
 }
 
-async function recoverCloseSpread(spreadId, formData) {
+async function recoverCloseSpread(spreadId, formData, button = null) {
   const spread = state.spreads.find((item) => item.id === spreadId);
   const actor = String(formData.get("actor") || "").trim();
   const note = String(formData.get("note") || "").trim();
@@ -1741,31 +2352,62 @@ async function recoverCloseSpread(spreadId, formData) {
     setStatus("Recover close requires actor, note, max debit, and paper-order confirmation.", "error");
     return;
   }
-  if (!window.confirm(`Submit paper buy-to-close recovery for ${spread?.underlying_symbol || spreadId}?`)) {
-    return;
-  }
-  setStatus(`Submitting recovery close for ${spread?.underlying_symbol || spreadId}...`, "warning");
   try {
-    const recovered = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
-      method: "POST",
-      body: JSON.stringify({
-        external_account_id: state.selectedAccountId,
-        mode: "paper",
-        confirm_paper_order: true,
-        max_debit: maxDebit,
-        actor,
-        note,
-      }),
-    });
+    const payload = {
+      external_account_id: state.selectedAccountId,
+      mode: "paper",
+      confirm_paper_order: true,
+      max_debit: maxDebit,
+      actor,
+      note,
+    };
+    const actionKey = `bull-put-recover:${spreadId}`;
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey,
+        button,
+        requestSignature: JSON.stringify({ spread_id: spreadId, ...payload }),
+        statusElement: els.strategyControlsHint,
+        confirmation: {
+          title: "Confirm Bull Put recovery close",
+          summary: `Buy to close the short put for ${spread?.underlying_symbol || spreadId}`,
+          details: {
+            Account: state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: spread?.short_symbol || spread?.underlying_symbol || spreadId,
+            "Side / Legs": "Buy short put to close",
+            Quantity: `${spread?.contracts || 1} contract`,
+            Price: `Max debit ${formatCurrency(maxDebit, "USD")}`,
+            "Max Risk": formatCurrency(Number(maxDebit) * Number(spread?.contracts || 1) * 100, "USD"),
+            "Quote Time": formatDateTime(spread?.last_synced_at),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Submitting recovery close for ${spread?.underlying_symbol || spreadId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload),
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
+    const recovered = mutation.result;
     await loadAccountData();
+    setActionStatus(els.strategyControlsHint, `Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
     setStatus(`Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
   } catch (error) {
     console.error(error);
+    setActionStatus(els.strategyControlsHint, error.message || "Recover close failed.", "error");
     setStatus(error.message || "Recover close failed.", "error");
   }
 }
 
-async function cancelOrder(orderId) {
+async function cancelOrder(orderId, button = null) {
   const order = state.orders.find((item) => item.id === orderId);
   if (!order) {
     setStatus("Order not found in the current table.", "error");
@@ -1775,26 +2417,55 @@ async function cancelOrder(orderId) {
     setStatus("This order can no longer be canceled.", "warning");
     return;
   }
-  if (!window.confirm(`Cancel order ${order.symbol} ${order.side.toUpperCase()} ${order.quantity}?`)) {
-    return;
-  }
-
-  setStatus(`Canceling order ${order.symbol}...`, "warning");
   try {
-    const canceled = await fetchJson(`/orders/${encodeURIComponent(orderId)}/cancel`, {
-      method: "POST",
-    });
+    const actionKey = `order-cancel:${orderId}`;
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey,
+        button,
+        requestSignature: JSON.stringify({ order_id: orderId, action: "cancel" }),
+        statusElement: els.orderActionStatus,
+        confirmation: {
+          title: "Confirm paper order cancellation",
+          summary: `Cancel ${order.side.toUpperCase()} ${order.quantity} ${order.symbol}`,
+          details: {
+            Account: order.external_account_id || state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: order.symbol,
+            Side: order.side.toUpperCase(),
+            Quantity: String(order.quantity),
+            Price: formatOrderPrice(order),
+            "Max Risk": "Cancel only",
+            "Quote Time": matchingQuoteTime(order.symbol),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Canceling order ${order.symbol}...`, "warning");
+        return fetchJson(`/orders/${encodeURIComponent(orderId)}/cancel`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
+    const canceled = mutation.result;
     state.selectedOrderId = canceled.id;
     await loadAccountData();
     setSelectedOrder(canceled.id);
+    setActionStatus(els.orderActionStatus, `Order ${canceled.symbol} canceled.`, "success");
     setStatus(`Order ${canceled.symbol} canceled.`, "success");
   } catch (error) {
     console.error(error);
+    setActionStatus(els.orderActionStatus, error.message || "Order cancel failed.", "error");
     setStatus(error.message || "Order cancel failed.", "error");
   }
 }
 
-async function replaceSelectedOrder() {
+async function replaceSelectedOrder(button = null) {
   const order = getSelectedOrder();
   if (!order) {
     setStatus("Select an order before replacing it.", "warning");
@@ -1807,18 +2478,56 @@ async function replaceSelectedOrder() {
 
   try {
     const payload = buildReplaceOrderPayload(order);
-    setStatus(`Replacing order ${order.symbol}...`, "warning");
-    const updated = await fetchJson(`/orders/${encodeURIComponent(order.id)}/replace`, {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    const actionKey = `order-replace:${order.id}`;
+    if (button) {
+      button.dataset.actionKey = actionKey;
+    }
+    const mutation = await runConfirmedBrokerMutation(
+      {
+        actionKey,
+        button,
+        requestSignature: JSON.stringify({ order_id: order.id, ...payload }),
+        statusElement: els.orderActionStatus,
+        confirmation: {
+          title: "Confirm paper order replacement",
+          summary: `Replace ${order.side.toUpperCase()} ${payload.quantity} ${order.symbol}`,
+          details: {
+            Account: order.external_account_id || state.selectedAccountId,
+            Mode: "Paper",
+            Symbol: order.symbol,
+            Side: order.side.toUpperCase(),
+            Quantity: String(payload.quantity),
+            Price: payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : formatOrderPrice(order),
+            "Max Risk": payload.limit_price && order.side === "buy"
+              ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD")
+              : "Not bounded in ticket",
+            "Quote Time": matchingQuoteTime(order.symbol),
+          },
+        },
+      },
+      async (idempotencyKey) => {
+        setStatus(`Replacing order ${order.symbol}...`, "warning");
+        return fetchJson(`/orders/${encodeURIComponent(order.id)}/replace`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+          body: JSON.stringify(payload),
+          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
+        });
+      }
+    );
+    if (!mutation.executed) {
+      return;
+    }
+    const updated = mutation.result;
     state.selectedOrderId = updated.id;
     els.replaceRemark.value = "";
     await loadAccountData();
     setSelectedOrder(updated.id);
+    setActionStatus(els.orderActionStatus, `Order ${updated.symbol} updated.`, "success");
     setStatus(`Order ${updated.symbol} updated.`, "success");
   } catch (error) {
     console.error(error);
+    setActionStatus(els.orderActionStatus, error.message || "Order replace failed.", "error");
     setStatus(error.message || "Order replace failed.", "error");
   }
 }
@@ -1937,6 +2646,7 @@ function renderReconciliationStatus() {
   const cards = [
     {
       label: "Broker Profile",
+      priority: "secondary",
       tone: brokerProfile?.configured === false ? "warning" : "success",
       badge: brokerProfile?.paper_guard || "Profile",
       value: brokerProfile
@@ -1948,6 +2658,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Scheduler Posture",
+      priority: "secondary",
       tone: postureTone(schedulerCheck?.status || operatorStatus.status || "neutral"),
       badge: postureLabel(schedulerCheck?.status || operatorStatus.status || "observed"),
       value: operatorStatus.ready_for_unattended === false ? "Review" : "Ready",
@@ -1960,6 +2671,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Account Sync",
+      priority: "primary",
       tone: reconciliationTone(account.account_sync_status),
       badge: reconciliationLabel(account.account_sync_status),
       value: formatSyncHeadline(account.account_last_synced_at, account.account_last_sync_attempt_at),
@@ -1972,6 +2684,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Orders Sync",
+      priority: "secondary",
       tone: reconciliationTone(account.orders_sync_status),
       badge: reconciliationLabel(account.orders_sync_status),
       value: formatSyncHeadline(account.orders_last_synced_at, account.orders_last_sync_attempt_at),
@@ -1984,6 +2697,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Paper Mandate",
+      priority: "primary",
       tone: mandate.kill_switch ? "error" : mandate.manual_pause ? "warning" : "success",
       badge: mandate.kill_switch ? "Kill Switch" : mandate.manual_pause ? "Paused" : "Paper",
       value: mandateStrategyCount !== null
@@ -1993,6 +2707,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Ledger Consistency",
+      priority: "primary",
       tone: postureTone(consistencySummary.status || consistencyCheck?.status || "neutral"),
       badge: postureLabel(consistencySummary.status || consistencyCheck?.status || "observed"),
       value: consistencySummary.repair_available_count
@@ -2002,6 +2717,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Manual Actions",
+      priority: "primary",
       tone: manualActionCount ? "error" : "success",
       badge: manualActionCount ? "Required" : "Clear",
       value: `${manualActionCount} Warning${manualActionCount === 1 ? "" : "s"}`,
@@ -2012,6 +2728,7 @@ function renderReconciliationStatus() {
     },
     {
       label: "Advisor Last Run",
+      priority: "secondary",
       tone: latestAdvisorRun ? advisorRunStatusClass(latestAdvisorRun.status) : "neutral",
       badge: latestAdvisorRun?.recorded ? "Recorded" : latestAdvisorRun ? "Observed" : "--",
       value: latestAdvisorRun ? (latestAdvisorRun.model || latestAdvisorRun.provider || "DeepSeek") : "--",
@@ -2022,7 +2739,7 @@ function renderReconciliationStatus() {
   els.reconciliationStrip.innerHTML = cards
     .map(
       (card) => `
-        <article class="reconciliation-card">
+        <article class="reconciliation-card" data-view-priority="${escapeHtml(card.priority || "primary")}">
           <div class="reconciliation-head">
             <span class="metric-label">${escapeHtml(card.label)}</span>
             <span class="pill ${escapeHtml(card.tone)}">${escapeHtml(card.badge)}</span>
@@ -2423,25 +3140,26 @@ function renderZeroDteLottery() {
   if (!runtime) {
     els.zeroDteLotteryStrip.innerHTML = `
       <article class="mini-metric-tile">
-        <span class="metric-label">Auto Order</span>
-        <strong class="mini-metric-value">--</strong>
-        <span class="mini-metric-detail">Select a broker account to load lottery controls.</span>
+        <span class="metric-label">Execution</span>
+        <strong class="mini-metric-value">Preview Only</strong>
+        <span class="mini-metric-detail">Zero-DTE orders are disabled pending expiry lifecycle support.</span>
       </article>
     `;
     els.zeroDteLotteryAutoOrder.value = "false";
-    els.zeroDteLotteryHint.textContent = "Paper-only same-day long option. Auto-order is disabled by default and capped at $150.";
+    els.zeroDteLotteryHint.textContent = "Preview only. Zero-DTE execution and automatic ordering are disabled.";
     renderZeroDteLotteryResult();
     updateZeroDteLotteryButtons();
     return;
   }
 
-  const autoOrderTone = runtime.auto_execute_enabled ? "warning" : "neutral";
   const summaryValues = [
     {
-      label: "Auto Order",
-      value: runtime.auto_execute_enabled ? "Enabled" : "Disabled",
-      tone: autoOrderTone,
-      detail: runtime.auto_execute_enabled ? "Scheduler may submit one paper order if eligible." : "Manual preview and force scan only.",
+      label: "Execution",
+      value: "Preview Only",
+      tone: runtime.auto_execute_enabled ? "warning" : "neutral",
+      detail: runtime.auto_execute_enabled
+        ? "Legacy auto-order flag detected; execution remains blocked."
+        : "No manual, forced, or automatic orders.",
     },
     {
       label: "Max Premium",
@@ -2474,13 +3192,11 @@ function renderZeroDteLottery() {
     )
     .join("");
 
-  els.zeroDteLotteryAutoOrder.value = runtime.auto_execute_enabled ? "true" : "false";
+  els.zeroDteLotteryAutoOrder.value = "false";
   if (!els.zeroDteLotterySymbol.value.trim()) {
     els.zeroDteLotterySymbol.value = (runtime.symbols || [])[0] || "QQQ.US";
   }
-  els.zeroDteLotteryHint.textContent = runtime.auto_execute_enabled
-    ? "Auto-order is armed for the running paper scheduler. Daily cap and $150 premium cap still apply."
-    : "Auto-order is off. Preview is read-only; Force Scan can submit a paper order only after confirmation.";
+  els.zeroDteLotteryHint.textContent = "Preview only. Zero-DTE execution and automatic ordering stay disabled until the expiry lifecycle is implemented.";
   renderZeroDteLotteryResult();
   updateZeroDteLotteryButtons();
 }
@@ -3209,15 +3925,29 @@ function renderStrategyProposalActions(proposal) {
     <div class="table-actions">
       ${actions
         .map(
-          ([action, label, tone]) => `
-            <button class="table-action ${tone}" type="button" data-proposal-action="${escapeHtml(action)}" data-proposal-id="${escapeHtml(proposal.id)}">
+          ([action, label, tone]) => {
+            const brokerMutation = isCoveredCallBrokerMutation(action);
+            const actionKey = brokerMutation ? `covered-call:${proposal.id}:${action}` : "";
+            return `
+            <button class="table-action ${tone}" type="button" data-proposal-action="${escapeHtml(action)}" data-proposal-id="${escapeHtml(proposal.id)}" ${brokerMutation ? `data-broker-mutation="true" data-action-key="${escapeHtml(actionKey)}"` : ""}>
               ${escapeHtml(label)}
             </button>
-          `
+          `;
+          }
         )
         .join("")}
     </div>
   `;
+}
+
+function isCoveredCallBrokerMutation(action) {
+  return [
+    "execute_covered_call",
+    "monitor_covered_call",
+    "close_covered_call",
+    "roll_execute",
+    "roll_continue",
+  ].includes(action);
 }
 
 function formatActivityCount(value) {
@@ -3449,7 +4179,7 @@ function renderSpreads() {
               </button>
               ${
                 monitorable
-                  ? `<button class="table-action primary" type="button" data-spread-action="monitor" data-spread-id="${escapeHtml(spread.id)}">Monitor</button>`
+                  ? `<button class="table-action primary" type="button" data-spread-action="monitor" data-spread-id="${escapeHtml(spread.id)}" data-broker-mutation="true" data-action-key="bull-put-monitor:${escapeHtml(spread.id)}">Monitor</button>`
                   : ""
               }
             </div>
@@ -3496,7 +4226,7 @@ function renderRecoverClosePanel(spread, eligibility) {
           <input name="confirm_paper_order" type="checkbox" ${disabled} />
           <span>Paper</span>
         </label>
-        <button class="table-action primary" type="submit" ${disabled}>Recover</button>
+        <button class="table-action primary" type="submit" ${disabled} data-business-disabled="${eligible ? "false" : "true"}" data-broker-mutation="true" data-action-key="bull-put-recover:${escapeHtml(spread.id)}">Recover</button>
       </form>
     </div>
   `;
@@ -3552,7 +4282,7 @@ function renderOrders() {
               </button>
               ${
                 canCancel
-                  ? `<button class="table-action danger" type="button" data-order-action="cancel" data-order-id="${escapeHtml(order.id)}">Cancel</button>`
+                  ? `<button class="table-action danger" type="button" data-order-action="cancel" data-order-id="${escapeHtml(order.id)}" data-broker-mutation="true" data-action-key="order-cancel:${escapeHtml(order.id)}">Cancel</button>`
                   : ""
               }
             </div>
@@ -4191,6 +4921,7 @@ function renderSelectedOrder() {
     renderSelectedExecution();
     renderSelectedJournal();
     hideReplaceForm();
+    applyTradingSafetyState();
     return;
   }
 
@@ -4246,7 +4977,7 @@ function renderSelectedOrder() {
       ${
         canCancel
           ? `
-            <button class="icon-button" type="button" data-selected-action="cancel">
+            <button class="icon-button" type="button" data-selected-action="cancel" data-broker-mutation="true" data-action-key="order-cancel:${escapeHtml(order.id)}">
               <span class="icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" focusable="false">
                   <path d="M18 6 6 18"/>
@@ -4274,6 +5005,7 @@ function renderSelectedOrder() {
 
   renderSelectedExecution();
   renderSelectedJournal();
+  applyTradingSafetyState();
 }
 
 function setSelectedOrder(orderId, shouldScroll = false) {
@@ -4422,7 +5154,12 @@ function populateReplaceForm(order) {
   els.replaceStopPrice.value = order.stop_price ?? "";
   els.replaceRemark.value = "";
   syncReplaceOrderFields(order.order_type);
+  if (els.replaceSubmit) {
+    els.replaceSubmit.dataset.actionKey = `order-replace:${order.id}`;
+    setBusinessDisabled(els.replaceSubmit, false, "");
+  }
   els.replaceOrderForm.classList.remove("hidden");
+  applyTradingSafetyState();
 }
 
 function hideReplaceForm() {
@@ -4432,8 +5169,8 @@ function hideReplaceForm() {
 
 function updateOrderTicketAvailability() {
   const hasAccount = Boolean(state.selectedAccountId);
-  els.submitOrder.disabled = !hasAccount;
-  els.submitOrder.title = hasAccount ? "" : "Select a broker account first.";
+  setBusinessDisabled(els.submitOrder, !hasAccount, hasAccount ? "" : "Select a broker account first.");
+  applyTradingSafetyState();
 }
 
 function updateSyncButtons() {
@@ -4450,26 +5187,21 @@ function updateSyncButtons() {
 
 function updateStrategyButtons() {
   const hasAccount = Boolean(state.selectedAccountId);
-  els.saveStrategyControls.disabled = !hasAccount;
-  els.runStrategyScan.disabled = !hasAccount;
+  setBusinessDisabled(els.saveStrategyControls, !hasAccount, hasAccount ? "" : "Select a broker account first.");
+  setBusinessDisabled(els.runStrategyScan, !hasAccount, hasAccount ? "" : "Select a broker account first.");
   els.runStrategyReview.disabled = !hasAccount;
-  els.saveStrategyControls.title = hasAccount ? "" : "Select a broker account first.";
-  els.runStrategyScan.title = hasAccount ? "" : "Select a broker account first.";
   els.runStrategyReview.title = hasAccount ? "" : "Select a broker account first.";
+  applyTradingSafetyState();
 }
 
 function updateZeroDteLotteryButtons(forceBusy = false) {
-  if (!els.saveZeroDteLotteryControls || !els.previewZeroDteLottery || !els.runZeroDteLotteryScan) {
+  if (!els.previewZeroDteLottery) {
     return;
   }
   const hasAccount = Boolean(state.selectedAccountId);
   const disabled = !hasAccount || forceBusy;
-  els.saveZeroDteLotteryControls.disabled = disabled;
   els.previewZeroDteLottery.disabled = disabled;
-  els.runZeroDteLotteryScan.disabled = disabled;
-  els.saveZeroDteLotteryControls.title = hasAccount ? "" : "Select a broker account first.";
   els.previewZeroDteLottery.title = hasAccount ? "Preview without submitting an order." : "Select a broker account first.";
-  els.runZeroDteLotteryScan.title = hasAccount ? "Force a paper scan; may submit one paper option order." : "Select a broker account first.";
 }
 
 function updatePreOpenButtons(forceSaving = false) {
@@ -4704,6 +5436,13 @@ function isMonitorableSpread(spread) {
 
 function isReplaceableOrder(order) {
   return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
+}
+
+function matchingQuoteTime(symbol) {
+  if (!state.quote || String(state.quote.symbol || "").toUpperCase() !== String(symbol || "").toUpperCase()) {
+    return "Not loaded";
+  }
+  return formatDateTime(state.quote.timestamp);
 }
 
 function formatOrderPrice(order) {
@@ -4975,6 +5714,10 @@ function formatRuntimeNextAction(value) {
 }
 
 function setStatus(message, tone = "") {
+  if (tone === "success" && !state.coreDataHealthy) {
+    message = `Required account data is stale. Broker-writing actions are disabled. ${message}`;
+    tone = "error";
+  }
   els.statusBanner.textContent = message;
   els.statusBanner.className = "status-banner";
   if (tone) {

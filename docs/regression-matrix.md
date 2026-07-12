@@ -1,6 +1,6 @@
 # Regression Matrix
 
-Last updated: 2026-06-16
+Last updated: 2026-07-11
 
 Run the smallest relevant test first, then the broader gates before treating an optimization slice as done.
 
@@ -18,9 +18,12 @@ node --check src\stocks_tool\ui\static\state.js
 .venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_mock_ui_order_regression.py scripts\run_unattended_paper.py scripts\run_audit_export_regression.py scripts\run_consistency_report.py scripts\run_bull_put_recovery_drill.py scripts\run_data_hygiene_audit.py scripts\run_paper_session_gate.py scripts\run_worktree_release_inventory.py scripts\run_zero_dte_lottery_drill.py scripts\run_60h_completion_audit.py scripts\run_scheduler_on_long_gate.py scripts\run_operator_platform_v8_gate.py scripts\run_regression.py
 .venv\Scripts\alembic.exe heads
 .venv\Scripts\alembic.exe current
+.venv\Scripts\python.exe scripts\run_regression.py p0-safety --skip-running-api-checks
 ```
 
 These gates verify Python behavior, API imports, migration-sensitive models used by tests, and dashboard JavaScript syntax.
+
+`p0-safety` additionally runs the duplicate-external-order preflight, an isolated temporary-PostgreSQL two-request concurrency proof, and the full mock browser safety matrix. Without `--skip-running-api-checks` it also reads `/ops/consistency` from the configured local API. Its manifest fixes `broker_order_submit_allowed=false`, `local_repair_allowed=false`, and `destructive_actions_allowed=false`; the temporary database is created, migrated, tested, and dropped without touching broker state.
 
 ## Operator Posture Gates
 
@@ -50,7 +53,7 @@ Targeted pytest coverage should include:
 
 - `mock-ui` drives the dashboard against the in-memory mock backend and should cover strategy controls, macro board, spread monitor, execution summary, journals, and order actions.
 - `mock-ui` now seeds `/brokers/profiles`, `/ops/unattended-status`, `/ops/audit`, `/ops/consistency`, and `/strategies/advisor/run-cards`, then asserts the dashboard operator strip renders Broker Profile, Scheduler Posture, Paper Mandate, Ledger Consistency, Manual Actions, and Advisor Last Run.
-- `run_mock_ui_order_regression.py --scenario all` runs independent evidence for `normal`, `degraded-broker`, `paused-mandate`, `advisor-pending-record`, `manual-action-required`, `scheduler-backoff`, `recover-eligible`, `recover-rejected`, `recover-already-working`, `ledger-mismatch`, `repair-available`, `quote-cache-fallback`, and `scheduler-lease-active`.
+- `run_mock_ui_order_regression.py --scenario all` runs 18 independent DOM-assertion scenarios: `normal`, `degraded-broker`, `paused-mandate`, `advisor-pending-record`, `manual-action-required`, `scheduler-backoff`, `recover-eligible`, `recover-rejected`, `recover-already-working`, `ledger-mismatch`, `repair-available`, `quote-cache-fallback`, `scheduler-lease-active`, `auxiliary-data-failure`, `core-data-failure`, `covered-call-data-failure`, `accounts-data-failure`, and `unknown-intent`.
 - `real-ui-refresh` reloads the real local dashboard on `127.0.0.1:8000` and checks that first paint and overlay settling remain usable.
 - `scheduler-on-long-gate` starts a temporary scheduler-enabled API on an available local port, then runs `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, `bull-put-real-paper`, and `bull-put-recovery-drill` against the same process. Its manifest includes scheduler summary and lease/backoff evidence from `/ops/unattended-status`.
 
@@ -74,13 +77,13 @@ Targeted pytest coverage should include:
 - `bull-put-readiness` checks opening posture without submitting orders.
 - `bull-put-real-paper` talks to the local API and real Longbridge paper account without placing option orders unless explicitly requested.
 - `bull-put-recovery-drill` reads recover-close eligibility for listed or selected spreads and emits operator action evidence without submitting recovery orders.
-- `zero-dte-lottery-drill` reads runtime plus preview evidence and is preview-only by default; force scan is allowed only with both `--force-scan` and `--confirm-paper-scan`. If a confirmed force scan already produced a same-session paper manual-scan order but the scan response failed, the drill may reconcile that existing local order only when the order remark, underlying, paper mode, buy-option side, and premium cap all match. Missing local strategy run/signal rows are repaired only when `--record-reconciled-ledger` is supplied; this repair writes local ledger rows and does not submit broker orders.
+- `zero-dte-lottery-drill` reads runtime plus preview evidence. The legacy `--force-scan --confirm-paper-scan` pair verifies that the mutation-shaped endpoint returns the stable lifecycle-disabled `409`; it never authorizes, attempts, or reconciles a new broker order.
 - `consistency-report` exports `/ops/consistency` evidence and never applies a local repair.
 - `paper-session-gate` composes the morning, midday, evening, or full read-only operator evidence loop, including consistency evidence and the preview-only zero-DTE drill in the midday phase. `--strict` fails if consistency evidence is missing or if any child reports broker order submission, local repair execution, or destructive action. The session manifest lists child artifact paths, status counts, broker-submit flags, local-repair flags, and destructive-action flags.
 - `unattended-paper status` verifies paper-first controls, linked order/lifecycle state, executions, journals, zero-DTE guard state, and notification payload shape. File notifications include `run_id` and rotate JSONL output by size.
 - `audit-export` writes read-only `/ops/audit` plus `/ops/audit/summary` evidence.
-- `operator-platform-v8` aggregates full pytest, script compile, dashboard syntax, Alembic head/current, release inventory, mock UI scenarios, strict paper-session gate, audit export, consistency report, and `git diff --check` into `artifacts/operator-platform-v8-manifest.json`. It does not call DeepSeek and does not run confirmed zero-DTE force scan by default.
-- `60h-completion-audit` checks the current evidence against the long 60h plan and should remain `incomplete` until every requirement, including confirmed or reconciled manual-only force-scan evidence plus strategy run/signal recording, is truly proven.
+- `operator-platform-v8` aggregates full pytest, script compile, dashboard syntax, Alembic head/current, release inventory, mock UI scenarios, strict paper-session gate, audit export, consistency report, and `git diff --check` into `artifacts/operator-platform-v8-manifest.json`. It does not call DeepSeek or authorize Zero-DTE execution.
+- `60h-completion-audit` is a legacy pre-P0 evidence checklist and may remain `incomplete`; its historical force-scan item is intentionally superseded by the P0 Zero-DTE lifecycle lock.
 
 ## Worktree and Hygiene Gates
 
@@ -91,6 +94,7 @@ Targeted pytest coverage should include:
 
 - `worktree-release-inventory` classifies dirty paths into release slices and flags unknown/generated candidates before staging.
 - `data-hygiene-audit` reads watchlists and local evidence directories, identifies duplicates/test residue, reports stale artifacts, stale Playwright screenshots, and stale JSONL notifications, and emits cleanup notes without deleting anything by default. Generated file cleanup is available only with explicit confirmation flags such as `--archive-stale-generated --confirm-generated-cleanup` or `--cleanup-project-caches --confirm-generated-cleanup`.
+- `market-data-runtime` exports `/health` plus `/ops/market-data-runtime`, summarizes requests, SDK calls, cache hits/misses, failures, timeouts, pending work, and maximum latency, and performs no broker mutation or local repair.
 
 ## Advisor Gate
 

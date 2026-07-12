@@ -25,6 +25,8 @@
     "DTE": "到期天数",
     "Paper Trading Desk": "纸账户交易台",
     "Stocks Tool Workbench": "Stocks Tool 工作台",
+    "Focus": "聚焦",
+    "All": "全部",
     "Paper": "纸交易",
     "API Docs": "API 文档",
     "Account": "账户",

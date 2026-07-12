@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from decimal import Decimal
+from uuid import NAMESPACE_URL, uuid5
 from zoneinfo import ZoneInfo
 
 from stocks_tool.adapters.brokers.longbridge import (
@@ -13,7 +16,12 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeIntegrationError,
 )
 from stocks_tool.application.services.journal import JournalService
-from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.longbridge_integration import LongbridgeIntegrationService
+from stocks_tool.application.services.orders import (
+    OrderService,
+    TradingIntentOutcomeUnknownError,
+    TradingIntentRejectedError,
+)
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.bull_put.calendar import (
     is_us_options_trading_day as compute_is_us_options_trading_day,
@@ -45,6 +53,10 @@ from stocks_tool.application.services.bull_put.runtime import (
     runtime_entry_block_reason as compute_runtime_entry_block_reason,
     runtime_next_action as compute_runtime_next_action,
 )
+from stocks_tool.application.services.bull_put.transitions import (
+    BullPutOrderState,
+    evaluate_bull_put_transition,
+)
 from stocks_tool.application.services.bull_put.monitor import (
     days_to_expiration as compute_days_to_expiration,
     determine_exit_reason as compute_exit_reason,
@@ -57,6 +69,7 @@ from stocks_tool.application.services.strategy_lifecycle import (
     bull_put_close_order_warning,
     bull_put_lifecycle_summary,
 )
+from stocks_tool.application.services.strategy_idempotency import strategy_order_identity
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
     AssetType,
@@ -70,6 +83,7 @@ from stocks_tool.domain.enums import (
     RiskStatus,
     SpreadStatus,
     TimeInForce,
+    TradingIntentState,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -103,9 +117,28 @@ from stocks_tool.domain.models import (
     PreOpenAssessmentRun,
     PreOpenReviewCheckpoint,
     RecoverBullPutCloseRequest,
+    TradingActionContext,
     UpdateBullPutStrategyRuntimeRequest,
 )
+from stocks_tool.domain.option_symbols import same_day_expiring_option_positions
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
+
+
+class BullPutManualActionRequiredError(RuntimeError):
+    """Raised when a leg may still be working or has a residual fill."""
+
+
+class BullPutActionIdempotencyConflictError(ValueError):
+    """Raised when a public Bull Put action key is reused with different input."""
+
+
+class BullPutLegPersistenceError(RuntimeError):
+    """Carries a broker-acknowledged leg when linking it to the spread failed."""
+
+    def __init__(self, *, order: Order, order_id_field: str, cause: Exception) -> None:
+        super().__init__(f"Could not link broker order {order.id} to {order_id_field}: {cause}")
+        self.order = order
+        self.order_id_field = order_id_field
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
@@ -113,6 +146,7 @@ from stocks_tool.ports.repository import (
     BullPutStrategyRuntimeRepository,
     PreOpenAssessmentRunRepository,
     StrategyAuditEventRepository,
+    ConcurrentSpreadUpdateError,
 )
 
 
@@ -134,6 +168,8 @@ PRE_OPEN_REVIEW_CHECKPOINTS = (
 
 
 class BullPutStrategyService:
+    strategy_id = "paper_bull_put_v1"
+
     _preview_cache: dict[tuple[str, str, str, str], tuple[datetime, BullPutSpreadScanResult]] = {}
     _close_order_warning_code = BULL_PUT_CLOSE_ORDER_WARNING
 
@@ -178,6 +214,63 @@ class BullPutStrategyService:
 
     def get_spread(self, spread_id: str) -> BullPutSpread | None:
         return self.spreads.get_spread(spread_id)
+
+    def relink_reconciled_order_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+    ) -> int:
+        leg_fields = {
+            "long_entry": "long_entry_order_id",
+            "short_entry": "short_entry_order_id",
+            "short_exit": "short_exit_order_id",
+            "long_exit": "long_exit_order_id",
+        }
+        linked = 0
+        for intent in self.order_service.list_trading_intents(
+            external_account_id=external_account_id,
+            mode=mode,
+            state=TradingIntentState.PERSISTED,
+            limit=500,
+        ):
+            if intent.strategy_id != self.strategy_id or intent.leg not in leg_fields:
+                continue
+            spread_id = (intent.entity_id or "").split(":", 1)[0]
+            spread = self.spreads.get_spread(spread_id)
+            if spread is None or not isinstance(intent.response_payload, dict):
+                continue
+            order_id = intent.response_payload.get("id")
+            if not order_id:
+                continue
+            field = leg_fields[intent.leg]
+            current_order_id = getattr(spread, field)
+            if current_order_id == order_id:
+                continue
+            if current_order_id is not None:
+                self._mark_manual_action_required(
+                    spread,
+                    reason="reconciled_leg_link_conflict",
+                    detail=(
+                        f"Reconciled intent {intent.id} points to order {order_id}, but {field} "
+                        f"already points to {current_order_id}."
+                    ),
+                    intent_id=intent.id,
+                )
+                continue
+            self._mark_manual_action_required(
+                spread,
+                reason="reconciled_leg_linked_manual_review",
+                detail=(
+                    f"Reconciled intent {intent.id} linked broker order {order_id} to {field}; "
+                    "manual review remains required before lifecycle continuation."
+                ),
+                intent_id=intent.id,
+                linked_order_field=field,
+                linked_order_id=str(order_id),
+            )
+            linked += 1
+        return linked
 
     def get_runtime_state(
         self,
@@ -392,10 +485,91 @@ class BullPutStrategyService:
         mode: ExecutionMode = ExecutionMode.PAPER,
         as_of: datetime | None = None,
         force: bool = False,
+        idempotency_key: str | None = None,
     ) -> BullPutStrategyScanRunResult:
         scanned_at = as_of or datetime.now(timezone.utc)
         if scanned_at.tzinfo is None:
             scanned_at = scanned_at.replace(tzinfo=timezone.utc)
+
+        internal_scan_bucket = scanned_at.astimezone(self.new_york).replace(
+            second=0,
+            microsecond=0,
+        )
+        scan_idempotency_key = idempotency_key or (
+            "bull-put-scan:"
+            + hashlib.sha256(
+                f"{external_account_id}|{internal_scan_bucket.isoformat()}".encode()
+            ).hexdigest()[:32]
+        )
+        scan_action_payload = {
+            "action": "bull_put_scan",
+            "external_account_id": external_account_id,
+            "mode": mode.value,
+            "force": force,
+            "as_of": (
+                as_of.isoformat()
+                if idempotency_key is not None and as_of is not None
+                else internal_scan_bucket.isoformat()
+                if idempotency_key is None
+                else None
+            ),
+        }
+        action_spread_id, action_request_hash = self._bull_put_action_identity_for_payload(
+            external_account_id=external_account_id,
+            mode=mode,
+            idempotency_key=scan_idempotency_key,
+            request_payload=scan_action_payload,
+        )
+        parent_action_intent_id, parent_replay = self._prepare_bull_put_parent_action(
+            external_account_id=external_account_id,
+            mode=mode,
+            idempotency_key=scan_idempotency_key,
+            request_hash=action_request_hash,
+            request_payload=scan_action_payload,
+            spread_id=action_spread_id,
+            action="bull_put_scan",
+            replay_model=BullPutStrategyScanRunResult,
+        )
+        if parent_replay is not None:
+            return parent_replay
+        if action_spread_id is not None:
+            existing_spread = self.spreads.get_spread(action_spread_id)
+            if existing_spread is not None:
+                self._assert_bull_put_action_replay(
+                    existing_spread=existing_spread,
+                    action_request_hash=action_request_hash,
+                )
+                replayed = existing_spread.model_copy(update={"idempotent_replayed": True})
+                state = self.runtime_states.get_runtime_state(
+                    external_account_id=external_account_id,
+                    strategy_id=self.strategy_id,
+                )
+                if state is None:
+                    state = self._prepare_runtime_state(
+                        external_account_id=external_account_id,
+                        mode=mode,
+                        as_of=scanned_at,
+                    )
+                return self._complete_bull_put_parent_result(
+                    parent_action_intent_id=parent_action_intent_id,
+                    result=BullPutStrategyScanRunResult(
+                    strategy_state=state,
+                    scanned_at=existing_spread.entry_started_at or scanned_at,
+                    executed=existing_spread.status == SpreadStatus.OPEN,
+                    executed_spread=replayed,
+                    ),
+                )
+        try:
+            self._synchronize_entry_authorization_state(
+                external_account_id=external_account_id,
+                mode=mode,
+                exclude_action_intent_id=parent_action_intent_id,
+                as_of=scanned_at,
+            )
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
 
         state = self._prepare_runtime_state(
             external_account_id=external_account_id,
@@ -416,34 +590,61 @@ class BullPutStrategyService:
                     state,
                     **updates,
                 )
-                return BullPutStrategyScanRunResult(
-                    strategy_state=state,
-                    scanned_at=scanned_at,
-                    executed=False,
-                    reason=due_reason,
+                return self._complete_bull_put_parent_result(
+                    parent_action_intent_id=parent_action_intent_id,
+                    result=BullPutStrategyScanRunResult(
+                        strategy_state=state,
+                        scanned_at=scanned_at,
+                        executed=False,
+                        reason=due_reason,
+                    ),
                 )
 
         previews: list[BullPutSpreadScanResult] = []
         strategy = self.settings.bull_put_strategy
         for symbol in strategy.symbols:
-            preview = self.preview_spread(
-                external_account_id=external_account_id,
-                symbol=symbol,
-                mode=mode,
-                as_of=scanned_at,
-            )
+            try:
+                preview = self.preview_spread(
+                    external_account_id=external_account_id,
+                    symbol=symbol,
+                    mode=mode,
+                    as_of=scanned_at,
+                )
+            except Exception as exc:
+                if parent_action_intent_id is not None:
+                    self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+                raise
             previews.append(preview)
             if preview.eligible:
-                spread = self._execute_preview_candidate(
-                    request=ExecuteBullPutSpreadRequest(
-                        external_account_id=external_account_id,
-                        symbol=symbol,
-                        mode=mode,
-                        as_of=scanned_at,
-                        remark="auto_scan",
-                    ),
-                    preview=preview,
-                )
+                broker_phase_started = False
+
+                def mark_broker_phase_started() -> None:
+                    nonlocal broker_phase_started
+                    broker_phase_started = True
+
+                try:
+                    spread = self._execute_preview_candidate(
+                        request=ExecuteBullPutSpreadRequest(
+                            external_account_id=external_account_id,
+                            symbol=symbol,
+                            mode=mode,
+                            as_of=scanned_at,
+                            remark="auto_scan",
+                        ),
+                        preview=preview,
+                        idempotency_key=scan_idempotency_key,
+                        action_spread_id=action_spread_id,
+                        action_request_hash=action_request_hash,
+                        parent_action_intent_id=parent_action_intent_id,
+                        on_broker_phase_started=mark_broker_phase_started,
+                    )
+                except Exception as exc:
+                    if parent_action_intent_id is not None:
+                        if broker_phase_started:
+                            self._mark_parent_action_unknown(parent_action_intent_id, exc)
+                        else:
+                            self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+                    raise
                 state = self._prepare_runtime_state(
                     external_account_id=external_account_id,
                     mode=mode,
@@ -459,12 +660,23 @@ class BullPutStrategyService:
                     last_action_at=scanned_at,
                     last_error=None,
                 )
-                return BullPutStrategyScanRunResult(
+                result = BullPutStrategyScanRunResult(
                     strategy_state=state,
                     scanned_at=scanned_at,
                     executed=spread.status == SpreadStatus.OPEN,
                     executed_spread=spread,
                     previews=previews,
+                )
+                if spread.manual_action_required:
+                    if parent_action_intent_id is not None:
+                        self._mark_parent_action_unknown(
+                            parent_action_intent_id,
+                            RuntimeError("Bull Put scan stopped with manual action required."),
+                        )
+                    return result
+                return self._complete_bull_put_parent_result(
+                    parent_action_intent_id=parent_action_intent_id,
+                    result=result,
                 )
 
             self._log_scan_skip(preview=preview, automatic=not force)
@@ -479,12 +691,15 @@ class BullPutStrategyService:
             last_skip_reason=reason,
             last_error=None,
         )
-        return BullPutStrategyScanRunResult(
-            strategy_state=state,
-            scanned_at=scanned_at,
-            executed=False,
-            previews=previews,
-            reason=reason,
+        return self._complete_bull_put_parent_result(
+            parent_action_intent_id=parent_action_intent_id,
+            result=BullPutStrategyScanRunResult(
+                strategy_state=state,
+                scanned_at=scanned_at,
+                executed=False,
+                previews=previews,
+                reason=reason,
+            ),
         )
 
     def run_review(
@@ -1164,6 +1379,7 @@ class BullPutStrategyService:
             self._entry_filter_reasons(
                 account_snapshot=account_snapshot,
                 underlying_quote=underlying_quote,
+                evaluated_at=scanned_at,
                 moving_average_20=moving_average_20,
                 moving_average_50=moving_average_50,
             )
@@ -1303,26 +1519,95 @@ class BullPutStrategyService:
             )
         return finish(result)
 
-    def execute_spread(self, request: ExecuteBullPutSpreadRequest) -> BullPutSpread:
-        execution_time = request.as_of or datetime.now(timezone.utc)
-        if execution_time.tzinfo is None:
-            execution_time = execution_time.replace(tzinfo=timezone.utc)
-        session_reason = self._entry_session_gate_reason(execution_time)
-        if session_reason is not None:
-            raise ValueError(session_reason)
+    def execute_spread(
+        self,
+        request: ExecuteBullPutSpreadRequest,
+        *,
+        idempotency_key: str | None = None,
+    ) -> BullPutSpread:
+        action_request_payload = request.model_dump(mode="json")
+        spread_id, action_request_hash = self._bull_put_action_identity(
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+        parent_action_intent_id, parent_replay = self._prepare_bull_put_parent_action(
+            external_account_id=request.external_account_id,
+            mode=request.mode,
+            idempotency_key=idempotency_key,
+            request_hash=action_request_hash,
+            request_payload=action_request_payload,
+            spread_id=spread_id,
+            action="bull_put_execute",
+        )
+        if parent_replay is not None:
+            return parent_replay
+        if spread_id is not None:
+            existing_spread = self.spreads.get_spread(spread_id)
+            if existing_spread is not None:
+                self._assert_bull_put_action_replay(
+                    existing_spread=existing_spread,
+                    action_request_hash=action_request_hash,
+                )
+                completed = self._finalize_bull_put_parent_action(
+                    parent_action_intent_id=parent_action_intent_id,
+                    spread=existing_spread,
+                )
+                return completed.model_copy(update={"idempotent_replayed": True})
+        broker_phase_started = False
 
-        preview = self._get_cached_preview_for_request(request)
-        if preview is not None:
-            preview = self._refresh_locked_preview_candidate(preview, as_of=execution_time)
-        else:
-            preview = self.preview_spread(
+        def mark_broker_phase_started() -> None:
+            nonlocal broker_phase_started
+            broker_phase_started = True
+
+        try:
+            execution_time = request.as_of or datetime.now(timezone.utc)
+            if execution_time.tzinfo is None:
+                execution_time = execution_time.replace(tzinfo=timezone.utc)
+            self._synchronize_entry_authorization_state(
                 external_account_id=request.external_account_id,
-                symbol=request.symbol,
                 mode=request.mode,
+                exclude_action_intent_id=parent_action_intent_id,
                 as_of=execution_time,
             )
-        self._assert_candidate_lock(request=request, preview=preview)
-        return self._execute_preview_candidate(request=request, preview=preview)
+            session_reason = self._entry_session_gate_reason(execution_time)
+            if session_reason is not None:
+                raise ValueError(session_reason)
+
+            preview = self._get_cached_preview_for_request(request)
+            if preview is not None:
+                preview = self._refresh_locked_preview_candidate(preview, as_of=execution_time)
+            else:
+                preview = self.preview_spread(
+                    external_account_id=request.external_account_id,
+                    symbol=request.symbol,
+                    mode=request.mode,
+                    as_of=execution_time,
+                )
+            self._assert_candidate_lock(request=request, preview=preview)
+            spread = self._execute_preview_candidate(
+                request=request,
+                preview=preview,
+                idempotency_key=idempotency_key,
+                action_spread_id=spread_id,
+                action_request_hash=action_request_hash,
+                parent_action_intent_id=parent_action_intent_id,
+                on_broker_phase_started=mark_broker_phase_started,
+            )
+            return self._finalize_bull_put_parent_action(
+                parent_action_intent_id=parent_action_intent_id,
+                spread=spread,
+            )
+        except TradingIntentOutcomeUnknownError as exc:
+            if parent_action_intent_id is not None:
+                self._mark_parent_action_unknown(parent_action_intent_id, exc)
+            raise
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                if broker_phase_started:
+                    self._mark_parent_action_unknown(parent_action_intent_id, exc)
+                else:
+                    self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
 
     def _assert_candidate_lock(
         self,
@@ -1389,6 +1674,30 @@ class BullPutStrategyService:
         if refreshed_at.tzinfo is None:
             refreshed_at = refreshed_at.replace(tzinfo=timezone.utc)
 
+        underlying_quote = self.longbridge_adapter.get_quote(
+            symbol=preview.symbol,
+            mode=preview.mode,
+        )
+        underlying_reasons = self._underlying_quote_authorization_reasons(
+            underlying_quote=underlying_quote,
+            evaluated_at=refreshed_at,
+        )
+        if underlying_reasons:
+            return preview.model_copy(
+                update={
+                    "underlying_quote": underlying_quote,
+                    "scanned_at": refreshed_at,
+                    "eligible": False,
+                    "reasons": underlying_reasons,
+                    "timing_ms": {
+                        **preview.timing_ms,
+                        "cache_hit": 1,
+                        "locked_refresh": int((time.perf_counter() - started_at) * 1000),
+                    },
+                },
+                deep=True,
+            )
+
         quotes = self.longbridge_adapter.get_option_market_snapshots(
             symbols=[preview.candidate.short_put.symbol, preview.candidate.long_put.symbol],
             mode=preview.mode,
@@ -1452,6 +1761,7 @@ class BullPutStrategyService:
         eligible = risk.status != RiskStatus.BLOCK
         return preview.model_copy(
             update={
+                "underlying_quote": underlying_quote,
                 "scanned_at": refreshed_at,
                 "eligible": eligible,
                 "candidate": candidate,
@@ -1472,7 +1782,25 @@ class BullPutStrategyService:
         *,
         request: ExecuteBullPutSpreadRequest,
         preview: BullPutSpreadScanResult,
+        idempotency_key: str | None = None,
+        action_spread_id: str | None = None,
+        action_request_hash: str | None = None,
+        parent_action_intent_id: str | None = None,
+        on_broker_phase_started: Callable[[], None] | None = None,
     ) -> BullPutSpread:
+        if action_spread_id is None:
+            action_spread_id, action_request_hash = self._bull_put_action_identity(
+                request=request,
+                idempotency_key=idempotency_key,
+            )
+        if action_spread_id is not None:
+            existing_spread = self.spreads.get_spread(action_spread_id)
+            if existing_spread is not None:
+                self._assert_bull_put_action_replay(
+                    existing_spread=existing_spread,
+                    action_request_hash=action_request_hash,
+                )
+                return existing_spread.model_copy(update={"idempotent_replayed": True})
         if not preview.eligible or preview.candidate is None or preview.risk is None:
             failure_reason = (
                 preview.reasons[0]
@@ -1489,6 +1817,21 @@ class BullPutStrategyService:
             mode=request.mode,
             as_of=preview.scanned_at,
         )
+        locked_runtime_state = self.runtime_states.lock_for_entry(
+            external_account_id=request.external_account_id,
+            strategy_id=runtime_state.strategy_id,
+        )
+        if locked_runtime_state is None:
+            raise ValueError("Bull put runtime state disappeared before entry capacity could be reserved.")
+        runtime_state = locked_runtime_state
+        if action_spread_id is not None:
+            existing_spread = self.spreads.get_spread(action_spread_id)
+            if existing_spread is not None:
+                self._assert_bull_put_action_replay(
+                    existing_spread=existing_spread,
+                    action_request_hash=action_request_hash,
+                )
+                return existing_spread.model_copy(update={"idempotent_replayed": True})
         self._assert_entry_capacity(
             external_account_id=request.external_account_id,
             symbol=request.symbol,
@@ -1496,7 +1839,9 @@ class BullPutStrategyService:
         )
 
         now = preview.scanned_at
+        spread_identity = {"id": action_spread_id} if action_spread_id is not None else {}
         spread = BullPutSpread(
+            **spread_identity,
             broker=BrokerName.LONGBRIDGE,
             external_account_id=request.external_account_id,
             mode=request.mode,
@@ -1515,6 +1860,7 @@ class BullPutStrategyService:
             account_risk_pct=preview.risk.account_risk_pct,
             raw_payload={
                 "preview": preview.model_dump(mode="json"),
+                "action_request_hash": action_request_hash,
             },
             entry_started_at=now,
             created_at=now,
@@ -1528,20 +1874,66 @@ class BullPutStrategyService:
             short_leg=entry_short_leg,
             width=preview.candidate.width,
         )
-        spread, long_entry_order = self._submit_entry_leg_with_repricing(
-            spread=spread,
-            external_account_id=request.external_account_id,
-            leg=entry_long_leg,
-            side=OrderSide.BUY,
-            quantity=spread.contracts,
-            mode=request.mode,
-            remark=request.remark,
-            price_ladder=self._entry_long_price_ladder(
-                ask_price=entry_long_leg.ask,
-                capped_price=long_entry_cap,
-            ),
-            order_id_field="long_entry_order_id",
-        )
+        if on_broker_phase_started is not None:
+            on_broker_phase_started()
+        try:
+            spread, long_entry_order = self._submit_entry_leg_with_repricing(
+                spread=spread,
+                external_account_id=request.external_account_id,
+                leg=entry_long_leg,
+                side=OrderSide.BUY,
+                quantity=spread.contracts,
+                mode=request.mode,
+                remark=request.remark,
+                price_ladder=self._entry_long_price_ladder(
+                    ask_price=entry_long_leg.ask,
+                    capped_price=long_entry_cap,
+                ),
+                order_id_field="long_entry_order_id",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+        except BullPutLegPersistenceError as exc:
+            return self._mark_manual_action_required(
+                spread,
+                reason="long_entry_link_failed",
+                detail=str(exc),
+                linked_order_field=exc.order_id_field,
+                linked_order_id=exc.order.id,
+            )
+        except BullPutManualActionRequiredError as exc:
+            return self._mark_manual_action_required(
+                spread,
+                reason="long_entry_outcome_unknown",
+                detail=str(exc),
+            )
+        except TradingIntentOutcomeUnknownError as exc:
+            self._mark_manual_action_required(
+                spread,
+                reason="long_entry_outcome_unknown",
+                detail=str(exc),
+                intent_id=exc.intent_id,
+            )
+            raise
+        except (
+            TradingIntentRejectedError,
+            LongbridgeConfigurationError,
+            LongbridgeDependencyError,
+        ):
+            failed = self._update_spread(
+                spread,
+                status=SpreadStatus.ENTRY_FAILED,
+                exit_reason="long_entry_rejected",
+                last_synced_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            return self._log_spread_entry_failure(failed, reason="long_entry_rejected")
+        except Exception as exc:
+            self._mark_manual_action_required(
+                spread,
+                reason="long_entry_outcome_unknown",
+                detail=str(exc),
+            )
+            raise
         if not self._is_filled(long_entry_order):
             failed = self._update_spread(
                 spread,
@@ -1550,8 +1942,7 @@ class BullPutStrategyService:
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
-            self._log_spread_entry_failure(failed, reason="long_entry_unfilled")
-            return failed
+            return self._log_spread_entry_failure(failed, reason="long_entry_unfilled")
 
         spread = self._update_spread(
             spread,
@@ -1576,15 +1967,55 @@ class BullPutStrategyService:
                     width=preview.candidate.width,
                 ),
                 order_id_field="short_entry_order_id",
+                parent_action_intent_id=parent_action_intent_id,
             )
-        except Exception:
-            rolled_back = self._rollback_long_leg(spread, reason="short_entry_submit_failed")
-            self._log_spread_entry_failure(rolled_back, reason="short_entry_submit_failed")
-            return rolled_back
+        except BullPutLegPersistenceError as exc:
+            return self._mark_manual_action_required(
+                spread,
+                reason="short_entry_link_failed",
+                detail=str(exc),
+                linked_order_field=exc.order_id_field,
+                linked_order_id=exc.order.id,
+            )
+        except (
+            TradingIntentRejectedError,
+            LongbridgeConfigurationError,
+            LongbridgeDependencyError,
+        ):
+            rolled_back = self._rollback_long_leg(
+                spread,
+                reason="short_entry_submit_failed",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+            return self._log_spread_entry_failure(rolled_back, reason="short_entry_submit_failed")
+        except BullPutManualActionRequiredError as exc:
+            return self._mark_manual_action_required(
+                spread,
+                reason="short_entry_outcome_unknown",
+                detail=str(exc),
+            )
+        except TradingIntentOutcomeUnknownError as exc:
+            self._mark_manual_action_required(
+                spread,
+                reason="short_entry_outcome_unknown",
+                detail=str(exc),
+                intent_id=exc.intent_id,
+            )
+            raise
+        except Exception as exc:
+            self._mark_manual_action_required(
+                spread,
+                reason="short_entry_outcome_unknown",
+                detail=str(exc),
+            )
+            raise
         if not self._is_filled(short_entry_order):
-            rolled_back = self._rollback_long_leg(spread, reason="short_entry_unfilled")
-            self._log_spread_entry_failure(rolled_back, reason="short_entry_unfilled")
-            return rolled_back
+            rolled_back = self._rollback_long_leg(
+                spread,
+                reason="short_entry_unfilled",
+                parent_action_intent_id=parent_action_intent_id,
+            )
+            return self._log_spread_entry_failure(rolled_back, reason="short_entry_unfilled")
 
         entry_long_price = self._effective_fill_price(long_entry_order)
         entry_short_price = self._effective_fill_price(short_entry_order)
@@ -1607,10 +2038,19 @@ class BullPutStrategyService:
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
-        self._record_opened_spread(opened, preview=preview, runtime_state=runtime_state, as_of=now)
-        return opened
+        return self._record_opened_spread(
+            opened,
+            preview=preview,
+            runtime_state=runtime_state,
+            as_of=now,
+        )
 
-    def refresh_spread(self, spread_id: str) -> BullPutSpread:
+    def refresh_spread(
+        self,
+        spread_id: str,
+        *,
+        _retry_on_conflict: bool = False,
+    ) -> BullPutSpread:
         spread = self._get_spread_or_raise(spread_id)
         updates: dict = {
             "last_synced_at": datetime.now(timezone.utc),
@@ -1627,8 +2067,17 @@ class BullPutStrategyService:
         if short_entry_order is not None:
             updates["entry_short_price"] = self._effective_fill_price(short_entry_order)
 
-        if self._is_filled(long_entry_order) and self._is_filled(short_entry_order):
-            updates["status"] = SpreadStatus.OPEN
+        transition = evaluate_bull_put_transition(
+            current_status=spread.status,
+            long_entry=self._bull_put_order_state(long_entry_order),
+            short_entry=self._bull_put_order_state(short_entry_order),
+            short_exit=self._bull_put_order_state(short_exit_order),
+            long_exit=self._bull_put_order_state(long_exit_order),
+        )
+        if transition.status != spread.status:
+            updates["status"] = transition.status
+
+        if transition.status == SpreadStatus.OPEN:
             if spread.opened_at is None:
                 updates["opened_at"] = datetime.now(timezone.utc)
             if updates.get("entry_long_price") is not None and updates.get("entry_short_price") is not None:
@@ -1641,37 +2090,28 @@ class BullPutStrategyService:
                         entry_net_credit=updates["entry_net_credit"],
                     )
                 )
-        elif spread.status == SpreadStatus.ENTRY_PENDING_LONG and long_entry_order is not None:
-            if long_entry_order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
-                updates["status"] = SpreadStatus.ENTRY_FAILED
-                updates["exit_reason"] = "long_entry_canceled"
-        elif spread.status == SpreadStatus.ENTRY_PENDING_SHORT:
-            if short_entry_order is not None and short_entry_order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
-                if self._is_filled(long_exit_order):
-                    updates["status"] = SpreadStatus.ROLLED_BACK
-                    if spread.closed_at is None:
-                        updates["closed_at"] = datetime.now(timezone.utc)
-                else:
-                    updates["status"] = SpreadStatus.ROLLBACK_FAILED
-                    updates["exit_reason"] = spread.exit_reason or "short_entry_canceled"
-        elif spread.status == SpreadStatus.ROLLBACK_FAILED and self._is_filled(long_exit_order):
-            updates["status"] = SpreadStatus.ROLLED_BACK
+        if transition.status == SpreadStatus.ENTRY_FAILED:
+            updates["exit_reason"] = spread.exit_reason or "long_entry_canceled"
+        if transition.status == SpreadStatus.ROLLBACK_FAILED:
+            updates["exit_reason"] = spread.exit_reason or "short_entry_canceled"
+        if transition.status in {SpreadStatus.ROLLED_BACK, SpreadStatus.CLOSED}:
             if spread.closed_at is None:
                 updates["closed_at"] = datetime.now(timezone.utc)
-        elif spread.status == SpreadStatus.EXIT_PENDING_SHORT:
-            if self._is_filled(short_exit_order):
-                if self._is_filled(long_exit_order):
-                    updates["status"] = SpreadStatus.CLOSED
-                    if spread.closed_at is None:
-                        updates["closed_at"] = datetime.now(timezone.utc)
-                else:
-                    updates["status"] = SpreadStatus.EXIT_PENDING_LONG
-            elif short_exit_order is not None and short_exit_order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
-                updates["status"] = SpreadStatus.OPEN
-        elif spread.status == SpreadStatus.EXIT_PENDING_LONG and self._is_filled(long_exit_order):
-            updates["status"] = SpreadStatus.CLOSED
-            if spread.closed_at is None:
-                updates["closed_at"] = datetime.now(timezone.utc)
+
+        if transition.manual_action_required:
+            raw_payload = dict(spread.raw_payload or {})
+            lifecycle = dict(raw_payload.get("lifecycle") or {})
+            lifecycle.update(
+                {
+                    "warning": transition.warning_code,
+                    "manual_action_required": True,
+                    "detail": "Broker fills left a residual or unexpected bull put leg; review manually before submitting another order.",
+                }
+            )
+            raw_payload["lifecycle"] = lifecycle
+            updates["raw_payload"] = raw_payload
+            updates["manual_action_required"] = True
+            updates["lifecycle_warning_code"] = transition.warning_code
 
         lifecycle_payload = self._lifecycle_payload_for_close_order_state(
             spread=spread,
@@ -1681,7 +2121,12 @@ class BullPutStrategyService:
         if lifecycle_payload is not None:
             updates["raw_payload"] = lifecycle_payload
 
-        return self._update_spread(spread, **updates)
+        try:
+            return self._update_spread(spread, **updates)
+        except ConcurrentSpreadUpdateError:
+            if _retry_on_conflict:
+                raise
+            return self.refresh_spread(spread_id, _retry_on_conflict=True)
 
     def get_recover_close_eligibility(
         self,
@@ -1698,8 +2143,77 @@ class BullPutStrategyService:
             short_exit_order=self._get_local_order_if_present(spread.short_exit_order_id),
         )
 
-    def recover_close(self, spread_id: str, request: RecoverBullPutCloseRequest) -> BullPutSpread:
+    def recover_close(
+        self,
+        spread_id: str,
+        request: RecoverBullPutCloseRequest,
+        *,
+        idempotency_key: str | None = None,
+    ) -> BullPutSpread:
         spread = self._get_spread_or_raise(spread_id)
+        action_payload = {
+            "action": "bull_put_recover_close",
+            "spread_id": spread.id,
+            "request": request.model_dump(mode="json"),
+        }
+        request_hash = (
+            hashlib.sha256(
+                json.dumps(action_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if idempotency_key is not None
+            else None
+        )
+        parent_action_intent_id, replay = self._prepare_bull_put_parent_action(
+            external_account_id=spread.external_account_id,
+            mode=spread.mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            request_payload=action_payload,
+            spread_id=spread.id,
+            action="bull_put_recover_close",
+            replay_model=BullPutSpread,
+        )
+        if replay is not None:
+            return replay
+        broker_phase_started = False
+
+        def mark_broker_phase_started() -> None:
+            nonlocal broker_phase_started
+            broker_phase_started = True
+
+        try:
+            result = self._recover_close_impl(
+                spread=spread,
+                request=request,
+                idempotency_key=idempotency_key,
+                parent_action_intent_id=parent_action_intent_id,
+                on_broker_phase_started=mark_broker_phase_started,
+            )
+            return self._finalize_bull_put_parent_action(
+                parent_action_intent_id=parent_action_intent_id,
+                spread=result,
+            )
+        except TradingIntentRejectedError as exc:
+            if parent_action_intent_id is not None:
+                self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                if broker_phase_started:
+                    self._mark_parent_action_unknown(parent_action_intent_id, exc)
+                else:
+                    self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
+
+    def _recover_close_impl(
+        self,
+        *,
+        spread: BullPutSpread,
+        request: RecoverBullPutCloseRequest,
+        idempotency_key: str | None,
+        parent_action_intent_id: str | None,
+        on_broker_phase_started: Callable[[], None],
+    ) -> BullPutSpread:
         self._validate_recover_close_request(spread=spread, request=request)
         short_exit_order = self._refresh_if_present(spread.short_exit_order_id)
         if short_exit_order is None:
@@ -1745,6 +2259,13 @@ class BullPutStrategyService:
             )
 
         reason = request.note or "manual_recover_close"
+        child_idempotency_key, action_context = strategy_order_identity(
+            strategy_id=spread.strategy_id,
+            entity_id=spread.id,
+            action="bull_put_recover_close",
+            leg=f"short_exit_after:{short_exit_order.id}",
+        )
+        on_broker_phase_started()
         replacement_order = self.order_service.submit_order(
             self._build_leg_order_request(
                 external_account_id=spread.external_account_id,
@@ -1755,7 +2276,10 @@ class BullPutStrategyService:
                 order_type=OrderType.LIMIT,
                 limit_price=short_leg.ask,
                 remark=reason,
-            )
+            ),
+            idempotency_key=child_idempotency_key,
+            action_context=action_context,
+            parent_action_intent_id=parent_action_intent_id,
         )
         spread = self._update_spread(
             spread,
@@ -1787,24 +2311,48 @@ class BullPutStrategyService:
 
         replacement_order = self._await_terminal_or_fill(replacement_order)
         if not self._is_filled(replacement_order):
-            final_order = self._cancel_if_working(replacement_order) or replacement_order
+            final_order = self._cancel_if_working(
+                replacement_order,
+                parent_action_intent_id=parent_action_intent_id,
+                parent_entity_id=spread.id,
+            ) or replacement_order
             lifecycle_payload = self._lifecycle_payload_for_close_order_state(
                 spread=spread,
-                status=SpreadStatus.OPEN,
+                status=SpreadStatus.EXIT_PENDING_SHORT,
                 short_exit_order=final_order,
             )
+            if (
+                final_order.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}
+                and final_order.executed_quantity == 0
+            ):
+                return self._update_spread(
+                    spread,
+                    status=SpreadStatus.OPEN,
+                    latest_close_order_status=final_order.status.value,
+                    lifecycle_warning_code=self._close_order_warning_code,
+                    manual_action_required=True,
+                    raw_payload=lifecycle_payload,
+                    last_synced_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
             return self._update_spread(
                 spread,
-                status=SpreadStatus.OPEN,
+                status=SpreadStatus.EXIT_PENDING_SHORT,
                 latest_close_order_status=final_order.status.value,
-                lifecycle_warning_code=self._close_order_warning_code,
+                lifecycle_warning_code="short_exit_cancel_not_final",
                 manual_action_required=True,
                 raw_payload=lifecycle_payload,
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
 
-        closed = self._close_long_leg(spread, reason=reason, leg=long_leg)
+        closed = self._close_long_leg(
+            spread,
+            reason=reason,
+            leg=long_leg,
+            request_namespace=idempotency_key,
+            parent_action_intent_id=parent_action_intent_id,
+        )
         self._append_recover_close_audit_event(
             spread=closed,
             request=request,
@@ -1872,11 +2420,90 @@ class BullPutStrategyService:
         spread_id: str,
         *,
         as_of: datetime | None = None,
+        idempotency_key: str | None = None,
+    ) -> BullPutSpreadMonitorResult:
+        local_spread = self._get_spread_or_raise(spread_id)
+        action_payload = {
+            "action": "bull_put_monitor",
+            "spread_id": local_spread.id,
+            "as_of": as_of.isoformat() if as_of is not None else None,
+        }
+        request_hash = (
+            hashlib.sha256(
+                json.dumps(action_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if idempotency_key is not None
+            else None
+        )
+        parent_action_intent_id, replay = self._prepare_bull_put_parent_action(
+            external_account_id=local_spread.external_account_id,
+            mode=local_spread.mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            request_payload=action_payload,
+            spread_id=local_spread.id,
+            action="bull_put_monitor",
+            replay_model=BullPutSpreadMonitorResult,
+        )
+        if replay is not None:
+            return replay
+        broker_phase_started = False
+
+        def mark_broker_phase_started() -> None:
+            nonlocal broker_phase_started
+            broker_phase_started = True
+
+        try:
+            result = self._monitor_spread_impl(
+                spread_id=spread_id,
+                as_of=as_of,
+                idempotency_key=idempotency_key,
+                parent_action_intent_id=parent_action_intent_id,
+                on_broker_phase_started=mark_broker_phase_started,
+            )
+            if broker_phase_started and result.spread.manual_action_required:
+                if parent_action_intent_id is not None:
+                    self._mark_parent_action_unknown(
+                        parent_action_intent_id,
+                        RuntimeError("Bull Put monitor stopped with manual action required."),
+                    )
+                return result
+            return self._complete_bull_put_monitor_parent_result(
+                parent_action_intent_id=parent_action_intent_id,
+                result=result,
+            )
+        except TradingIntentRejectedError as exc:
+            if parent_action_intent_id is not None:
+                self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
+        except Exception as exc:
+            if parent_action_intent_id is not None:
+                if broker_phase_started:
+                    self._mark_parent_action_unknown(parent_action_intent_id, exc)
+                else:
+                    self._mark_parent_action_rejected(parent_action_intent_id, str(exc))
+            raise
+
+    def _monitor_spread_impl(
+        self,
+        *,
+        spread_id: str,
+        as_of: datetime | None,
+        idempotency_key: str | None,
+        parent_action_intent_id: str | None,
+        on_broker_phase_started: Callable[[], None],
     ) -> BullPutSpreadMonitorResult:
         spread = self.refresh_spread(spread_id)
         evaluated_at = as_of or datetime.now(timezone.utc)
         if evaluated_at.tzinfo is None:
             evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+        if spread.manual_action_required:
+            return BullPutSpreadMonitorResult(
+                spread=spread,
+                evaluated_at=evaluated_at,
+                should_close=self._latest_monitor_should_close(spread),
+                exit_reason=spread.exit_reason,
+            )
         runtime_state = self._prepare_runtime_state(
             external_account_id=spread.external_account_id,
             mode=spread.mode,
@@ -1885,9 +2512,12 @@ class BullPutStrategyService:
         previous_status = spread.status
 
         if spread.status == SpreadStatus.EXIT_PENDING_LONG:
+            on_broker_phase_started()
             spread = self._close_long_leg(
                 spread,
                 reason=spread.exit_reason or "long_exit_retry",
+                request_namespace=idempotency_key,
+                parent_action_intent_id=parent_action_intent_id,
             )
             result = BullPutSpreadMonitorResult(
                 spread=spread,
@@ -1966,11 +2596,14 @@ class BullPutStrategyService:
             last_synced_at=evaluated_at,
             updated_at=evaluated_at,
         )
+        on_broker_phase_started()
         spread = self._close_spread(
             spread=spread,
             reason=exit_reason,
             short_leg=short_leg,
             long_leg=long_leg,
+            request_namespace=idempotency_key,
+            parent_action_intent_id=parent_action_intent_id,
         )
         result = BullPutSpreadMonitorResult(
             spread=spread,
@@ -1994,12 +2627,20 @@ class BullPutStrategyService:
         *,
         account_snapshot: AccountSnapshot,
         underlying_quote,
+        evaluated_at: datetime,
         moving_average_20: Decimal,
         moving_average_50: Decimal,
     ) -> list[str]:
         reasons: list[str] = []
         if account_snapshot.options_level is None:
             reasons.append("Bull put spread entry requires options approval on the selected account.")
+
+        reasons.extend(
+            self._underlying_quote_authorization_reasons(
+                underlying_quote=underlying_quote,
+                evaluated_at=evaluated_at,
+            )
+        )
 
         if underlying_quote.last_done <= moving_average_20:
             reasons.append("Underlying price is below the 20-day moving average.")
@@ -2013,6 +2654,32 @@ class BullPutStrategyService:
         if underlying_quote.open < (underlying_quote.prev_close * Decimal("0.98")):
             reasons.append("Underlying opened more than 2% below the previous close.")
 
+        return reasons
+
+    def _underlying_quote_authorization_reasons(
+        self,
+        *,
+        underlying_quote,
+        evaluated_at: datetime,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if underlying_quote.data_quality != "live" or underlying_quote.warning_code is not None:
+            reasons.append("Cached quote evidence cannot authorize a bull put entry.")
+
+        quote_time = underlying_quote.timestamp
+        if quote_time.tzinfo is None:
+            quote_time = quote_time.replace(tzinfo=timezone.utc)
+        reference_time = evaluated_at
+        if reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
+        quote_age_seconds = (
+            reference_time.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
+        ).total_seconds()
+        if (
+            quote_age_seconds < -300
+            or quote_age_seconds > self.settings.bull_put_strategy.max_option_quote_age_seconds
+        ):
+            reasons.append("Underlying quote is stale and cannot authorize a bull put entry.")
         return reasons
 
     def _build_readiness_result(
@@ -2226,13 +2893,26 @@ class BullPutStrategyService:
         return None
 
     def _entry_session_gate_reason(self, as_of: datetime) -> str | None:
+        strategy = self.settings.bull_put_strategy
+        if strategy.entry_kill_switch_active:
+            return "Bull put entry kill switch is active during P0 release validation."
         local_time = as_of.astimezone(self.new_york)
         if not self._is_us_options_trading_day(local_time.date()):
             return "Bull put entries only execute during the regular U.S. options week."
-        strategy = self.settings.bull_put_strategy
+        try:
+            is_trading_day, is_half_trading_day = self.longbridge_adapter.get_us_market_calendar(
+                local_time.date(),
+                mode=ExecutionMode.PAPER,
+            )
+        except Exception:
+            return "Official U.S. market calendar is unavailable; bull put entry is blocked."
+        if not is_trading_day:
+            return "Official U.S. market calendar marks this date closed; bull put entry is blocked."
         session_minutes = (local_time.hour * 60) + local_time.minute
         start_minutes = (strategy.entry_session_start_hour_et * 60) + strategy.entry_session_start_minute_et
         end_minutes = (strategy.entry_session_end_hour_et * 60) + strategy.entry_session_end_minute_et
+        if is_half_trading_day:
+            end_minutes = min(end_minutes, 13 * 60)
         if session_minutes < start_minutes or session_minutes >= end_minutes:
             return "Bull put entries only execute during regular U.S. options hours (09:30-16:00 ET)."
         confirmed_start = start_minutes + strategy.entry_open_confirmation_minutes
@@ -2647,7 +3327,7 @@ class BullPutStrategyService:
         preview: BullPutSpreadScanResult,
         runtime_state: BullPutStrategyRuntimeState,
         as_of: datetime,
-    ) -> None:
+    ) -> BullPutSpread:
         runtime_state = self._update_runtime_state(
             runtime_state,
             daily_entry_count=runtime_state.daily_entry_count + 1,
@@ -2655,7 +3335,7 @@ class BullPutStrategyService:
             last_action_at=as_of,
             last_error=None,
         )
-        self._log_spread_entry_open(spread=spread, preview=preview)
+        spread = self._log_spread_entry_open(spread=spread, preview=preview)
         self._update_runtime_state(
             runtime_state,
             last_scan_at=as_of,
@@ -2663,6 +3343,7 @@ class BullPutStrategyService:
             last_scan_symbol=spread.underlying_symbol,
             last_skip_reason=None,
         )
+        return spread
 
     def _record_monitor_close_if_terminal(
         self,
@@ -2711,13 +3392,13 @@ class BullPutStrategyService:
         *,
         spread: BullPutSpread,
         preview: BullPutSpreadScanResult,
-    ) -> None:
+    ) -> BullPutSpread:
         if self._spread_journal_flag(spread, "entry_logged_at"):
-            return
+            return spread
         candidate = preview.candidate
         risk = preview.risk
         if candidate is None or risk is None:
-            return
+            return spread
         self._safe_create_journal_entry(
             CreateJournalEntryRequest(
                 external_account_id=spread.external_account_id,
@@ -2734,11 +3415,11 @@ class BullPutStrategyService:
             ),
             context=f"bull put entry open {spread.id}",
         )
-        self._mark_spread_journal_flag(spread, "entry_logged_at")
+        return self._mark_spread_journal_flag(spread, "entry_logged_at")
 
-    def _log_spread_entry_failure(self, spread: BullPutSpread, *, reason: str) -> None:
+    def _log_spread_entry_failure(self, spread: BullPutSpread, *, reason: str) -> BullPutSpread:
         if self._spread_journal_flag(spread, "entry_failure_logged_at"):
-            return
+            return spread
         self._safe_create_journal_entry(
             CreateJournalEntryRequest(
                 external_account_id=spread.external_account_id,
@@ -2750,7 +3431,7 @@ class BullPutStrategyService:
             ),
             context=f"bull put entry failure {spread.id}",
         )
-        self._mark_spread_journal_flag(spread, "entry_failure_logged_at")
+        return self._mark_spread_journal_flag(spread, "entry_failure_logged_at")
 
     def _build_review_recommendation(
         self,
@@ -2930,6 +3611,248 @@ class BullPutStrategyService:
         ]
         raw = "|".join(parts)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _bull_put_action_identity(
+        *,
+        request: ExecuteBullPutSpreadRequest,
+        idempotency_key: str | None,
+    ) -> tuple[str | None, str | None]:
+        return BullPutStrategyService._bull_put_action_identity_for_payload(
+            external_account_id=request.external_account_id,
+            mode=request.mode,
+            idempotency_key=idempotency_key,
+            request_payload=request.model_dump(mode="json"),
+        )
+
+    @staticmethod
+    def _bull_put_action_identity_for_payload(
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        idempotency_key: str | None,
+        request_payload: dict,
+    ) -> tuple[str | None, str | None]:
+        if idempotency_key is None:
+            return None, None
+        request_hash = hashlib.sha256(
+            json.dumps(
+                request_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        spread_id = str(
+            uuid5(
+                NAMESPACE_URL,
+                "|".join(
+                    (
+                        "bull-put",
+                        external_account_id,
+                        mode.value,
+                        idempotency_key,
+                    )
+                ),
+            )
+        )
+        return spread_id, request_hash
+
+    @staticmethod
+    def _assert_bull_put_action_replay(
+        *,
+        existing_spread: BullPutSpread,
+        action_request_hash: str | None,
+    ) -> None:
+        raw_payload = existing_spread.raw_payload if isinstance(existing_spread.raw_payload, dict) else {}
+        if not action_request_hash or raw_payload.get("action_request_hash") != action_request_hash:
+            raise BullPutActionIdempotencyConflictError(
+                "The Bull Put Idempotency-Key was already used for a different request."
+            )
+        lifecycle = raw_payload.get("lifecycle") if isinstance(raw_payload.get("lifecycle"), dict) else {}
+        if (
+            existing_spread.manual_action_required
+            and existing_spread.lifecycle_warning_code
+            in {"long_entry_outcome_unknown", "short_entry_outcome_unknown"}
+        ):
+            raise TradingIntentOutcomeUnknownError(
+                str(lifecycle.get("intent_id") or existing_spread.id)
+            )
+
+    def _prepare_bull_put_parent_action(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        idempotency_key: str | None,
+        request_hash: str | None,
+        request_payload: dict,
+        spread_id: str | None,
+        action: str,
+        replay_model: (
+            type[BullPutSpread]
+            | type[BullPutStrategyScanRunResult]
+            | type[BullPutSpreadMonitorResult]
+        ) = BullPutSpread,
+    ) -> tuple[
+        str | None,
+        BullPutSpread | BullPutStrategyScanRunResult | BullPutSpreadMonitorResult | None,
+    ]:
+        if idempotency_key is None or request_hash is None or spread_id is None:
+            return None, None
+        prepared = self.order_service.prepare_trade_action(
+            external_account_id=external_account_id,
+            broker=BrokerName.LONGBRIDGE,
+            mode=mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            action_context=TradingActionContext(
+                action=action,
+                strategy_id=self.strategy_id,
+                entity_id=spread_id,
+            ),
+            request_payload=request_payload,
+        )
+        parent = prepared.intent
+        if not prepared.created:
+            if parent.state == TradingIntentState.PERSISTED and parent.response_payload:
+                replay = replay_model.model_validate(parent.response_payload)
+                if isinstance(replay, BullPutSpread):
+                    replay = replay.model_copy(update={"idempotent_replayed": True})
+                elif isinstance(replay, BullPutStrategyScanRunResult):
+                    updates: dict = {"idempotent_replayed": True}
+                    if replay.executed_spread is not None:
+                        updates["executed_spread"] = replay.executed_spread.model_copy(
+                            update={"idempotent_replayed": True}
+                        )
+                    replay = replay.model_copy(update=updates)
+                elif isinstance(replay, BullPutSpreadMonitorResult):
+                    replay = replay.model_copy(
+                        update={
+                            "spread": replay.spread.model_copy(
+                                update={"idempotent_replayed": True}
+                            )
+                        }
+                    )
+                return parent.id, replay
+            if parent.state in {
+                TradingIntentState.REJECTED,
+                TradingIntentState.RESOLVED_NO_ORDER,
+            }:
+                raise TradingIntentRejectedError(parent.id, parent.last_error)
+            raise TradingIntentOutcomeUnknownError(parent.id)
+        try:
+            self.order_service.mark_trade_action_submitting(parent.id)
+        except Exception as exc:
+            self._mark_parent_action_unknown(parent.id, exc)
+            raise TradingIntentOutcomeUnknownError(parent.id) from exc
+        return parent.id, None
+
+    def _complete_bull_put_parent_result(
+        self,
+        *,
+        parent_action_intent_id: str | None,
+        result: BullPutStrategyScanRunResult,
+    ) -> BullPutStrategyScanRunResult:
+        if parent_action_intent_id is None:
+            return result
+        try:
+            self.order_service.complete_trade_action(
+                parent_action_intent_id,
+                result.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            current = self.order_service.get_trade_action(parent_action_intent_id)
+            if (
+                current is not None
+                and current.state == TradingIntentState.PERSISTED
+                and current.response_payload
+            ):
+                return BullPutStrategyScanRunResult.model_validate(current.response_payload)
+            self._mark_parent_action_unknown(parent_action_intent_id, exc)
+            raise TradingIntentOutcomeUnknownError(parent_action_intent_id) from exc
+        return result
+
+    def _complete_bull_put_monitor_parent_result(
+        self,
+        *,
+        parent_action_intent_id: str | None,
+        result: BullPutSpreadMonitorResult,
+    ) -> BullPutSpreadMonitorResult:
+        if parent_action_intent_id is None:
+            return result
+        try:
+            self.order_service.complete_trade_action(
+                parent_action_intent_id,
+                result.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            current = self.order_service.get_trade_action(parent_action_intent_id)
+            if (
+                current is not None
+                and current.state == TradingIntentState.PERSISTED
+                and current.response_payload
+            ):
+                return BullPutSpreadMonitorResult.model_validate(current.response_payload)
+            self._mark_parent_action_unknown(parent_action_intent_id, exc)
+            raise TradingIntentOutcomeUnknownError(parent_action_intent_id) from exc
+        return result
+
+    def _finalize_bull_put_parent_action(
+        self,
+        *,
+        parent_action_intent_id: str | None,
+        spread: BullPutSpread,
+    ) -> BullPutSpread:
+        if parent_action_intent_id is None:
+            return spread
+        if spread.status not in {
+            SpreadStatus.OPEN,
+            SpreadStatus.ENTRY_FAILED,
+            SpreadStatus.ROLLED_BACK,
+            SpreadStatus.CLOSED,
+        } or spread.manual_action_required:
+            self._mark_parent_action_unknown(
+                parent_action_intent_id,
+                RuntimeError(
+                    f"Bull Put action stopped in {spread.status.value} with manual review required."
+                ),
+            )
+            return spread
+        response_payload = spread.model_dump(mode="json", exclude={"idempotent_replayed"})
+        try:
+            self.order_service.complete_trade_action(
+                parent_action_intent_id,
+                response_payload,
+            )
+        except Exception as exc:
+            current = self.order_service.get_trade_action(parent_action_intent_id)
+            if (
+                current is not None
+                and current.state == TradingIntentState.PERSISTED
+                and current.response_payload
+            ):
+                return BullPutSpread.model_validate(current.response_payload)
+            self._mark_parent_action_unknown(parent_action_intent_id, exc)
+            raise TradingIntentOutcomeUnknownError(parent_action_intent_id) from exc
+        return spread
+
+    def _mark_parent_action_unknown(self, parent_action_intent_id: str, exc: Exception) -> None:
+        try:
+            self.order_service.mark_trade_action_unknown(parent_action_intent_id, str(exc))
+        except Exception:
+            logger.exception(
+                "Failed to mark Bull Put parent action '%s' unknown.",
+                parent_action_intent_id,
+            )
+
+    def _mark_parent_action_rejected(self, parent_action_intent_id: str, error: str) -> None:
+        try:
+            self.order_service.mark_trade_action_rejected(parent_action_intent_id, error)
+        except Exception:
+            logger.exception(
+                "Failed to mark Bull Put parent action '%s' rejected.",
+                parent_action_intent_id,
+            )
 
     @staticmethod
     def _decimal_token(value: Decimal) -> str:
@@ -3690,9 +4613,26 @@ class BullPutStrategyService:
         if runtime_reason is not None:
             raise ValueError(runtime_reason)
         strategy = self.settings.bull_put_strategy
+        account_spreads = self.spreads.list_spreads(external_account_id=external_account_id)
+        if any(spread.manual_action_required for spread in account_spreads):
+            raise ValueError(
+                f"Account '{external_account_id}' has a Bull Put item requiring manual action; new entry is blocked."
+            )
+        if runtime_state.current_session_date is not None:
+            session_attempts = 0
+            for spread in account_spreads:
+                attempted_at = spread.entry_started_at or spread.created_at
+                if attempted_at.tzinfo is None:
+                    attempted_at = attempted_at.replace(tzinfo=timezone.utc)
+                if attempted_at.astimezone(self.new_york).date() == runtime_state.current_session_date:
+                    session_attempts += 1
+            if session_attempts >= strategy.max_new_spreads_per_day:
+                raise ValueError(
+                    f"Account '{external_account_id}' already used the daily bull put entry-attempt capacity."
+                )
         active_spreads = [
             spread
-            for spread in self.spreads.list_spreads(external_account_id=external_account_id)
+            for spread in account_spreads
             if spread.status in ACTIVE_SPREAD_STATUSES
         ]
 
@@ -3722,6 +4662,121 @@ class BullPutStrategyService:
                 raise ValueError(
                     f"Account '{external_account_id}' already has the maximum number of active correlated bull put spreads in [{correlated_group}]."
                 )
+
+    def _assert_no_unresolved_entry_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        exclude_action_intent_id: str | None = None,
+    ) -> None:
+        try:
+            has_unresolved = self.order_service.has_unresolved_intents(
+                external_account_id,
+                mode=mode,
+                exclude_action_intent_id=exclude_action_intent_id,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "Bull Put entry is blocked because unresolved trading-intent state could not be verified."
+            ) from exc
+        if has_unresolved:
+            raise ValueError(
+                "Bull Put entry is blocked while the account has an unresolved trading intent."
+            )
+
+    def _synchronize_entry_authorization_state(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        exclude_action_intent_id: str | None = None,
+        as_of: datetime | None = None,
+    ) -> None:
+        try:
+            self.order_service.reconcile_unresolved_intents(
+                external_account_id,
+                mode=mode,
+            )
+            self.order_service.sync_today_orders(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+            account_sync = LongbridgeIntegrationService(
+                adapter=self.longbridge_adapter,
+                broker_accounts=self.broker_accounts,
+                account_snapshots=self.account_snapshots,
+            ).sync_account(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+            self._assert_no_same_day_expiring_option_positions(
+                snapshot=account_sync.account_snapshot,
+                mode=mode,
+                as_of=as_of or datetime.now(timezone.utc),
+            )
+            self.relink_reconciled_order_intents(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "Bull Put entry is blocked because current-cycle order/account synchronization failed."
+            ) from exc
+        self._assert_no_unresolved_entry_intents(
+            external_account_id=external_account_id,
+            mode=mode,
+            exclude_action_intent_id=exclude_action_intent_id,
+        )
+
+    def _assert_no_same_day_expiring_option_positions(
+        self,
+        *,
+        snapshot: AccountSnapshot,
+        mode: ExecutionMode,
+        as_of: datetime,
+    ) -> None:
+        positions = same_day_expiring_option_positions(snapshot, as_of=as_of)
+        if not positions:
+            return
+        payload = {
+            "severity": "critical",
+            "manual_action_required": True,
+            "positions": [
+                {
+                    "symbol": position.symbol,
+                    "quantity": str(position.quantity),
+                    "expiration_date": parsed.expiration_date.isoformat(),
+                    "right": parsed.right,
+                }
+                for position, parsed in positions
+            ],
+        }
+        if self.audit_events is not None:
+            try:
+                self.audit_events.create_event(
+                    CreateStrategyAuditEventRequest(
+                        emitted_at=as_of,
+                        external_account_id=snapshot.account_id,
+                        mode=mode,
+                        source=self.strategy_id,
+                        strategy=self.strategy_id,
+                        action="same_day_option_position_blocked_entry",
+                        warning_code="same_day_option_position_requires_manual_action",
+                        summary=(
+                            "Critical manual action required for a non-zero option position "
+                            "expiring today; Bull Put entry is blocked."
+                        ),
+                        payload=payload,
+                    )
+                )
+            except Exception:
+                logger.exception("Could not persist the same-day option position warning.")
+        symbols = ", ".join(position.symbol for position, _ in positions)
+        raise ValueError(
+            "Bull Put entry is blocked because same-day expiring option positions require "
+            f"manual action: {symbols}."
+        )
 
     def _build_leg_order_request(
         self,
@@ -3767,11 +4822,20 @@ class BullPutStrategyService:
         remark: str | None,
         price_ladder: list[Decimal | None],
         order_id_field: str,
+        parent_action_intent_id: str | None = None,
     ) -> tuple[BullPutSpread, Order]:
         if not price_ladder:
             raise ValueError(f"No valid repricing ladder was available for {leg.symbol}.")
         last_order: Order | None = None
-        for limit_price in price_ladder:
+        leg_name = order_id_field.removesuffix("_order_id")
+        for attempt, limit_price in enumerate(price_ladder):
+            idempotency_key, action_context = strategy_order_identity(
+                strategy_id=spread.strategy_id,
+                entity_id=spread.id,
+                action="bull_put_entry",
+                leg=leg_name,
+                attempt=attempt,
+            )
             submitted = self.order_service.submit_order(
                 self._build_leg_order_request(
                     external_account_id=external_account_id,
@@ -3782,22 +4846,81 @@ class BullPutStrategyService:
                     order_type=OrderType.LIMIT,
                     limit_price=limit_price,
                     remark=remark,
+                ),
+                idempotency_key=idempotency_key,
+                action_context=action_context,
+                parent_action_intent_id=parent_action_intent_id,
+            )
+            try:
+                spread = self._update_spread(
+                    spread,
+                    **{
+                        order_id_field: submitted.id,
+                        "updated_at": datetime.now(timezone.utc),
+                    },
                 )
-            )
-            spread = self._update_spread(
-                spread,
-                **{
-                    order_id_field: submitted.id,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-            )
+            except Exception as exc:
+                raise BullPutLegPersistenceError(
+                    order=submitted,
+                    order_id_field=order_id_field,
+                    cause=exc,
+                ) from exc
             current = self._await_terminal_or_fill(submitted)
             if self._is_filled(current):
                 return spread, current
-            last_order = self._cancel_if_working(current) or current
+            last_order = self._cancel_if_working(
+                current,
+                parent_action_intent_id=parent_action_intent_id,
+                parent_entity_id=spread.id,
+            ) or current
+            if last_order.executed_quantity > 0:
+                raise BullPutManualActionRequiredError(
+                    f"{leg_name} order {last_order.id} has a residual fill; no repricing order was submitted."
+                )
+            if last_order.status not in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
+                raise BullPutManualActionRequiredError(
+                    f"{leg_name} order {last_order.id} cancellation is not final; no repricing order was submitted."
+                )
         if last_order is None:
             raise ValueError(f"Unable to submit any repricing attempt for {leg.symbol}.")
         return spread, last_order
+
+    def _mark_manual_action_required(
+        self,
+        spread: BullPutSpread,
+        *,
+        reason: str,
+        detail: str,
+        intent_id: str | None = None,
+        linked_order_field: str | None = None,
+        linked_order_id: str | None = None,
+    ) -> BullPutSpread:
+        raw_payload = dict(spread.raw_payload or {})
+        lifecycle = dict(raw_payload.get("lifecycle") or {})
+        lifecycle.update(
+            {
+                "warning": reason,
+                "manual_action_required": True,
+                "detail": detail,
+            }
+        )
+        if intent_id is not None:
+            lifecycle["intent_id"] = intent_id
+        raw_payload["lifecycle"] = lifecycle
+        link_update = (
+            {linked_order_field: linked_order_id}
+            if linked_order_field is not None and linked_order_id is not None
+            else {}
+        )
+        return self._update_spread(
+            spread,
+            **link_update,
+            manual_action_required=True,
+            lifecycle_warning_code=reason,
+            raw_payload=raw_payload,
+            last_synced_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
 
     def _build_spread_leg_snapshot(
         self,
@@ -3840,20 +4963,42 @@ class BullPutStrategyService:
             if time.monotonic() >= deadline:
                 return current
 
-    def _cancel_if_working(self, order: Order) -> Order | None:
+    def _cancel_if_working(
+        self,
+        order: Order,
+        *,
+        parent_action_intent_id: str | None = None,
+        parent_entity_id: str | None = None,
+    ) -> Order | None:
         if order.status not in {
             OrderStatus.CREATED,
             OrderStatus.SUBMITTED,
             OrderStatus.PARTIALLY_FILLED,
         }:
             return order
-        return self.order_service.cancel_order(order.id)
+        idempotency_key, action_context = strategy_order_identity(
+            strategy_id="paper_bull_put_v1",
+            entity_id=order.id,
+            action="bull_put_cancel",
+            leg=order.symbol,
+        )
+        if parent_entity_id is not None:
+            action_context = action_context.model_copy(
+                update={"entity_id": parent_entity_id}
+            )
+        return self.order_service.cancel_order(
+            order.id,
+            idempotency_key=idempotency_key,
+            action_context=action_context,
+            parent_action_intent_id=parent_action_intent_id,
+        )
 
     def _rollback_long_leg(
         self,
         spread: BullPutSpread,
         *,
         reason: str,
+        parent_action_intent_id: str | None = None,
     ) -> BullPutSpread:
         rollback_leg = self._build_spread_leg_snapshot(
             spread,
@@ -3861,6 +5006,12 @@ class BullPutStrategyService:
             strike=spread.long_strike,
         )
         try:
+            idempotency_key, action_context = strategy_order_identity(
+                strategy_id=spread.strategy_id,
+                entity_id=spread.id,
+                action="bull_put_rollback",
+                leg="long_exit",
+            )
             rollback_order = self.order_service.submit_order(
                 self._build_leg_order_request(
                     external_account_id=spread.external_account_id,
@@ -3871,15 +5022,23 @@ class BullPutStrategyService:
                     order_type=OrderType.MARKET,
                     limit_price=None,
                     remark=reason,
-                )
+                ),
+                idempotency_key=idempotency_key,
+                action_context=action_context,
+                parent_action_intent_id=parent_action_intent_id,
             )
-        except Exception:
-            return self._update_spread(
+        except Exception as exc:
+            failed = self._update_spread(
                 spread,
                 status=SpreadStatus.ROLLBACK_FAILED,
                 exit_reason=reason,
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
+            )
+            return self._mark_manual_action_required(
+                failed,
+                reason="rollback_order_outcome_unknown",
+                detail=str(exc),
             )
 
         spread = self._update_spread(
@@ -3897,11 +5056,16 @@ class BullPutStrategyService:
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
-        return self._update_spread(
+        failed = self._update_spread(
             spread,
             status=SpreadStatus.ROLLBACK_FAILED,
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
+        )
+        return self._mark_manual_action_required(
+            failed,
+            reason="rollback_order_unfilled",
+            detail=f"Rollback order {rollback_order.id} did not fill; retain manual control of the residual long leg.",
         )
 
     def _close_spread(
@@ -3911,7 +5075,15 @@ class BullPutStrategyService:
         reason: str,
         short_leg: OptionMarketSnapshot,
         long_leg: OptionMarketSnapshot,
+        request_namespace: str | None = None,
+        parent_action_intent_id: str | None = None,
     ) -> BullPutSpread:
+        idempotency_key, action_context = strategy_order_identity(
+            strategy_id=spread.strategy_id,
+            entity_id=spread.id,
+            action="bull_put_exit",
+            leg="short_exit",
+        )
         short_exit_order = self.order_service.submit_order(
             self._build_leg_order_request(
                 external_account_id=spread.external_account_id,
@@ -3922,7 +5094,10 @@ class BullPutStrategyService:
                 order_type=OrderType.LIMIT,
                 limit_price=short_leg.ask,
                 remark=reason,
-            )
+            ),
+            idempotency_key=idempotency_key,
+            action_context=action_context,
+            parent_action_intent_id=parent_action_intent_id,
         )
         spread = self._update_spread(
             spread,
@@ -3933,15 +5108,37 @@ class BullPutStrategyService:
         )
         short_exit_order = self._await_terminal_or_fill(short_exit_order)
         if not self._is_filled(short_exit_order):
-            self._cancel_if_working(short_exit_order)
-            return self._update_spread(
+            canceled = self._cancel_if_working(
+                short_exit_order,
+                parent_action_intent_id=parent_action_intent_id,
+                parent_entity_id=spread.id,
+            ) or short_exit_order
+            if (
+                canceled.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}
+                and canceled.executed_quantity == 0
+            ):
+                return self._update_spread(
+                    spread,
+                    status=SpreadStatus.OPEN,
+                    last_synced_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            return self._mark_manual_action_required(
                 spread,
-                status=SpreadStatus.OPEN,
-                last_synced_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
+                reason="short_exit_cancel_not_final",
+                detail=(
+                    f"Short exit order {canceled.id} is not confirmed canceled with zero fills; "
+                    "the spread remains exit-pending."
+                ),
             )
 
-        return self._close_long_leg(spread, reason=reason, leg=long_leg)
+        return self._close_long_leg(
+            spread,
+            reason=reason,
+            leg=long_leg,
+            request_namespace=request_namespace,
+            parent_action_intent_id=parent_action_intent_id,
+        )
 
     def _close_long_leg(
         self,
@@ -3949,11 +5146,19 @@ class BullPutStrategyService:
         *,
         reason: str,
         leg: OptionMarketSnapshot | None = None,
+        request_namespace: str | None = None,
+        parent_action_intent_id: str | None = None,
     ) -> BullPutSpread:
         long_leg = leg or self._build_spread_leg_snapshot(
             spread,
             symbol=spread.long_symbol,
             strike=spread.long_strike,
+        )
+        idempotency_key, action_context = strategy_order_identity(
+            strategy_id=spread.strategy_id,
+            entity_id=spread.id,
+            action="bull_put_exit",
+            leg="long_exit",
         )
         long_exit_order = self.order_service.submit_order(
             self._build_leg_order_request(
@@ -3965,7 +5170,10 @@ class BullPutStrategyService:
                 order_type=OrderType.MARKET,
                 limit_price=None,
                 remark=reason,
-            )
+            ),
+            idempotency_key=idempotency_key,
+            action_context=action_context,
+            parent_action_intent_id=parent_action_intent_id,
         )
         spread = self._update_spread(
             spread,
@@ -3984,12 +5192,23 @@ class BullPutStrategyService:
                 updated_at=datetime.now(timezone.utc),
             )
 
-        self._cancel_if_working(long_exit_order)
-        return self._update_spread(
+        canceled = self._cancel_if_working(long_exit_order) or long_exit_order
+        pending = self._update_spread(
             spread,
             status=SpreadStatus.EXIT_PENDING_LONG,
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
+        )
+        if canceled.status in {OrderStatus.CANCELED, OrderStatus.REJECTED}:
+            return self._mark_manual_action_required(
+                pending,
+                reason="long_exit_unfilled",
+                detail=f"Long exit order {canceled.id} ended without a full fill; manual action is required.",
+            )
+        return self._mark_manual_action_required(
+            pending,
+            reason="long_exit_cancel_not_final",
+            detail=f"Long exit order {canceled.id} cancellation is not final; do not submit another exit order.",
         )
 
     def _validate_recover_close_request(
@@ -4130,7 +5349,7 @@ class BullPutStrategyService:
         if "raw_payload" in updates:
             updates.update(bull_put_lifecycle_summary(updates["raw_payload"]))
         next_spread = spread.model_copy(update=updates)
-        return self.spreads.update_spread(next_spread)
+        return self.spreads.update_spread(next_spread, expected_version=spread.version)
 
     def _lifecycle_payload_for_close_order_state(
         self,
@@ -4292,6 +5511,15 @@ class BullPutStrategyService:
         if order.limit_price is not None:
             return order.limit_price
         return None
+
+    @staticmethod
+    def _bull_put_order_state(order: Order | None) -> BullPutOrderState:
+        if order is None:
+            return BullPutOrderState()
+        return BullPutOrderState(
+            status=order.status,
+            executed_quantity=order.executed_quantity,
+        )
 
     @staticmethod
     def _is_filled(order: Order | None) -> bool:

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import sessionmaker
 
@@ -41,7 +42,9 @@ from stocks_tool.domain.models import (
     ImportMarketEventsFromProviderRequest,
     SchedulerJobRun,
     SchedulerTaskState,
+    AccountSnapshot,
 )
+from stocks_tool.domain.option_symbols import same_day_expiring_option_positions
 from stocks_tool.ports.broker_gateway import BrokerGateway
 from stocks_tool.ports.repository import SchedulerJobRunRepository, SchedulerTaskStateRepository, StrategyAuditEventRepository
 from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (
@@ -83,6 +86,7 @@ from stocks_tool.repositories.sqlalchemy_strategy_experiment_repository import (
 from stocks_tool.repositories.sqlalchemy_trade_plan_repository import (
     SQLAlchemyTradePlanRepository,
 )
+from stocks_tool.repositories.sqlalchemy_trading_intent_ledger import SQLAlchemyTradingIntentLedger
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +161,7 @@ class ReconciliationCoordinator:
                 executions=executions,
                 longbridge_adapter=self.longbridge_adapter,
                 audit_events=self._strategy_audit_events,
+                intent_ledger=SQLAlchemyTradingIntentLedger(session),
             )
             journal_service = JournalService(
                 journals=SQLAlchemyJournalRepository(session),
@@ -184,6 +189,7 @@ class ReconciliationCoordinator:
                 longbridge_adapter=self.longbridge_adapter,
                 order_service=order_service,
                 market_events=market_events,
+                audit_events=self._strategy_audit_events,
             )
             zero_dte_lottery_service = ZeroDteLotteryStrategyService(
                 settings=self.settings,
@@ -203,15 +209,152 @@ class ReconciliationCoordinator:
                 if broker_account.broker != BrokerName.LONGBRIDGE:
                     continue
 
-                if self.settings.bull_put_strategy.enabled:
-                    if self.settings.bull_put_strategy.auto_monitor_enabled:
-                        self._monitor_due_spreads(
+                intent_ready = self._run_account_task(
+                    external_account_id=broker_account.external_account_id,
+                    task_key="order-intent-reconciliation",
+                    task_label="order intent reconciliation",
+                    now=now,
+                    callback=lambda: order_service.reconcile_unresolved_intents(
+                        broker_account.external_account_id,
+                        mode=ExecutionMode.PAPER,
+                    ),
+                )
+
+                account_orders = orders.list_orders(external_account_id=broker_account.external_account_id)
+                has_working_orders = any(order.status in WORKING_ORDER_STATUSES for order in account_orders)
+                orders_interval = (
+                    self.settings.reconciliation_working_orders_interval_seconds
+                    if has_working_orders
+                    else self.settings.reconciliation_orders_interval_seconds
+                )
+                orders_due = self._is_due(
+                    broker_account.orders_last_sync_attempt_at,
+                    orders_interval,
+                    now,
+                )
+                orders_ready = (
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="orders-sync",
+                        task_label="order reconciliation",
+                        now=now,
+                        callback=lambda: order_service.sync_today_orders(
                             external_account_id=broker_account.external_account_id,
-                            spreads=spreads,
-                            strategy_service=strategy_service,
+                            mode=ExecutionMode.PAPER,
+                        ),
+                    )
+                    if orders_due
+                    else False
+                )
+
+                account_due = self._is_due(
+                    broker_account.account_last_sync_attempt_at,
+                    self.settings.reconciliation_account_interval_seconds,
+                    now,
+                )
+                account_ready = (
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="account-sync",
+                        task_label="account reconciliation",
+                        now=now,
+                        callback=lambda: account_service.sync_account(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                        ),
+                    )
+                    if account_due
+                    else False
+                )
+                trading_cycle_ready = (
+                    intent_ready
+                    and orders_ready
+                    and account_ready
+                    and not order_service.has_unresolved_intents(
+                        broker_account.external_account_id,
+                        mode=ExecutionMode.PAPER,
+                    )
+                )
+                same_day_option_entry_blocked = False
+                if account_ready:
+                    latest_snapshot = account_snapshots.get_latest_account_snapshot(
+                        broker_account.external_account_id
+                    )
+                    if isinstance(latest_snapshot, AccountSnapshot):
+                        same_day_option_entry_blocked = self._guard_same_day_option_positions(
+                            snapshot=latest_snapshot,
                             now=now,
                         )
-                    if self.settings.bull_put_strategy.auto_scan_enabled:
+                new_entry_cycle_ready = (
+                    trading_cycle_ready and not same_day_option_entry_blocked
+                )
+
+                bull_put_cycle_ready = trading_cycle_ready
+                if self.settings.bull_put_strategy.enabled and trading_cycle_ready:
+                    bull_put_cycle_ready = self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="bull-put-intent-linkage",
+                        task_label="bull put reconciled intent linkage",
+                        now=now,
+                        callback=lambda: strategy_service.relink_reconciled_order_intents(
+                            external_account_id=broker_account.external_account_id,
+                            mode=ExecutionMode.PAPER,
+                        ),
+                    )
+
+                if self.settings.bull_put_strategy.enabled:
+                    if self.settings.bull_put_strategy.auto_monitor_enabled:
+                        if bull_put_cycle_ready:
+                            self._monitor_due_spreads(
+                                external_account_id=broker_account.external_account_id,
+                                spreads=spreads,
+                                strategy_service=strategy_service,
+                                now=now,
+                            )
+                        else:
+                            self._emit_sync_blocked_spread_risk_alert(
+                                external_account_id=broker_account.external_account_id,
+                                spreads=spreads,
+                                now=now,
+                                intent_ready=intent_ready,
+                                orders_ready=orders_ready,
+                                account_ready=account_ready,
+                                linkage_ready=bull_put_cycle_ready,
+                            )
+                if self.settings.covered_call_strategy.enabled:
+                    if self.settings.covered_call_strategy.auto_lifecycle_enabled and trading_cycle_ready:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="covered-call-lifecycle",
+                            task_label="covered call lifecycle reconciliation",
+                            now=now,
+                            callback=lambda: self._reconcile_covered_call_lifecycle(
+                                external_account_id=broker_account.external_account_id,
+                                covered_call_service=covered_call_service,
+                                now=now,
+                            ),
+                        )
+                    if self.settings.covered_call_strategy.auto_monitor_enabled and trading_cycle_ready:
+                        self._run_account_task(
+                            external_account_id=broker_account.external_account_id,
+                            task_key="covered-call-monitor",
+                            task_label="covered call monitor",
+                            now=now,
+                            callback=lambda: self._monitor_covered_call_proposals(
+                                external_account_id=broker_account.external_account_id,
+                                experiments=experiments,
+                                covered_call_service=covered_call_service,
+                                now=now,
+                            ),
+                        )
+
+                # Every existing strategy lifecycle runs before any new-entry scan.
+                if self.settings.bull_put_strategy.enabled:
+                    if (
+                        self.settings.bull_put_strategy.auto_scan_enabled
+                        and bull_put_cycle_ready
+                        and new_entry_cycle_ready
+                    ):
                         self._run_account_task(
                             external_account_id=broker_account.external_account_id,
                             task_key="bull-put-scan",
@@ -223,6 +366,25 @@ class ReconciliationCoordinator:
                                 as_of=now,
                             ),
                         )
+                if (
+                    self.settings.covered_call_strategy.enabled
+                    and self.settings.covered_call_strategy.auto_propose_enabled
+                    and new_entry_cycle_ready
+                ):
+                    self._run_account_task(
+                        external_account_id=broker_account.external_account_id,
+                        task_key="covered-call-propose",
+                        task_label="covered call proposal scan",
+                        now=now,
+                        callback=lambda: self._run_covered_call_proposal_scan(
+                            external_account_id=broker_account.external_account_id,
+                            experiments=experiments,
+                            covered_call_service=covered_call_service,
+                            now=now,
+                        ),
+                    )
+
+                if self.settings.bull_put_strategy.enabled:
                     if self.settings.bull_put_strategy.auto_review_enabled:
                         self._run_account_task(
                             external_account_id=broker_account.external_account_id,
@@ -257,102 +419,77 @@ class ReconciliationCoordinator:
                         ),
                     )
 
-                if self.settings.covered_call_strategy.enabled:
-                    if self.settings.covered_call_strategy.auto_lifecycle_enabled:
-                        self._run_account_task(
-                            external_account_id=broker_account.external_account_id,
-                            task_key="covered-call-lifecycle",
-                            task_label="covered call lifecycle reconciliation",
-                            now=now,
-                            callback=lambda: self._reconcile_covered_call_lifecycle(
-                                external_account_id=broker_account.external_account_id,
-                                covered_call_service=covered_call_service,
-                                now=now,
-                            ),
-                        )
-                    if self.settings.covered_call_strategy.auto_propose_enabled:
-                        self._run_account_task(
-                            external_account_id=broker_account.external_account_id,
-                            task_key="covered-call-propose",
-                            task_label="covered call proposal scan",
-                            now=now,
-                            callback=lambda: self._run_covered_call_proposal_scan(
-                                external_account_id=broker_account.external_account_id,
-                                experiments=experiments,
-                                covered_call_service=covered_call_service,
-                                now=now,
-                            ),
-                        )
-                    if self.settings.covered_call_strategy.auto_monitor_enabled:
-                        self._run_account_task(
-                            external_account_id=broker_account.external_account_id,
-                            task_key="covered-call-monitor",
-                            task_label="covered call monitor",
-                            now=now,
-                            callback=lambda: self._monitor_covered_call_proposals(
-                                external_account_id=broker_account.external_account_id,
-                                experiments=experiments,
-                                covered_call_service=covered_call_service,
-                                now=now,
-                            ),
-                        )
-
-                if (
-                    self.settings.zero_dte_lottery_strategy.enabled
-                    and self.settings.zero_dte_lottery_strategy.auto_execute_enabled
-                ):
-                    self._run_account_task(
-                        external_account_id=broker_account.external_account_id,
-                        task_key="zero-dte-lottery-scan",
-                        task_label="zero-DTE lottery scan",
-                        now=now,
-                        callback=lambda: self._run_zero_dte_lottery_scan(
-                            external_account_id=broker_account.external_account_id,
-                            zero_dte_lottery_service=zero_dte_lottery_service,
-                            now=now,
-                        ),
+    def _guard_same_day_option_positions(
+        self,
+        *,
+        snapshot: AccountSnapshot,
+        now: datetime,
+    ) -> bool:
+        positions = same_day_expiring_option_positions(snapshot, as_of=now)
+        if not positions:
+            return False
+        warning_code = "same_day_option_position_requires_manual_action"
+        session_date = now.astimezone(ZoneInfo("America/New_York")).date()
+        position_fingerprint = "|".join(
+            sorted(
+                f"{position.symbol}:{position.quantity}:{parsed.expiration_date.isoformat()}"
+                for position, parsed in positions
+            )
+        )
+        already_emitted = False
+        if self._strategy_audit_events is not None:
+            try:
+                recent_events = self._strategy_audit_events.list_events(
+                        external_account_id=snapshot.account_id,
+                        mode=ExecutionMode.PAPER,
+                        warning_only=True,
+                        since=now - timedelta(days=2),
+                        limit=100,
                     )
-
-                account_due = self._is_due(
-                    broker_account.account_last_sync_attempt_at,
-                    self.settings.reconciliation_account_interval_seconds,
-                    now,
+                already_emitted = any(
+                    event.warning_code == warning_code
+                    and event.emitted_at.astimezone(ZoneInfo("America/New_York")).date()
+                    == session_date
+                    and event.payload.get("position_fingerprint") == position_fingerprint
+                    for event in recent_events
                 )
-                if account_due:
-                    self._run_account_task(
-                        external_account_id=broker_account.external_account_id,
-                        task_key="account-sync",
-                        task_label="account reconciliation",
-                        now=now,
-                        callback=lambda: account_service.sync_account(
-                            external_account_id=broker_account.external_account_id,
+            except Exception:
+                logger.exception("Could not check same-day option warning history.")
+            if not already_emitted:
+                try:
+                    self._strategy_audit_events.create_event(
+                        CreateStrategyAuditEventRequest(
+                            emitted_at=now,
+                            external_account_id=snapshot.account_id,
                             mode=ExecutionMode.PAPER,
-                        ),
+                            actor="reconciliation_scheduler",
+                            source="account_safety_gate",
+                            strategy="all_entry_strategies",
+                            action="same_day_option_position_blocked_entry",
+                            warning_code=warning_code,
+                            summary=(
+                                "Critical manual action required for a non-zero option position "
+                                "expiring today; all strategy entries are blocked."
+                            ),
+                            payload={
+                                "severity": "critical",
+                                "manual_action_required": True,
+                                "position_fingerprint": position_fingerprint,
+                                "positions": [
+                                    {
+                                        "symbol": position.symbol,
+                                        "quantity": str(position.quantity),
+                                        "expiration_date": parsed.expiration_date.isoformat(),
+                                        "right": parsed.right,
+                                    }
+                                    for position, parsed in positions
+                                ],
+                            },
+                        )
                     )
-
-                account_orders = orders.list_orders(external_account_id=broker_account.external_account_id)
-                has_working_orders = any(order.status in WORKING_ORDER_STATUSES for order in account_orders)
-                orders_interval = (
-                    self.settings.reconciliation_working_orders_interval_seconds
-                    if has_working_orders
-                    else self.settings.reconciliation_orders_interval_seconds
-                )
-                orders_due = self._is_due(
-                    broker_account.orders_last_sync_attempt_at,
-                    orders_interval,
-                    now,
-                )
-                if orders_due:
-                    self._run_account_task(
-                        external_account_id=broker_account.external_account_id,
-                        task_key="orders-sync",
-                        task_label="order reconciliation",
-                        now=now,
-                        callback=lambda: order_service.sync_today_orders(
-                            external_account_id=broker_account.external_account_id,
-                            mode=ExecutionMode.PAPER,
-                        ),
-                    )
+                except Exception:
+                    logger.exception("Could not persist the same-day option safety warning.")
+        return True
 
     def _run_account_task(
         self,
@@ -362,7 +499,7 @@ class ReconciliationCoordinator:
         task_label: str,
         now: datetime,
         callback: Callable[[], object],
-    ) -> None:
+    ) -> bool:
         if self._is_task_backoff_active(
             external_account_id=external_account_id,
             task_key=task_key,
@@ -389,7 +526,7 @@ class ReconciliationCoordinator:
                 ),
                 detail="Skipped because task backoff is active.",
             )
-            return
+            return False
         active_lease = self._try_acquire_task_lease(
             external_account_id=external_account_id,
             task_key=task_key,
@@ -414,7 +551,7 @@ class ReconciliationCoordinator:
                 },
                 update_task_state=False,
             )
-            return
+            return False
         try:
             result = callback()
         except Exception as exc:
@@ -446,7 +583,7 @@ class ReconciliationCoordinator:
                     delay_seconds,
                     exc,
                 )
-                return
+                return False
             self._clear_task_backoff(
                 external_account_id=external_account_id,
                 task_key=task_key,
@@ -467,7 +604,7 @@ class ReconciliationCoordinator:
                 task_label,
                 external_account_id,
             )
-            return
+            return False
         finally:
             self._release_task_lease(
                 external_account_id=external_account_id,
@@ -487,6 +624,7 @@ class ReconciliationCoordinator:
             completed_at=completed_at,
             raw_payload=self._scheduler_result_payload(result),
         )
+        return True
 
     def _monitor_due_spreads(
         self,
@@ -561,6 +699,58 @@ class ReconciliationCoordinator:
                 external_account_id=external_account_id,
                 task_key=task_key,
             )
+
+    def _emit_sync_blocked_spread_risk_alert(
+        self,
+        *,
+        external_account_id: str,
+        spreads: SQLAlchemyBullPutSpreadRepository,
+        now: datetime,
+        intent_ready: bool,
+        orders_ready: bool,
+        account_ready: bool,
+        linkage_ready: bool,
+    ) -> None:
+        if self._strategy_audit_events is None:
+            return
+        try:
+            active_spreads = []
+            for status in MONITORABLE_SPREAD_STATUSES:
+                active_spreads.extend(
+                    spreads.list_spreads(
+                        external_account_id=external_account_id,
+                        status=status,
+                    )
+                )
+            if not active_spreads:
+                return
+            self._strategy_audit_events.create_event(
+                CreateStrategyAuditEventRequest(
+                    emitted_at=now,
+                    external_account_id=external_account_id,
+                    mode=ExecutionMode.PAPER,
+                    actor="scheduler",
+                    source="scheduler",
+                    strategy=BullPutStrategyService.strategy_id,
+                    action="bull_put_monitor_blocked_sync",
+                    warning_code="bull_put_sync_incomplete_risk_alert",
+                    summary=(
+                        "Bull Put positions require attention, but lifecycle orders are blocked until "
+                        "intent, order, account synchronization, and reconciled-leg linkage all succeed "
+                        "in one cycle."
+                    ),
+                    detail="No monitor or broker exit mutation was executed in this cycle.",
+                    payload={
+                        "spread_ids": [spread.id for spread in active_spreads],
+                        "intent_ready": intent_ready,
+                        "orders_ready": orders_ready,
+                        "account_ready": account_ready,
+                        "linkage_ready": linkage_ready,
+                    },
+                )
+            )
+        except Exception as exc:
+            logger.debug("Failed to emit sync-blocked Bull Put risk alert: %s", exc)
 
     def _monitor_due_spreads_unlocked(
         self,
@@ -1123,7 +1313,6 @@ class ReconciliationCoordinator:
         if last_attempt_at is None:
             return True
         return (now - last_attempt_at).total_seconds() >= interval_seconds
-
 
 def parse_config_symbols(value: str) -> list[str]:
     return [symbol.strip().upper() for symbol in value.split(",") if symbol.strip()]

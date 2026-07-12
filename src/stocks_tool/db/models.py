@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -238,8 +239,111 @@ class PositionSnapshotRecord(Base):
     account_snapshot: Mapped[AccountSnapshotRecord] = relationship(back_populates="positions")
 
 
+class TradeActionIntentRecord(TimestampMixin, Base):
+    __tablename__ = "trade_action_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_account_id",
+            "execution_mode",
+            "idempotency_key",
+            name="uq_trade_action_intents_account_mode_key",
+        ),
+        CheckConstraint(
+            "state IN ('prepared', 'submitting', 'broker_acknowledged', 'persisted', "
+            "'rejected', 'unknown', 'resolved_no_order')",
+            name="ck_trade_action_intents_state",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    action: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    strategy_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    response_payload: Mapped[dict | None] = mapped_column(JSONB)
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+
+
+class OrderIntentRecord(TimestampMixin, Base):
+    __tablename__ = "order_intents"
+    __table_args__ = (
+        UniqueConstraint(
+            "external_account_id",
+            "execution_mode",
+            "idempotency_key",
+            name="uq_order_intents_account_mode_key",
+        ),
+        CheckConstraint(
+            "state IN ('prepared', 'submitting', 'broker_acknowledged', 'persisted', "
+            "'rejected', 'unknown', 'resolved_no_order')",
+            name="ck_order_intents_state",
+        ),
+        CheckConstraint(
+            "operation IN ('submit', 'cancel', 'replace')",
+            name="ck_order_intents_operation",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    trade_action_intent_id: Mapped[str] = mapped_column(
+        ForeignKey("trade_action_intents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    broker_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey("broker_accounts.id", ondelete="SET NULL"),
+        index=True,
+    )
+    target_order_id: Mapped[str | None] = mapped_column(
+        ForeignKey("orders.id", ondelete="SET NULL", use_alter=True),
+        index=True,
+    )
+    external_account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    broker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    execution_mode: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    strategy_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    entity_id: Mapped[str | None] = mapped_column(String(96), index=True)
+    leg: Mapped[str | None] = mapped_column(String(64), index=True)
+    broker_marker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    external_order_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    request_payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    response_payload: Mapped[dict | None] = mapped_column(JSONB)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    reconciliation_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    first_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+    broker_account: Mapped[BrokerAccountRecord | None] = relationship()
+    trade_action: Mapped[TradeActionIntentRecord] = relationship()
+
+
 class OrderRecord(TimestampMixin, Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "broker",
+            "execution_mode",
+            "external_order_id",
+            name="uq_orders_broker_mode_external_order_id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     broker_account_id: Mapped[str | None] = mapped_column(
@@ -253,6 +357,11 @@ class OrderRecord(TimestampMixin, Base):
     broker: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     external_order_id: Mapped[str | None] = mapped_column(String(128), index=True)
     client_order_id: Mapped[str | None] = mapped_column(String(128), unique=True)
+    order_intent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("order_intents.id", ondelete="SET NULL", use_alter=True),
+        unique=True,
+        index=True,
+    )
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     asset_type: Mapped[str | None] = mapped_column(String(16))
     side: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -263,6 +372,8 @@ class OrderRecord(TimestampMixin, Base):
     limit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     stop_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True, default="created", server_default="created")
+    executed_quantity: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    executed_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
     option_underlying_symbol: Mapped[str | None] = mapped_column(String(32))
     option_expiration_date: Mapped[date | None] = mapped_column(Date)
     option_strike: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
@@ -272,6 +383,7 @@ class OrderRecord(TimestampMixin, Base):
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
     trade_plan: Mapped[TradePlanRecord | None] = relationship()
+    order_intent: Mapped[OrderIntentRecord | None] = relationship(foreign_keys=[order_intent_id])
     executions: Mapped[list["ExecutionRecord"]] = relationship(
         back_populates="order",
         cascade="all, delete-orphan",
@@ -328,6 +440,7 @@ class BullPutSpreadRecord(TimestampMixin, Base):
     short_symbol: Mapped[str] = mapped_column(String(32), nullable=False)
     short_strike: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     long_entry_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
     short_entry_order_id: Mapped[str | None] = mapped_column(String(36), index=True)
     long_exit_order_id: Mapped[str | None] = mapped_column(String(36), index=True)

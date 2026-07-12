@@ -73,7 +73,7 @@ The codebase should converge toward these bounded contexts:
 | Strategy Runtime | common controls, scheduler state, lifecycle checks, unattended validation | scheduler, controls, lifecycle event model |
 | Bull Put | candidate selection, entry, monitor, close, review, pre-open board | bull put modules |
 | Covered Call | preview, proposal, execute, monitor, roll, close, lifecycle | covered call modules |
-| Zero-DTE Lottery | preview, controlled paper execution, scan runtime | zero-DTE modules |
+| Zero-DTE Lottery | preview and hard execution lock pending expiration lifecycle | zero-DTE modules |
 | Advisor | DeepSeek context, runs, audit, record output | advisor adapter, advisor intake, experiment ledger |
 | Dashboard | user-facing workbench and API view models | static modules and API summary endpoints |
 | Regression/Ops | scripts, artifacts, smoke checks, unattended status | `scripts/`, `artifacts/`, ops docs |

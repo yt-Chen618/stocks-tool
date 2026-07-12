@@ -29,6 +29,22 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
             return None
         return self._to_domain(record)
 
+    def lock_for_entry(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str = "paper_bull_put_v1",
+    ) -> BullPutStrategyRuntimeState | None:
+        record = self.session.execute(
+            select(BullPutStrategyRuntimeRecord)
+            .where(
+                BullPutStrategyRuntimeRecord.external_account_id == external_account_id,
+                BullPutStrategyRuntimeRecord.strategy_id == strategy_id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        return self._to_domain(record) if record is not None else None
+
     def upsert_runtime_state(
         self,
         state: BullPutStrategyRuntimeState,

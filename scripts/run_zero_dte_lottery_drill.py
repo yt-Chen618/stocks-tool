@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -26,7 +27,7 @@ class ZeroDteHttpError(ZeroDteDrillError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run a controlled zero-DTE lottery paper drill against a local API session."
+        description="Run the preview-only zero-DTE lifecycle-lock drill against a local API session."
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="Local API base URL.")
     parser.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID, help="Paper broker account id.")
@@ -34,18 +35,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--direction", default="auto", help="auto, call, or put.")
     parser.add_argument("--mode", default="paper", help="Execution mode.")
     parser.add_argument("--as-of", default=None, help="Optional UTC timestamp, e.g. 2026-06-04T14:30:00Z.")
-    parser.add_argument("--force-scan", action="store_true", help="Call the force scan endpoint.")
+    parser.add_argument(
+        "--force-scan",
+        action="store_true",
+        help="Verify that the legacy force-scan endpoint is locked with the P0 lifecycle error.",
+    )
     parser.add_argument(
         "--confirm-paper-scan",
         action="store_true",
-        help="Required with --force-scan because a force scan can submit a paper option order.",
+        help="Required with --force-scan to acknowledge probing a broker-mutation-shaped endpoint.",
     )
     parser.add_argument(
         "--record-reconciled-ledger",
         action="store_true",
         help=(
-            "When an existing confirmed manual-scan paper order is reconciled, create missing local "
-            "strategy run/signal records. This does not submit broker orders."
+            "Deprecated compatibility flag. P0 never force-scans or repairs Zero-DTE execution "
+            "evidence through this drill."
         ),
     )
     parser.add_argument("--timeout-seconds", type=float, default=180.0, help="HTTP timeout.")
@@ -298,7 +303,11 @@ def summarize_drill(
     auto_state = "on" if runtime.get("auto_execute_enabled") is True else "off"
     scan_state = "not-called"
     if scan is not None:
-        scan_state = "executed" if scan.get("executed") is True else "skipped"
+        scan_state = (
+            "execution-disabled"
+            if scan.get("zero_dte_execution_disabled_verified") is True
+            else "unexpected-response"
+        )
     return (
         "Zero-DTE lottery drill completed. "
         f"preview={preview_state}, auto_execute={auto_state}, "
@@ -322,8 +331,11 @@ def main() -> None:
                 status="failed",
                 mode=args.mode,
                 target=base_url,
-                summary="Zero-DTE lottery force scan requires --confirm-paper-scan.",
-                error="--force-scan can submit a paper option order and must be explicitly confirmed.",
+                summary="Zero-DTE lifecycle-lock verification requires --confirm-paper-scan.",
+                error=(
+                    "--force-scan probes a broker-mutation-shaped endpoint and must be "
+                    "explicitly acknowledged, even though P0 keeps execution disabled."
+                ),
                 payload={
                     "account_id": args.account_id,
                     "symbol": args.symbol,
@@ -411,7 +423,6 @@ def main() -> None:
             if args.force_scan:
                 stage = "scan"
                 force_scan_called = True
-                broker_order_submit_attempted = None
                 scan_params = {
                     "symbol": args.symbol,
                     "direction": args.direction,
@@ -420,18 +431,50 @@ def main() -> None:
                 }
                 if args.as_of:
                     scan_params["as_of"] = args.as_of
-                scan = require_json(
-                    client.post(
-                        f"/strategies/zero-dte-lottery/runtime/{args.account_id}/scan",
-                        params=scan_params,
-                    )
+                key_seed = "|".join(
+                    [args.account_id, args.symbol, args.direction, args.mode, args.as_of or "current"]
                 )
-                broker_order_submit_attempted = scan.get("executed") is True if isinstance(scan, dict) else None
+                key_hash = hashlib.sha256(key_seed.encode("utf-8")).hexdigest()[:16]
+                idempotency_key = f"zero-dte-lock:{key_hash}"
+                response = client.post(
+                    f"/strategies/zero-dte-lottery/runtime/{args.account_id}/scan",
+                    params=scan_params,
+                    headers={
+                        "Idempotency-Key": idempotency_key,
+                        "X-Confirm-Paper-Order": "true",
+                    },
+                )
+                try:
+                    disabled_payload = response.json()
+                except json.JSONDecodeError as exc:
+                    raise ZeroDteDrillError(
+                        "Zero-DTE force-scan lock returned a non-JSON response."
+                    ) from exc
+                disabled_detail = (
+                    disabled_payload.get("detail")
+                    if isinstance(disabled_payload, dict)
+                    else None
+                )
+                disabled_code = (
+                    disabled_detail.get("code")
+                    if isinstance(disabled_detail, dict)
+                    else None
+                )
+                if response.status_code != 409 or disabled_code != (
+                    "zero_dte_execution_disabled_pending_lifecycle"
+                ):
+                    raise ZeroDteDrillError(
+                        "Zero-DTE force-scan endpoint did not prove the required P0 lifecycle lock: "
+                        f"status={response.status_code}, code={disabled_code!r}."
+                    )
+                scan = {
+                    "zero_dte_execution_disabled_verified": True,
+                    "status_code": response.status_code,
+                    "detail": disabled_detail,
+                }
 
             premium = candidate_premium(preview)
             strategy_recording_verified = None
-            if isinstance(scan, dict) and args.force_scan:
-                strategy_recording_verified = scan.get("run") is not None and scan.get("signal") is not None
             emit_report(
                 build_report(
                     script="run_zero_dte_lottery_drill.py",
@@ -462,8 +505,12 @@ def main() -> None:
                         "force_scan_requested": args.force_scan,
                         "confirm_paper_scan": args.confirm_paper_scan,
                         "force_scan_called": force_scan_called,
-                        "scan_executed": scan.get("executed") is True if isinstance(scan, dict) else False,
-                        "broker_order_submit_allowed": args.force_scan and args.confirm_paper_scan,
+                        "scan_executed": False,
+                        "zero_dte_execution_disabled_verified": bool(
+                            isinstance(scan, dict)
+                            and scan.get("zero_dte_execution_disabled_verified") is True
+                        ),
+                        "broker_order_submit_allowed": False,
                         "broker_order_submit_attempted": broker_order_submit_attempted,
                         "failure_stage": None,
                         "strategy_recording_verified": strategy_recording_verified,
@@ -472,73 +519,6 @@ def main() -> None:
                 json_output=json_output,
             )
         except Exception as error:
-            if args.force_scan and args.confirm_paper_scan:
-                try:
-                    existing_order = find_existing_force_scan_order(
-                        client,
-                        account_id=args.account_id,
-                        symbol=args.symbol,
-                        premium_cap=(runtime or {}).get("max_premium_per_trade"),
-                    )
-                except Exception:
-                    existing_order = None
-                if existing_order is not None:
-                    recording = ensure_reconciled_strategy_recording(
-                        client,
-                        account_id=args.account_id,
-                        mode=args.mode,
-                        symbol=args.symbol,
-                        order=existing_order,
-                        repair_missing_ledger=args.record_reconciled_ledger,
-                    )
-                    status = "passed" if recording["verified"] else "warning"
-                    summary = (
-                        "Zero-DTE confirmed force-scan evidence reconciled from an existing "
-                        "same-session paper manual-scan order."
-                    )
-                    if not recording["verified"]:
-                        summary += " Strategy run/signal recording is still missing."
-                    emit_report(
-                        build_report(
-                            script="run_zero_dte_lottery_drill.py",
-                            workflow="zero-dte-lottery-drill",
-                            status=status,
-                            mode=args.mode,
-                            target=base_url,
-                            summary=summary,
-                            error=str(error),
-                            payload={
-                                "health": health,
-                                "account_id": args.account_id,
-                                "symbol": args.symbol,
-                                "direction": args.direction,
-                                "runtime": runtime,
-                                "preview": None,
-                                "scan": None,
-                                "preview_eligible": None,
-                                "preview_reason": None,
-                                "candidate_premium_at_ask": None,
-                                "premium_cap": (runtime or {}).get("max_premium_per_trade"),
-                                "max_trades_per_day": (runtime or {}).get("max_trades_per_day"),
-                                "auto_execute_enabled": (runtime or {}).get("auto_execute_enabled"),
-                                "force_scan_requested": args.force_scan,
-                                "confirm_paper_scan": args.confirm_paper_scan,
-                                "force_scan_called": force_scan_called,
-                                "force_scan_evidence_reconciled": True,
-                                "scan_executed": True,
-                                "broker_order_submit_allowed": True,
-                                "broker_order_submit_attempted": True,
-                                "failure_stage": stage,
-                                "reconciled_order": existing_order,
-                                "ledger_repair_requested": args.record_reconciled_ledger,
-                                "ledger_repair": recording["repair"],
-                                "strategy_recording": recording["after"],
-                                "strategy_recording_verified": recording["verified"],
-                            },
-                        ),
-                        json_output=json_output,
-                    )
-                    return
             emit_report(
                 build_report(
                     script="run_zero_dte_lottery_drill.py",
@@ -554,7 +534,7 @@ def main() -> None:
                         "force_scan_requested": args.force_scan,
                         "confirm_paper_scan": args.confirm_paper_scan,
                         "force_scan_called": force_scan_called,
-                        "broker_order_submit_allowed": args.force_scan and args.confirm_paper_scan,
+                        "broker_order_submit_allowed": False,
                         "broker_order_submit_attempted": broker_order_submit_attempted,
                         "failure_stage": stage,
                         "strategy_recording_verified": False,

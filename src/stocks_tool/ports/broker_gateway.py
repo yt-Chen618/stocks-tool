@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
@@ -20,6 +20,14 @@ from stocks_tool.domain.models import (
 
 @runtime_checkable
 class BrokerMarketDataGateway(Protocol):
+    def get_us_market_calendar(
+        self,
+        local_date: date,
+        mode: ExecutionMode,
+    ) -> tuple[bool, bool]:
+        """Return (is_trading_day, is_half_trading_day) from the broker calendar."""
+        ...
+
     def get_quote(self, symbol: str, mode: ExecutionMode) -> SecurityQuoteSnapshot:
         ...
 
@@ -71,6 +79,16 @@ class BrokerOrderGateway(Protocol):
         *,
         symbol: str | None = None,
         external_order_id: str | None = None,
+    ) -> list[BrokerOrderSnapshot]:
+        ...
+
+    def list_history_orders(
+        self,
+        mode: ExecutionMode,
+        *,
+        symbol: str | None = None,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
     ) -> list[BrokerOrderSnapshot]:
         ...
 

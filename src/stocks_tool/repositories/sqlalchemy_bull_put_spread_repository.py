@@ -7,7 +7,7 @@ from stocks_tool.application.services.strategy_lifecycle import bull_put_lifecyc
 from stocks_tool.db.models import BrokerAccountRecord, BullPutSpreadRecord
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, SpreadStatus
 from stocks_tool.domain.models import BullPutSpread
-from stocks_tool.ports.repository import BullPutSpreadRepository
+from stocks_tool.ports.repository import BullPutSpreadRepository, ConcurrentSpreadUpdateError
 
 
 class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
@@ -18,6 +18,7 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         record = BullPutSpreadRecord(id=spread.id)
         self.session.add(record)
         self._apply_spread(record, spread)
+        record.version = spread.version
         self.session.commit()
         self.session.refresh(record)
         return self._to_domain(record)
@@ -41,11 +42,25 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
 
-    def update_spread(self, spread: BullPutSpread) -> BullPutSpread:
-        record = self.session.get(BullPutSpreadRecord, spread.id)
+    def update_spread(
+        self,
+        spread: BullPutSpread,
+        *,
+        expected_version: int | None = None,
+    ) -> BullPutSpread:
+        query = select(BullPutSpreadRecord).where(BullPutSpreadRecord.id == spread.id)
+        if expected_version is not None:
+            query = query.where(BullPutSpreadRecord.version == expected_version)
+        record = self.session.execute(query.with_for_update()).scalar_one_or_none()
         if record is None:
+            if expected_version is not None and self.session.get(BullPutSpreadRecord, spread.id) is not None:
+                raise ConcurrentSpreadUpdateError(
+                    f"Bull put spread '{spread.id}' changed from expected version {expected_version}."
+                )
             raise ValueError(f"Bull put spread '{spread.id}' was not found.")
+        next_version = record.version + 1
         self._apply_spread(record, spread)
+        record.version = next_version
         self.session.commit()
         return self.get_spread(record.id) or self._to_domain(record)
 
@@ -124,6 +139,7 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
             short_symbol=record.short_symbol,
             short_strike=Decimal(record.short_strike),
             status=SpreadStatus(record.status),
+            version=record.version or 0,
             long_entry_order_id=record.long_entry_order_id,
             short_entry_order_id=record.short_entry_order_id,
             long_exit_order_id=record.long_exit_order_id,

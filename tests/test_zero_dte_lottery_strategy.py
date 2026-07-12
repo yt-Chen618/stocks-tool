@@ -4,6 +4,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from stocks_tool.application.services.zero_dte_lottery_strategy import (
+    ZeroDteExecutionDisabledError,
     ZeroDteLotteryStrategyService,
 )
 from stocks_tool.core.config import Settings
@@ -15,8 +16,6 @@ from stocks_tool.domain.enums import (
     OrderSide,
     OrderStatus,
     OrderType,
-    StrategyRunStatus,
-    StrategySignalType,
     TimeInForce,
 )
 from stocks_tool.domain.models import (
@@ -342,101 +341,9 @@ def test_preview_skips_auto_direction_when_underlying_signal_is_unclear() -> Non
     assert adapter.list_option_chain_called is False
 
 
-def test_execute_submits_paper_buy_limit_order_from_preview_candidate() -> None:
+def test_execute_is_disabled_before_order_submission() -> None:
     order_service = FakeOrderService()
     service = build_service(order_service=order_service)
-
-    result = service.execute(
-        ExecuteZeroDteLotteryRequest(
-            external_account_id="LBPT10087357",
-            symbol="QQQ.US",
-            direction="auto",
-            mode=ExecutionMode.PAPER,
-            as_of=NOW,
-            confirm_paper_order=True,
-        )
-    )
-
-    assert result.preview.eligible is True
-    assert result.order.symbol == "QQQ260604C736000.US"
-    assert order_service.submitted_request is not None
-    assert order_service.submitted_request.asset_type == AssetType.OPTION
-    assert order_service.submitted_request.side == OrderSide.BUY
-    assert order_service.submitted_request.quantity == 1
-    assert order_service.submitted_request.limit_price == Decimal("1.45")
-    assert order_service.submitted_request.remark == "zero_dte_lottery_v1"
-    assert order_service.submitted_request.option_contract is not None
-    assert order_service.submitted_request.option_contract.right == OptionRight.CALL
-
-
-def test_execute_rejects_live_mode() -> None:
-    service = build_service(order_service=FakeOrderService())
-
-    try:
-        service.execute(
-            ExecuteZeroDteLotteryRequest(
-                external_account_id="LBPT10087357",
-                symbol="QQQ.US",
-                direction="call",
-                mode=ExecutionMode.LIVE,
-                as_of=NOW,
-                confirm_paper_order=True,
-            )
-        )
-    except ValueError as exc:
-        assert "paper-only" in str(exc)
-    else:
-        raise AssertionError("Expected live zero-DTE lottery execution to be rejected.")
-
-
-def test_execute_requires_explicit_paper_order_confirmation() -> None:
-    service = build_service(order_service=FakeOrderService())
-
-    try:
-        service.execute(
-            ExecuteZeroDteLotteryRequest(
-                external_account_id="LBPT10087357",
-                symbol="QQQ.US",
-                direction="call",
-                mode=ExecutionMode.PAPER,
-                as_of=NOW,
-            )
-        )
-    except ValueError as exc:
-        assert "confirm_paper_order=true" in str(exc)
-    else:
-        raise AssertionError("Expected unconfirmed zero-DTE lottery execution to be rejected.")
-
-
-def test_execute_rejects_manual_limit_price_above_premium_cap() -> None:
-    order_service = FakeOrderService()
-    service = build_service(order_service=order_service)
-
-    try:
-        service.execute(
-            ExecuteZeroDteLotteryRequest(
-                external_account_id="LBPT10087357",
-                symbol="QQQ.US",
-                direction="call",
-                mode=ExecutionMode.PAPER,
-                as_of=NOW,
-                limit_price=Decimal("1.51"),
-                confirm_paper_order=True,
-            )
-        )
-    except ValueError as exc:
-        assert "$150 premium cap" in str(exc)
-    else:
-        raise AssertionError("Expected manual zero-DTE lottery limit above the premium cap to be rejected.")
-
-    assert order_service.submitted_request is None
-
-
-def test_execute_rejects_ineligible_preview() -> None:
-    adapter = FakeLongbridgeAdapter(
-        quote=build_underlying_quote(last_done=Decimal("735.10"), prev_close=Decimal("735")),
-    )
-    service = build_service(adapter=adapter, order_service=FakeOrderService())
 
     try:
         service.execute(
@@ -449,51 +356,30 @@ def test_execute_rejects_ineligible_preview() -> None:
                 confirm_paper_order=True,
             )
         )
-    except ValueError as exc:
-        assert "auto direction is unclear" in str(exc)
+    except ZeroDteExecutionDisabledError as exc:
+        assert exc.code == "zero_dte_execution_disabled_pending_lifecycle"
     else:
-        raise AssertionError("Expected ineligible zero-DTE lottery preview to block execution.")
+        raise AssertionError("Expected zero-DTE execution to remain disabled.")
+
+    assert order_service.submitted_request is None
 
 
-def test_execute_enforces_one_lottery_trade_per_day() -> None:
-    existing_order = build_order(
-        raw_payload={"submission_request": {"remark": "zero_dte_lottery_v1"}},
-    )
-    service = build_service(order_service=FakeOrderService(existing_orders=[existing_order]))
-
-    try:
-        service.execute(
-            ExecuteZeroDteLotteryRequest(
-                external_account_id="LBPT10087357",
-                symbol="QQQ.US",
-                direction="call",
-                mode=ExecutionMode.PAPER,
-                as_of=NOW,
-                confirm_paper_order=True,
-            )
-        )
-    except ValueError as exc:
-        assert "daily trade cap" in str(exc)
-    else:
-        raise AssertionError("Expected same-day zero-DTE lottery duplicate execution to be rejected.")
-
-
-def test_update_runtime_state_enables_paper_auto_ordering() -> None:
+def test_update_runtime_state_rejects_auto_ordering() -> None:
     settings = Settings()
     service = build_service(settings=settings)
 
-    result = service.update_runtime_state(
-        external_account_id="LBPT10087357",
-        mode=ExecutionMode.PAPER,
-        request=UpdateZeroDteLotteryRuntimeRequest(auto_execute_enabled=True),
-    )
+    try:
+        service.update_runtime_state(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            request=UpdateZeroDteLotteryRuntimeRequest(auto_execute_enabled=True),
+        )
+    except ZeroDteExecutionDisabledError:
+        pass
+    else:
+        raise AssertionError("Expected zero-DTE auto-ordering to remain disabled.")
 
-    assert result.auto_execute_enabled is True
-    assert settings.zero_dte_lottery_strategy.auto_execute_enabled is True
-    assert result.max_premium_per_trade == Decimal("150")
-    assert result.max_trades_per_day == 1
-    assert result.scan_window_start == "10:00 ET"
-    assert result.scan_window_end == "14:30 ET"
+    assert settings.zero_dte_lottery_strategy.auto_execute_enabled is False
 
 
 def test_update_runtime_state_rejects_live_auto_ordering() -> None:
@@ -527,59 +413,55 @@ def test_run_scan_skips_when_auto_execution_is_disabled() -> None:
     assert "auto-execution is disabled" in (result.reason or "")
 
 
-def test_run_scan_force_executes_and_records_run_and_signal() -> None:
+def test_run_scan_force_is_disabled_before_order_submission() -> None:
     experiments = FakeExperiments()
     order_service = FakeOrderService()
+    adapter = FakeLongbridgeAdapter()
     service = build_service(
+        adapter=adapter,
         order_service=order_service,
         experiments=experiments,
     )
 
-    result = service.run_scan(
-        external_account_id="LBPT10087357",
-        symbol="QQQ.US",
-        direction="auto",
-        mode=ExecutionMode.PAPER,
-        as_of=NOW,
-        force=True,
-    )
+    try:
+        service.run_scan(
+            external_account_id="LBPT10087357",
+            symbol="QQQ.US",
+            direction="auto",
+            mode=ExecutionMode.PAPER,
+            as_of=NOW,
+            force=True,
+        )
+    except ZeroDteExecutionDisabledError:
+        pass
+    else:
+        raise AssertionError("Expected force scan execution to remain disabled.")
 
-    assert result.executed is True
-    assert result.execution is not None
-    assert result.run is not None
-    assert result.run.status == StrategyRunStatus.EXECUTED
-    assert result.run.order_id == result.execution.order.id
-    assert result.signal is not None
-    assert result.signal.signal_type == StrategySignalType.EXECUTION
-    assert experiments.run_request is not None
-    assert experiments.run_request.strategy_id == "zero_dte_lottery_v1"
-    assert order_service.submitted_request is not None
+    assert order_service.submitted_request is None
+    assert experiments.run_request is None
+    assert adapter.list_option_chain_called is False
 
 
-def test_run_scan_records_skipped_run_for_ineligible_preview() -> None:
-    experiments = FakeExperiments()
-    adapter = FakeLongbridgeAdapter(
-        quote=build_underlying_quote(last_done=Decimal("735.10"), prev_close=Decimal("735")),
-    )
+def test_run_scan_rejects_enabled_auto_execution_before_market_data() -> None:
+    settings = Settings(zero_dte_lottery_strategy={"auto_execute_enabled": True})
+    adapter = FakeLongbridgeAdapter()
+    order_service = FakeOrderService()
     service = build_service(
         adapter=adapter,
-        order_service=FakeOrderService(),
-        experiments=experiments,
+        order_service=order_service,
+        settings=settings,
     )
 
-    result = service.run_scan(
-        external_account_id="LBPT10087357",
-        symbol="QQQ.US",
-        direction="auto",
-        mode=ExecutionMode.PAPER,
-        as_of=NOW,
-        force=True,
-    )
+    try:
+        service.run_scan(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            as_of=NOW,
+        )
+    except ZeroDteExecutionDisabledError:
+        pass
+    else:
+        raise AssertionError("Expected configured zero-DTE auto execution to remain disabled.")
 
-    assert result.executed is False
-    assert result.preview is not None
-    assert result.run is not None
-    assert result.run.status == StrategyRunStatus.SKIPPED
-    assert result.signal is not None
-    assert result.signal.signal_type == StrategySignalType.RISK_CHECK
-    assert "auto direction is unclear" in (result.reason or "")
+    assert adapter.list_option_chain_called is False
+    assert order_service.submitted_request is None

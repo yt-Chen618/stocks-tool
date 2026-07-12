@@ -2,10 +2,15 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeDependencyError
 from stocks_tool.api.dependencies import get_order_service
+from stocks_tool.application.services.orders import (
+    TradingIntentConflictError,
+    TradingIntentOutcomeUnknownError,
+)
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
@@ -63,6 +68,7 @@ def test_submit_order_returns_created_order() -> None:
     try:
         response = client.post(
             "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-0001"},
             json={
                 "external_account_id": "LBPT10087357",
                 "symbol": "UNH.US",
@@ -85,6 +91,137 @@ def test_submit_order_returns_created_order() -> None:
     request = service.submit_order.call_args.args[0]
     assert request.external_account_id == "LBPT10087357"
     assert request.order_type == OrderType.LIMIT
+    assert service.submit_order.call_args.kwargs["idempotency_key"] == "ui-order-submit-0001"
+
+
+def test_submit_order_requires_idempotency_key() -> None:
+    service = Mock()
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "mode": "paper",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 428
+    assert response.json()["detail"]["code"] == "idempotency_key_required"
+    service.submit_order.assert_not_called()
+
+
+def test_submit_order_rejects_invalid_idempotency_key() -> None:
+    service = Mock()
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            headers={"Idempotency-Key": "too short"},
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "mode": "paper",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "idempotency_key_invalid"
+    service.submit_order.assert_not_called()
+
+
+def test_submit_order_sets_replay_header_without_changing_body() -> None:
+    service = Mock()
+    service.submit_order.return_value = build_order().model_copy(
+        update={"idempotent_replayed": True}
+    )
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-0002"},
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "mode": "paper",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 201
+    assert response.headers["Idempotent-Replayed"] == "true"
+    assert "idempotent_replayed" not in response.json()
+
+
+def test_submit_order_maps_intent_conflict_to_structured_409() -> None:
+    service = Mock()
+    service.submit_order.side_effect = TradingIntentConflictError("intent-1")
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-0003"},
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "mode": "paper",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "idempotency_conflict",
+        "intent_id": "intent-1",
+        "retryable": False,
+    }
+
+
+def test_submit_order_maps_unknown_outcome_to_structured_409() -> None:
+    service = Mock()
+    service.submit_order.side_effect = TradingIntentOutcomeUnknownError("intent-2")
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-0004"},
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "market",
+                "mode": "paper",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "order_outcome_unknown",
+        "intent_id": "intent-2",
+        "retryable": False,
+    }
 
 
 def test_submit_order_maps_lookup_error_to_404() -> None:
@@ -95,6 +232,7 @@ def test_submit_order_maps_lookup_error_to_404() -> None:
     try:
         response = client.post(
             "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-0005"},
             json={
                 "external_account_id": "missing-account",
                 "symbol": "UNH.US",
@@ -120,6 +258,7 @@ def test_replace_order_maps_value_error_to_400() -> None:
     try:
         response = client.post(
             "/orders/order-123/replace",
+            headers={"Idempotency-Key": "ui-order-replace-0001"},
             json={
                 "quantity": 1,
                 "limit_price": None,
@@ -132,13 +271,37 @@ def test_replace_order_maps_value_error_to_400() -> None:
     assert response.json()["detail"] == "Replace limit price is required."
 
 
+@pytest.mark.parametrize("operation", ["cancel", "replace"])
+def test_existing_order_mutations_map_live_kill_switch_to_403(operation: str) -> None:
+    service = Mock()
+    getattr(service, f"{operation}_order").side_effect = PermissionError(
+        "Live trading is disabled."
+    )
+    client = with_order_service(service)
+    try:
+        kwargs = {
+            "headers": {"Idempotency-Key": f"ui-order-{operation}-live-0001"},
+        }
+        if operation == "replace":
+            kwargs["json"] = {"quantity": 1, "limit_price": "541.00"}
+        response = client.post(f"/orders/order-123/{operation}", **kwargs)
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Live trading is disabled."
+
+
 def test_cancel_order_maps_dependency_error_to_503() -> None:
     service = Mock()
     service.cancel_order.side_effect = LongbridgeDependencyError("Longbridge SDK is unavailable.")
 
     client = with_order_service(service)
     try:
-        response = client.post("/orders/order-123/cancel")
+        response = client.post(
+            "/orders/order-123/cancel",
+            headers={"Idempotency-Key": "ui-order-cancel-0001"},
+        )
     finally:
         clear_overrides()
 

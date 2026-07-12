@@ -30,6 +30,8 @@ This inventory groups public routes by bounded context. Paths are part of the co
 
 ## Orders, Executions, and Journals
 
+Every broker-mutation route requires a 16-128 character ASCII `Idempotency-Key` matching `[A-Za-z0-9._:-]`. This includes direct order submit/replace/cancel and Bull Put/Covered Call lifecycle writes. Missing keys return `428`; conflicting or unresolved keys return a structured `409`; completed replays preserve the original result and add `Idempotent-Replayed: true`.
+
 - `GET /orders`
 - `POST /orders/submit`
 - `POST /orders/{order_id}/refresh`
@@ -106,6 +108,8 @@ This inventory groups public routes by bounded context. Paths are part of the co
 
 ## Zero-DTE Lottery
 
+Only Preview is executable in P0. The execute route, `force=true` scan, and attempts to enable auto-order return `409 zero_dte_execution_disabled_pending_lifecycle` before reaching the order service.
+
 - `GET /strategies/zero-dte-lottery/preview`
 - `POST /strategies/zero-dte-lottery/execute`
 - `GET /strategies/zero-dte-lottery/runtime`
@@ -123,8 +127,14 @@ This inventory groups public routes by bounded context. Paths are part of the co
 
 - `GET /ops/unattended-status`
 - `GET /ops/reason-codes`
+- `GET /ops/market-data-runtime`
 - `GET /ops/scheduler`
 - `GET /ops/consistency`
 - `POST /ops/consistency/repairs/{repair_id}`
 - `GET /ops/audit`
 - `GET /ops/audit/summary`
+- `GET /ops/trading-intents`
+- `GET /ops/trading-intents/{intent_id}`
+- `POST /ops/trading-intents/{intent_id}/resolve-no-order`
+- `GET /ops/trade-actions`
+- `GET /ops/trade-actions/{action_intent_id}`

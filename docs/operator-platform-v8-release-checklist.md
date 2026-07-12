@@ -15,7 +15,7 @@ This checklist freezes the current paper-first operator-platform work into revie
    - zero-DTE manual-scan ledger consistency and local-only repair
    - covered-call order-linkage consistency warning
    - bull put close-order lifecycle warning drift report
-   - existing paper-only recover-close and zero-DTE force-scan guards remain unchanged
+   - paper-only recover-close remains guarded; Zero-DTE force scan is hard-disabled pending its expiration lifecycle
 
 3. `dashboard_mock_regression`
    - native dashboard Operator Console band with Ledger Consistency

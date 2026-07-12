@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_covered_call_strategy_service
+from stocks_tool.application.services.orders import TradingIntentOutcomeUnknownError
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
@@ -41,7 +42,10 @@ def clear_overrides() -> None:
 
 def with_covered_call_service(service: Mock) -> TestClient:
     app.dependency_overrides[get_covered_call_strategy_service] = lambda: service
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={"Idempotency-Key": "covered-call-test-key-0001"},
+    )
 
 
 def build_preview() -> CoveredCallPreviewResult:
@@ -205,6 +209,28 @@ def test_covered_call_execute_route_submits_approved_proposal() -> None:
     request = service.execute_approved_proposal.call_args.args[1]
     assert request.limit_price == Decimal("1.20")
     assert request.remark == "approved-test"
+
+
+def test_covered_call_execute_route_maps_unknown_intent_to_structured_409() -> None:
+    service = Mock()
+    service.execute_approved_proposal.side_effect = TradingIntentOutcomeUnknownError(
+        "covered-intent-unknown-1"
+    )
+    client = with_covered_call_service(service)
+    try:
+        response = client.post(
+            "/strategies/covered-call/proposals/proposal-1/execute",
+            json={"limit_price": "1.20", "remark": "approved-test"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "order_outcome_unknown",
+        "intent_id": "covered-intent-unknown-1",
+        "retryable": False,
+    }
 
 
 def test_covered_call_monitor_route_returns_management_guidance() -> None:
@@ -521,6 +547,7 @@ def test_covered_call_lifecycle_reconcile_route_returns_counts() -> None:
         "sell_orders_executed": 0,
         "roll_buyback_orders_refreshed": 0,
         "roll_sell_orders_submitted": 0,
+        "roll_sell_orders_waiting_confirmation": 0,
         "roll_sell_orders_refreshed": 0,
         "rolls_executed": 0,
     }

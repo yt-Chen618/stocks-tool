@@ -2,27 +2,118 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from stocks_tool.api.dependencies import get_operator_consistency_service, get_operator_status_service
+from stocks_tool.api.dependencies import (
+    get_longbridge_adapter,
+    get_operator_consistency_service,
+    get_operator_status_service,
+    get_order_service,
+)
+from stocks_tool.application.services.orders import OrderService
+from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.operator_status import OPERATOR_REASON_CODE_DETAILS, OperatorStatusService
-from stocks_tool.domain.enums import ExecutionMode
+from stocks_tool.domain.enums import ExecutionMode, TradingIntentState
 from stocks_tool.domain.models import (
     OperatorConsistencyRepairRequest,
     OperatorConsistencyRepairResult,
     OperatorConsistencySummary,
     OperatorStatusSnapshot,
+    MarketDataRuntimeSnapshot,
+    BrokerOrderIntent,
+    ResolveTradingIntentRequest,
     SchedulerStatusSnapshot,
     StrategyAuditEvent,
     StrategyAuditSummary,
+    TradeActionIntent,
 )
 
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
 
+@router.get("/trade-actions", response_model=list[TradeActionIntent])
+def list_trade_actions(
+    external_account_id: str | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
+    state: TradingIntentState | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    service: OrderService = Depends(get_order_service),
+) -> list[TradeActionIntent]:
+    return service.list_trade_actions(
+        external_account_id=external_account_id,
+        mode=mode,
+        state=state,
+        limit=limit,
+    )
+
+
+@router.get("/trade-actions/{action_intent_id}", response_model=TradeActionIntent)
+def get_trade_action(
+    action_intent_id: str,
+    service: OrderService = Depends(get_order_service),
+) -> TradeActionIntent:
+    action = service.get_trade_action(action_intent_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Trade action intent not found.")
+    return action
+
+
+@router.get("/trading-intents", response_model=list[BrokerOrderIntent])
+def list_trading_intents(
+    external_account_id: str | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
+    state: TradingIntentState | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    service: OrderService = Depends(get_order_service),
+) -> list[BrokerOrderIntent]:
+    return service.list_trading_intents(
+        external_account_id=external_account_id,
+        mode=mode,
+        state=state,
+        limit=limit,
+    )
+
+
+@router.get("/trading-intents/{intent_id}", response_model=BrokerOrderIntent)
+def get_trading_intent(
+    intent_id: str,
+    service: OrderService = Depends(get_order_service),
+) -> BrokerOrderIntent:
+    intent = service.get_trading_intent(intent_id)
+    if intent is None:
+        raise HTTPException(status_code=404, detail="Trading intent not found.")
+    return intent
+
+
+@router.post(
+    "/trading-intents/{intent_id}/resolve-no-order",
+    response_model=BrokerOrderIntent,
+)
+def resolve_trading_intent_no_order(
+    intent_id: str,
+    request: ResolveTradingIntentRequest,
+    service: OrderService = Depends(get_order_service),
+) -> BrokerOrderIntent:
+    try:
+        return service.resolve_trading_intent_no_order(intent_id, request)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/reason-codes", response_model=dict[str, str])
 def list_operator_reason_codes() -> dict[str, str]:
     return dict(sorted(OPERATOR_REASON_CODE_DETAILS.items()))
+
+
+@router.get("/market-data-runtime", response_model=MarketDataRuntimeSnapshot)
+def get_market_data_runtime(
+    adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
+) -> MarketDataRuntimeSnapshot:
+    return adapter.get_market_data_runtime_status()
 
 
 @router.get("/unattended-status", response_model=OperatorStatusSnapshot)

@@ -32,6 +32,8 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
     TimeInForce,
     TradeStructure,
+    TradingIntentState,
+    TradingOperation,
 )
 
 
@@ -274,6 +276,7 @@ class Order(BaseModel):
     trade_plan_id: str | None = None
     external_order_id: str | None = None
     client_order_id: str | None = None
+    order_intent_id: str | None = None
     symbol: str
     asset_type: AssetType | None = None
     side: OrderSide
@@ -282,6 +285,8 @@ class Order(BaseModel):
     time_in_force: TimeInForce
     mode: ExecutionMode
     status: OrderStatus
+    executed_quantity: int = 0
+    executed_price: Decimal | None = None
     limit_price: Decimal | None = None
     stop_price: Decimal | None = None
     option_contract: OptionContractRef | None = None
@@ -289,6 +294,7 @@ class Order(BaseModel):
     submitted_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    idempotent_replayed: bool = Field(default=False, exclude=True, repr=False)
 
 
 class BrokerOrderSnapshot(BaseModel):
@@ -304,6 +310,7 @@ class BrokerOrderSnapshot(BaseModel):
     stop_price: Decimal | None = None
     executed_quantity: int = 0
     executed_price: Decimal | None = None
+    remark: str | None = None
     submitted_at: datetime | None = None
     updated_at: datetime | None = None
     raw_payload: dict | None = None
@@ -435,6 +442,85 @@ class CreateStrategyRunRequest(BaseModel):
     reason: str | None = None
     metrics_payload: dict | None = None
     raw_payload: dict | None = None
+
+
+class TradingActionContext(BaseModel):
+    action: str = Field(min_length=1, max_length=96)
+    strategy_id: str | None = Field(default=None, max_length=64)
+    entity_id: str | None = Field(default=None, max_length=96)
+    leg: str | None = Field(default=None, max_length=64)
+
+
+class TradeActionIntent(BaseModel):
+    id: str
+    external_account_id: str
+    broker: BrokerName
+    mode: ExecutionMode
+    idempotency_key: str
+    request_hash: str
+    action: str
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    state: TradingIntentState
+    request_payload: dict
+    response_payload: dict | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PreparedTradeActionIntent(BaseModel):
+    intent: TradeActionIntent
+    created: bool
+
+
+class BrokerOrderIntent(BaseModel):
+    id: str
+    trade_action_intent_id: str
+    external_account_id: str
+    broker: BrokerName
+    mode: ExecutionMode
+    idempotency_key: str
+    request_hash: str
+    operation: TradingOperation
+    action: str
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    leg: str | None = None
+    broker_marker: str
+    state: TradingIntentState
+    external_order_id: str | None = None
+    target_order_id: str | None = None
+    request_payload: dict
+    response_payload: dict | None = None
+    last_error: str | None = None
+    reconciliation_attempts: int = 0
+    first_reconciled_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PreparedBrokerOrderIntent(BaseModel):
+    intent: BrokerOrderIntent
+    created: bool
+    replayed_order: Order | None = None
+
+
+class TradingIntentReconciliationResult(BaseModel):
+    external_account_id: str
+    mode: ExecutionMode
+    scanned_intents: int
+    resolved_intents: int
+    unresolved_intents: int
+    resolved_intent_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResolveTradingIntentRequest(BaseModel):
+    confirm_paper_resolution: bool = False
+    actor: str = Field(default="local_operator", min_length=1, max_length=80)
+    note: str | None = Field(default=None, max_length=500)
 
 
 class StrategyRun(BaseModel):
@@ -897,6 +983,34 @@ class BrokerConfigurationStatus(BaseModel):
     live_token_configured: bool
 
 
+class MarketDataOperationRuntime(BaseModel):
+    operation: str
+    request_count: int = 0
+    sdk_call_count: int = 0
+    cache_hit_count: int = 0
+    cache_miss_count: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    timeout_count: int = 0
+    last_latency_ms: float | None = None
+    max_latency_ms: float | None = None
+
+
+class MarketDataModeRuntime(BaseModel):
+    mode: ExecutionMode
+    context_initialized: bool
+    reference_cache_entries: int = 0
+    pending_requests: int = 0
+    max_pending_requests: int = 0
+    operations: list[MarketDataOperationRuntime] = Field(default_factory=list)
+
+
+class MarketDataRuntimeSnapshot(BaseModel):
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    closed: bool
+    sessions: list[MarketDataModeRuntime] = Field(default_factory=list)
+
+
 class WatchlistItem(BaseModel):
     id: str
     symbol: str
@@ -1334,6 +1448,7 @@ class ExecuteBullPutSpreadRequest(BaseModel):
     as_of: datetime | None = None
     candidate_token: str | None = Field(default=None, max_length=96)
     minimum_net_credit: Decimal | None = Field(default=None, gt=0)
+    confirm_paper_order: bool = False
     remark: str | None = Field(default=None, max_length=64)
 
 
@@ -1361,6 +1476,7 @@ class BullPutSpread(BaseModel):
     short_symbol: str
     short_strike: Decimal
     status: SpreadStatus
+    version: int = Field(default=0, ge=0)
     long_entry_order_id: str | None = None
     short_entry_order_id: str | None = None
     long_exit_order_id: str | None = None
@@ -1385,6 +1501,7 @@ class BullPutSpread(BaseModel):
     last_synced_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    idempotent_replayed: bool = Field(default=False, exclude=True, repr=False)
 
 
 class BullPutSpreadMonitorResult(BaseModel):
@@ -1445,6 +1562,7 @@ class BullPutStrategyScanRunResult(BaseModel):
     executed_spread: BullPutSpread | None = None
     previews: list[BullPutSpreadScanResult] = Field(default_factory=list)
     reason: str | None = None
+    idempotent_replayed: bool = Field(default=False, exclude=True, repr=False)
 
 
 class BullPutStrategyReviewResult(BaseModel):

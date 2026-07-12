@@ -9,6 +9,7 @@ from stocks_tool.adapters.brokers.longbridge import (
 )
 from stocks_tool.api.dependencies import get_zero_dte_lottery_strategy_service
 from stocks_tool.application.services.zero_dte_lottery_strategy import (
+    ZeroDteExecutionDisabledError,
     ZeroDteLotteryStrategyService,
 )
 from stocks_tool.domain.enums import ExecutionMode
@@ -22,6 +23,17 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter()
+ZERO_DTE_DISABLED_CODE = "zero_dte_execution_disabled_pending_lifecycle"
+
+
+def _raise_zero_dte_execution_disabled() -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": ZERO_DTE_DISABLED_CODE,
+            "message": "Zero-DTE execution is disabled until expiry and assignment handling is implemented.",
+        },
+    )
 
 
 @router.get("/zero-dte-lottery/preview", response_model=ZeroDteLotteryPreviewResult)
@@ -58,6 +70,7 @@ def execute_zero_dte_lottery(
     request: ExecuteZeroDteLotteryRequest,
     service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
 ) -> ZeroDteLotteryExecutionResult:
+    _raise_zero_dte_execution_disabled()
     try:
         return service.execute(request)
     except ValueError as exc:
@@ -96,6 +109,8 @@ def update_zero_dte_lottery_runtime(
     mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
 ) -> ZeroDteLotteryRuntimeState:
+    if request.auto_execute_enabled is True:
+        _raise_zero_dte_execution_disabled()
     try:
         return service.update_runtime_state(
             external_account_id=external_account_id,
@@ -118,6 +133,8 @@ def run_zero_dte_lottery_scan(
     as_of: datetime | None = Query(default=None),
     service: ZeroDteLotteryStrategyService = Depends(get_zero_dte_lottery_strategy_service),
 ) -> ZeroDteLotteryScanResult:
+    if force:
+        _raise_zero_dte_execution_disabled()
     try:
         return service.run_scan(
             external_account_id=external_account_id,
@@ -127,6 +144,8 @@ def run_zero_dte_lottery_scan(
             as_of=as_of,
             force=force,
         )
+    except ZeroDteExecutionDisabledError:
+        _raise_zero_dte_execution_disabled()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:

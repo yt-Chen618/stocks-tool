@@ -1,6 +1,6 @@
 # Runtime Operations
 
-Last updated: 2026-06-16
+Last updated: 2026-07-11
 
 ## Local Startup
 
@@ -18,6 +18,33 @@ Open:
 - Health: `http://127.0.0.1:8000/health`
 
 The canonical local paper account id is `LBPT10087357`.
+
+## P0 Migration and Release Procedure
+
+Keep `ALLOW_LIVE_TRADING=false` throughout the release. Before migration, stop the API/scheduler, activate the Bull Put entry kill switch, back up PostgreSQL, and run the duplicate external-order preflight:
+
+```powershell
+$stamp = Get-Date -Format yyyyMMdd-HHmmss
+New-Item -ItemType Directory -Force artifacts | Out-Null
+docker exec stocks-tool-postgres pg_dump -U postgres -Fc -f /tmp/stocks_tool_pre_p0.dump stocks_tool
+docker cp stocks-tool-postgres:/tmp/stocks_tool_pre_p0.dump "artifacts\stocks_tool_pre_p0_$stamp.dump"
+$env:ALLOW_LIVE_TRADING = "false"
+$env:BULL_PUT_STRATEGY__ENTRY_KILL_SWITCH_ACTIVE = "true"
+$env:RECONCILIATION_SCHEDULER_ENABLED = "false"
+.venv\Scripts\python.exe scripts\check_order_external_id_duplicates.py
+.venv\Scripts\alembic.exe upgrade head
+.venv\Scripts\python.exe scripts\check_alembic_head_current.py
+```
+
+Then run mock/fault/concurrency verification and a read-only account consistency check. The aggregate command is:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py p0-safety
+```
+
+The gate never authorizes a broker submit. Do not send even a paper order without a separate user approval. If approval is later granted, limit the canary to one Bull Put contract and keep the kill switch active until the complete entry, intent reconciliation, and exit loop has no unknown state.
+
+For rollback, stop the app and scheduler first. Preserve migration `20260711_0016` tables/columns and the intent history; do not downgrade or run an older build with broker writes enabled. An older application may be used only in read-only mode while the application rollback is investigated.
 
 ## Runtime Components
 
@@ -42,7 +69,7 @@ The scheduler is currently in-process. It handles:
 - Bull put entry scans only when runtime controls allow them.
 - Bull put periodic review generation.
 - Covered-call pending lifecycle reconciliation.
-- Zero-DTE lottery scans only when the paper auto-order switch is armed.
+- Zero-DTE lottery remains preview-only; scheduler and manual execution paths cannot be armed in P0.
 - Market-event provider imports where configured.
 
 The scheduler runs Longbridge/DB reconciliation through the in-process scheduler without introducing Celery, Redis, or a second service. The scheduler loop dispatches blocking `run_once` work off the FastAPI event loop, so API/dashboard requests should not wait behind broker sync calls. Durable strategy, order, execution, journal, scheduler job-run, scheduler task-state, audit, and advisor records remain in the database.
@@ -122,11 +149,9 @@ Use these read-only checks before leaving the local process running:
 
 Use `unattended-paper arm` to disable new bull put entries while leaving existing spread monitoring and lifecycle reconciliation active. Use `resume` only after intentionally restoring auto-entry posture.
 
-`zero-dte-lottery-drill` reads runtime and preview evidence only by default. It will not call the force-scan endpoint unless both `--force-scan` and `--confirm-paper-scan` are supplied, because a force scan can submit a paper option order when a candidate is eligible.
+`zero-dte-lottery-drill` reads runtime and preview evidence. With both legacy `--force-scan` and `--confirm-paper-scan` flags it only proves the stable `409 zero_dte_execution_disabled_pending_lifecycle` response; the script fixes broker submission permission and attempt flags to `false`.
 
-When a confirmed force scan has already produced a local paper manual-scan order but the HTTP scan response fails after submission, the zero-DTE drill can reconcile that existing order instead of attempting another order. The reconciliation path only accepts orders with the zero-DTE manual-scan remark, matching underlying symbol, paper mode, buy-option side, non-rejected status, and premium within the runtime cap. If the matching strategy run/signal rows are missing, repair them only with the explicit `--record-reconciled-ledger` flag; this writes local strategy ledger rows and does not submit broker orders.
-
-`60h-completion-audit` is intentionally strict. It reads JSON evidence under `artifacts/` and reports `incomplete` while any 60h-plan item is missing, weakly evidenced, or still requires an explicit paper-order drill such as confirmed zero-DTE force scan. A reconciled zero-DTE paper order counts only when the drill report is `passed`, `confirm_paper_scan=true`, the reconciled order satisfies the same local guard checks, and `strategy_recording_verified=true`.
+`60h-completion-audit` predates P0. Its historical confirmed-force-scan requirement is superseded and should remain incomplete until a later release implements the full Zero-DTE expiration lifecycle and replaces that evidence contract.
 
 ## Advisor Run Cards and Audit
 
@@ -153,6 +178,22 @@ Longbridge calls can submit paper orders through guarded routes and scripts. Dee
 Broker-facing code now has split gateway protocols for market data, orders, account/profile access, and composite integration use cases under `src\stocks_tool\ports\broker_gateway.py`. Application services depend on those protocols instead of the concrete Longbridge adapter; the concrete adapter is constructed at the FastAPI dependency boundary. Longbridge-specific exceptions can be mapped into a common failure taxonomy through `classify_broker_exception()` for configuration, dependency, timeout, circuit-open, rate-limit, stale-quote, broker-rejection, transient, and unknown failures.
 
 Longbridge quote reads expose cache fallback metadata only for read-only degraded rendering. When fallback is used, `SecurityQuoteSnapshot.data_quality` is `cached` and `warning_code` is `quote_cache_fallback`. Treat this as dashboard/readiness evidence only. Do not use cached quote evidence to justify paper order submission.
+
+The adapter keeps one lazy market-data `QuoteContext` per execution mode. Each context is created and used on its own single worker thread, with at most `LONGBRIDGE_MARKET_DATA_MAX_PENDING_REQUESTS` queued/in-flight calls (default `8`). Account and order work remains on the general SDK executor, so slow reconciliation cannot occupy the market-data owner thread. A timeout detaches the context and opens the market-data circuit; a later request reconnects after the circuit window instead of retrying the timed-out read automatically. Application shutdown closes and clears the cached adapter.
+
+Reference-data reads use the same owner thread as the SDK context and therefore coalesce concurrent identical requests without a second coordination layer. The cache covers US trading-calendar results, option expiry lists, option chains, and recent daily bars. It defaults to a 300-second TTL and 256-entry LRU bound through `LONGBRIDGE_REFERENCE_DATA_CACHE_TTL_SECONDS` and `LONGBRIDGE_REFERENCE_DATA_CACHE_MAX_ENTRIES`. Values are copied on storage and cache hits so a caller cannot mutate later responses. Security quotes, option market snapshots, and best bid/ask are outside this cache.
+
+Set `LONGBRIDGE_MARKET_DATA_PREWARM_ENABLED=true` to initialize the selected execution-mode context with the comma-separated `LONGBRIDGE_MARKET_DATA_PREWARM_SYMBOLS`. Prewarm starts after `LONGBRIDGE_MARKET_DATA_PREWARM_DELAY_SECONDS` (default `2`) so `/health` is available before the first Longbridge connection. It is read-only, optional, and fail-open for application availability; it does not bypass strategy quote authorization or permit order submission.
+
+Use `GET /ops/market-data-runtime` to inspect the local session without triggering a Longbridge connection. Metrics are grouped by mode and stable operation name rather than symbol. Each operation exposes request and SDK-call counts, reference-cache hits/misses, success/failure/timeout counts, and last/max latency; the session also exposes current and peak pending requests, reference-cache size, and whether its context is initialized. Export the same evidence with:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py market-data-runtime
+```
+
+The report is read-only and always records `broker_order_submit_allowed=false`, `local_repair_executed=false`, and `destructive_actions_executed=false`.
+
+Trade authorization uses stricter evidence than previews. Covered Call open and replacement roll-open require live underlying and selected-option snapshots no older than `COVERED_CALL_STRATEGY__TRADE_AUTHORIZATION_MAX_QUOTE_AGE_SECONDS` (default `15`), then recheck contract identity, liquidity, and covered shares. Bull Put locked execution likewise refreshes its underlying and both selected legs. Risk-reducing Covered Call buyback remains allowed before replacement-leg authorization; if refresh fails after the buyback fills, the roll stops at manual action instead of guessing a replacement order.
 
 ## Artifact Guidance
 

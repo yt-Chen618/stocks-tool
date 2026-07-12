@@ -44,19 +44,19 @@ Review focus:
 
 - Bull put spread lifecycle includes normalized monitor/close fields and paper-only recover-close eligibility/action.
 - Covered call lifecycle remains proposal-first with manual approval and optional reconcile/monitor paths.
-- Zero-DTE lottery remains a controlled paper drill: preview, confirmed force scan, paper execution, and explicit auto-order switch.
+- Zero-DTE lottery is preview-only; execute, force scan, and auto-enable are hard-locked pending the expiration lifecycle.
 - Advisor playbooks and run cards are static, read-only, and proposal/review-only.
 
 Review focus:
 
 - no live recovery or autonomous live trading path appears
 - advisor output cannot submit, cancel, replace, or recover broker orders
-- zero-DTE auto-execute remains disabled unless explicitly armed
+- Zero-DTE order-service call count remains zero for every execution-shaped entry point
 
 ## Slice D: Dashboard, Mock, and Regression Evidence
 
 - Native dashboard remains the only frontend stack.
-- Mock scenarios cover normal, degraded broker, paused mandate, advisor pending record, manual action required, scheduler backoff, and recover-close drill cases.
+- The 18-scenario mock matrix covers posture, recovery, partial/core API failure, mobile/desktop safety, duplicate submit, confirmation cancellation, and unknown-intent refresh locking.
 - Regression scripts share the JSON envelope and keep full generated evidence under `artifacts/`; V8 adds `consistency-report`, strict `paper-session-gate`, and `operator-platform-v8`.
 
 Review focus:

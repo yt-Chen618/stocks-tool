@@ -9,6 +9,8 @@ from stocks_tool.api.dependencies import (
     get_order_service,
     get_zero_dte_lottery_strategy_service,
 )
+from stocks_tool.application.services.bull_put_strategy import BullPutActionIdempotencyConflictError
+from stocks_tool.application.services.orders import TradingIntentOutcomeUnknownError
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
@@ -112,7 +114,13 @@ def test_strategy_openapi_keeps_legacy_route_inventory() -> None:
 
 def with_strategy_service(service: Mock) -> TestClient:
     app.dependency_overrides[get_bull_put_strategy_service] = lambda: service
-    return TestClient(app)
+    return TestClient(
+        app,
+        headers={
+            "Idempotency-Key": "bull-put-test-key-0001",
+            "X-Confirm-Paper-Order": "true",
+        },
+    )
 
 
 def clear_overrides() -> None:
@@ -465,7 +473,8 @@ def test_execute_bull_put_strategy_returns_spread() -> None:
             json={
                 "external_account_id": "LBPT10087357",
                 "symbol": "QQQ.US",
-                "mode": "paper",
+                    "mode": "paper",
+                    "confirm_paper_order": True,
                 "candidate_token": "locked-candidate",
                 "minimum_net_credit": "0.52",
                 "remark": "manual-check",
@@ -499,7 +508,8 @@ def test_execute_bull_put_strategy_maps_value_error_to_400() -> None:
             json={
                 "external_account_id": "LBPT10087357",
                 "symbol": "QQQ.US",
-                "mode": "paper",
+                    "mode": "paper",
+                    "confirm_paper_order": True,
             },
         )
     finally:
@@ -510,6 +520,55 @@ def test_execute_bull_put_strategy_maps_value_error_to_400() -> None:
         response.json()["detail"]
         == "An active bull put spread already exists for 'QQQ.US' in account 'LBPT10087357'."
     )
+
+
+def test_execute_bull_put_strategy_maps_idempotency_conflict_to_structured_409() -> None:
+    service = Mock()
+    service.execute_spread.side_effect = BullPutActionIdempotencyConflictError("conflict")
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/execute",
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "QQQ.US",
+                "mode": "paper",
+                "confirm_paper_order": True,
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "idempotency_conflict",
+        "retryable": False,
+    }
+
+
+def test_execute_bull_put_strategy_maps_unknown_intent_to_structured_409() -> None:
+    service = Mock()
+    service.execute_spread.side_effect = TradingIntentOutcomeUnknownError("intent-unknown-1")
+    client = with_strategy_service(service)
+    try:
+        response = client.post(
+            "/strategies/bull-put/execute",
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "QQQ.US",
+                "mode": "paper",
+                "confirm_paper_order": True,
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "order_outcome_unknown",
+        "intent_id": "intent-unknown-1",
+        "retryable": False,
+    }
 
 
 def test_recover_bull_put_close_route_returns_recovered_spread() -> None:
@@ -531,6 +590,7 @@ def test_recover_bull_put_close_route_returns_recovered_spread() -> None:
         short_exit_order_id="short-exit-replacement",
         latest_monitor_should_close=True,
         latest_close_order_status="submitted",
+        idempotent_replayed=True,
         created_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 22, 14, 46, tzinfo=timezone.utc),
     )
@@ -552,6 +612,7 @@ def test_recover_bull_put_close_route_returns_recovered_spread() -> None:
         clear_overrides()
 
     assert response.status_code == 200
+    assert response.headers["Idempotent-Replayed"] == "true"
     body = response.json()
     assert body["short_exit_order_id"] == "short-exit-replacement"
     request = service.recover_close.call_args.args[1]
@@ -560,6 +621,7 @@ def test_recover_bull_put_close_route_returns_recovered_spread() -> None:
     assert request.confirm_paper_order is True
     assert request.max_debit == Decimal("3.00")
     assert request.actor == "operator-a"
+    assert service.recover_close.call_args.kwargs["idempotency_key"] == "bull-put-test-key-0001"
 
 
 def test_recover_bull_put_close_route_maps_value_error_to_400() -> None:
@@ -787,7 +849,7 @@ def test_run_bull_put_runtime_scan_returns_scan_result() -> None:
     assert body["executed_spread"]["id"] == "spread-1"
 
 
-def test_run_zero_dte_lottery_scan_route_returns_executed_json() -> None:
+def test_run_zero_dte_lottery_force_scan_route_is_disabled() -> None:
     service = Mock()
     evaluated_at = datetime(2026, 6, 16, 15, 59, tzinfo=timezone.utc)
     candidate = ZeroDteLotteryCandidate(
@@ -901,12 +963,9 @@ def test_run_zero_dte_lottery_scan_route_returns_executed_json() -> None:
     finally:
         clear_overrides()
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["executed"] is True
-    assert body["execution"]["order"]["id"] == "zero-order-1"
-    assert body["run"]["order_id"] == "zero-order-1"
-    assert body["signal"]["signal_type"] == "execution"
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "zero_dte_execution_disabled_pending_lifecycle"
+    service.run_scan.assert_not_called()
 
 
 def test_run_bull_put_runtime_review_returns_review_result() -> None:
@@ -978,6 +1037,7 @@ def test_monitor_bull_put_strategy_returns_monitor_result() -> None:
         closed_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
         created_at=datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc),
         updated_at=datetime(2026, 5, 23, 14, 46, tzinfo=timezone.utc),
+        idempotent_replayed=True,
     )
     service.monitor_spread.return_value = BullPutSpreadMonitorResult(
         spread=spread,
@@ -997,7 +1057,9 @@ def test_monitor_bull_put_strategy_returns_monitor_result() -> None:
         clear_overrides()
 
     assert response.status_code == 200
+    assert response.headers["Idempotent-Replayed"] == "true"
     body = response.json()
     assert body["should_close"] is True
     assert body["exit_reason"] == "take_profit"
     assert body["spread"]["status"] == "closed"
+    assert service.monitor_spread.call_args.kwargs["idempotency_key"] == "bull-put-test-key-0001"

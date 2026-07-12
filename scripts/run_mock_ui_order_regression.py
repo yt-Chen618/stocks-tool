@@ -29,6 +29,11 @@ MOCK_SCENARIOS = (
     "repair-available",
     "quote-cache-fallback",
     "scheduler-lease-active",
+    "auxiliary-data-failure",
+    "core-data-failure",
+    "covered-call-data-failure",
+    "accounts-data-failure",
+    "unknown-intent",
 )
 
 
@@ -148,8 +153,8 @@ def resolve_playwright_core() -> str:
     )
 
 
-def run_browser_flow(base_url: str) -> dict[str, Any]:
-    screenshot_path = ROOT / "output" / "playwright" / "mock-ui-browser-regression.png"
+def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, Any]:
+    screenshot_path = ROOT / "output" / "playwright" / f"mock-ui-{scenario}-regression.png"
     playwright_core_path = resolve_playwright_core()
     node_command = shutil.which("node.exe") or shutil.which("node")
     if node_command is None:
@@ -161,6 +166,7 @@ def run_browser_flow(base_url: str) -> dict[str, Any]:
             base_url,
             str(screenshot_path),
             playwright_core_path,
+            scenario,
         ],
         cwd=ROOT,
         check=False,
@@ -306,6 +312,8 @@ def main() -> None:
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
             )
             if completed.returncode != 0:
                 detail = completed.stderr.strip() or completed.stdout.strip() or f"Scenario {scenario} failed."
@@ -337,6 +345,8 @@ def main() -> None:
         try:
             if args.scenario != "normal":
                 evidence = run_scenario_assertions(client, scenario=args.scenario)
+                browser = run_browser_flow(base_url, scenario=args.scenario)
+                assert browser["rendered"] is True
                 emit_report(
                     build_report(
                         script="run_mock_ui_order_regression.py",
@@ -345,7 +355,7 @@ def main() -> None:
                         mode="mock",
                         target=base_url,
                         summary=f"Mock dashboard posture scenario '{args.scenario}' passed.",
-                        payload={"scenario": args.scenario, "evidence": evidence},
+                        payload={"scenario": args.scenario, "evidence": evidence, "browser": browser},
                     ),
                     json_output=args.json_output,
                 )
@@ -365,7 +375,8 @@ def main() -> None:
             assert "Bull Put Strategy" in dashboard.text
             assert "Lottery Strategy" in dashboard.text
             assert "Preview Lottery" in dashboard.text
-            assert "Force Scan" in dashboard.text
+            assert "Preview Only" in dashboard.text
+            assert "Force Scan" not in dashboard.text
             assert "Latest Skip Reason" in dashboard.text
             assert "Latest Review" in dashboard.text
             assert "Bull Put Monitor" in dashboard.text
@@ -402,12 +413,14 @@ def main() -> None:
                 "strategy-controls-form",
                 "zero-dte-lottery-controls-form",
                 "previewZeroDteLottery()",
-                "runZeroDteLotteryScan()",
                 "zero-dte-lottery/runtime",
-                "runStrategyScan()",
+                "runConfirmedBrokerMutation(",
+                '"Idempotency-Key"',
+                "Promise.allSettled",
+                "runStrategyScan(",
                 "runStrategyReview()",
-                "saveStrategyControls()",
-                "reconcileCoveredCallLifecycle()",
+                "saveStrategyControls(",
+                "reconcileCoveredCallLifecycle(",
                 "covered-call/lifecycle",
                 "Refresh Lifecycle",
                 "renderCoveredCallLatestMonitor(",
@@ -417,9 +430,9 @@ def main() -> None:
                 "renderMarketEvents()",
                 "spread-summary-strip",
                 "spreads-body",
-                "submitOrder()",
+                "submitOrder(",
                 "submitJournalEntry()",
-                "replaceSelectedOrder()",
+                "replaceSelectedOrder(",
                 "renderSpreads()",
                 "monitorSpread(",
                 "recoverCloseSpread(",
@@ -427,7 +440,7 @@ def main() -> None:
                 "renderSelectedExecution()",
                 "renderSelectedJournal()",
             ):
-                assert marker in app_js.text
+                assert marker in app_js.text, f"Missing dashboard app marker: {marker}"
 
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
@@ -496,7 +509,7 @@ def main() -> None:
             assert any(event["action"] == "advisor_run_card_recorded" for event in audit_events)
             audit_summary = require_ok(client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"}))
             assert audit_summary["event_count"] >= 1
-            browser = run_browser_flow(base_url)
+            browser = run_browser_flow(base_url, scenario=args.scenario)
             assert browser["operator"]["rendered"] is True
             scenario_evidence = run_scenario_assertions(client, scenario=args.scenario)
 

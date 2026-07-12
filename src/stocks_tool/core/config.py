@@ -9,6 +9,7 @@ from stocks_tool.domain.enums import BrokerName, ExecutionMode
 
 class BullPutSpreadStrategySettings(BaseModel):
     enabled: bool = True
+    entry_kill_switch_active: bool = True
     auto_scan_enabled: bool = True
     auto_monitor_enabled: bool = True
     auto_review_enabled: bool = True
@@ -32,7 +33,7 @@ class BullPutSpreadStrategySettings(BaseModel):
     min_open_interest: int = Field(default=200, ge=1)
     min_short_leg_volume: int = Field(default=10, ge=0)
     min_long_leg_volume: int = Field(default=10, ge=0)
-    max_option_quote_age_seconds: int = Field(default=1800, ge=1)
+    max_option_quote_age_seconds: int = Field(default=15, ge=1)
     max_bid_ask_spread_pct: Decimal = Field(default=Decimal("0.10"), gt=0)
     preview_cache_ttl_seconds: int = Field(default=120, ge=0)
     min_credit_per_width_ratio: Decimal = Field(default=Decimal("0.18"), gt=0)
@@ -72,6 +73,8 @@ class BullPutSpreadStrategySettings(BaseModel):
     def validate_thresholds(self) -> "BullPutSpreadStrategySettings":
         if self.min_dte > self.max_dte:
             raise ValueError("Bull put spread min_dte must be less than or equal to max_dte.")
+        if self.contracts_per_trade != 1:
+            raise ValueError("Bull put spread P0 safety mode requires contracts_per_trade=1.")
         if (self.entry_session_end_hour_et, self.entry_session_end_minute_et) <= (
             self.entry_session_start_hour_et,
             self.entry_session_start_minute_et,
@@ -141,6 +144,7 @@ class CoveredCallStrategySettings(BaseModel):
     min_bid: Decimal = Field(default=Decimal("0.10"), gt=0)
     max_bid_ask_spread_pct: Decimal = Field(default=Decimal("0.15"), gt=0)
     max_option_quote_age_seconds: int = Field(default=1800, ge=1)
+    trade_authorization_max_quote_age_seconds: int = Field(default=15, ge=1)
     max_contracts_per_symbol: int = Field(default=1, ge=1)
     event_blackout_days: int = Field(default=7, ge=0)
 
@@ -251,6 +255,12 @@ class Settings(BaseSettings):
     longbridge_request_timeout_seconds: int = Field(default=20, ge=1)
     longbridge_circuit_breaker_seconds: int = 30
     longbridge_executor_max_workers: int = 2
+    longbridge_market_data_max_pending_requests: int = Field(default=8, ge=1, le=100)
+    longbridge_reference_data_cache_ttl_seconds: int = Field(default=300, ge=0, le=86400)
+    longbridge_reference_data_cache_max_entries: int = Field(default=256, ge=1, le=10000)
+    longbridge_market_data_prewarm_enabled: bool = False
+    longbridge_market_data_prewarm_symbols: str = "SPY.US,QQQ.US"
+    longbridge_market_data_prewarm_delay_seconds: int = Field(default=2, ge=0, le=60)
     bull_put_strategy: BullPutSpreadStrategySettings = Field(
         default_factory=BullPutSpreadStrategySettings
     )

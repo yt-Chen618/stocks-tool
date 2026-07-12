@@ -52,7 +52,7 @@ Swagger remains at `/docs`. The dashboard remains at `/`.
 | Strategy Runtime | shared controls, scheduler state, lifecycle checks | `application/services/reconciliation.py`, strategy services |
 | Bull Put | candidate scan, paper entry, monitor, close, review, pre-open board | `application/services/bull_put_strategy.py` |
 | Covered Call | preview, proposal, approval, open, monitor, roll, close | `application/services/covered_call_strategy.py` |
-| Zero-DTE Lottery | same-day long-option preview and paper execution guard | `application/services/zero_dte_lottery_strategy.py` |
+| Zero-DTE Lottery | same-day long-option preview and hard execution lock | `application/services/zero_dte_lottery_strategy.py` |
 | Advisor | DeepSeek dry-run, advisor context, audit, local intake | `application/services/strategy_experiments.py`, `strategy_advisor_intake.py` |
 | Broker Profile | broker capability, credential, and paper guard read model | `adapters/brokers/longbridge.py`, `api/routes/brokers.py` |
 | Operator Audit | cross-module explanation events and unattended posture | `application/services/operator_status.py`, `/ops/*` |
@@ -90,6 +90,12 @@ The project borrows three high-value patterns from Vibe-Trading while keeping th
 
 New audit events are forward-only rows in `strategy_audit_events` after migration `20260616_0014_strategy_audit_events.py`. Durable writes currently cover proposal approve/reject, advisor proposal/run record, paper order submit/refresh/cancel, scheduler lifecycle advance, and bull put recover-close submit/reject/complete actions. `/ops/audit` merges durable rows with older synthetic projections and exposes `event_origin=durable|synthetic` plus filters for account, mode, source, strategy, action, warning-only, since, and limit. `/ops/audit/summary` groups the same event stream by account, mode, source, action, strategy, warning code, and event origin for operator evidence exports.
 
+## Exact-Once Trading Intent Ledger
+
+Migration `20260711_0016` adds `trade_action_intents` for public/scheduler action idempotency and 1:N child `order_intents` for individual broker mutations. Standalone order actions still receive a one-child parent so all writes share the same recovery model. A broker call is made only after its child intent is durable. Unknown outcomes remain blocked and are reconciled from broker order history using the deterministic `st:<16-hex>` remark marker; callers must not retry with a new key. The trading-ledger module owns the local order, execution-summary, audit, and intent transaction so a local audit failure cannot be reported as a safe-to-retry broker failure.
+
+Public broker-mutation routes require `Idempotency-Key`. Replaying the same payload returns the original status/body; reusing a key for another payload or retrying an unresolved outcome returns a structured `409`. Read-only child intent state is exposed under `/ops/trading-intents`; parent multi-leg action state is exposed under `/ops/trade-actions`.
+
 ## Manual Recovery Boundary
 
 `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility` is the read-only recovery drill surface for the dashboard. `POST /strategies/bull-put/spreads/{spread_id}/recover-close` is the paper-only manual recovery action for a specific bull put close failure. It refuses live mode, missing confirmation, account mismatch, `should_close=false`, a nonfailed old short close order, and any existing working replacement. It can submit a replacement short-leg buy-to-close and then uses the existing long-leg close flow if the replacement fills. This is not autonomous live trading and does not recover open spreads whose latest monitor no longer requires a close.
@@ -112,7 +118,7 @@ Longbridge market-data reads keep a short in-process quote cache for degraded re
 - Paper mode is the default execution boundary.
 - Live order submission is blocked unless environment configuration explicitly enables it.
 - Bull put execution requires candidate locking and account/runtime caps.
-- Zero-DTE execution is paper-only, one contract, one trade per account/session, and capped by premium.
+- Zero-DTE is preview-only. Execute, force-scan, and auto-enable paths are blocked until the complete expiration lifecycle exists.
 - Covered-call broker order entry requires an approved local proposal and lifecycle reconciliation.
 - Advisor and DeepSeek flows remain read-only until a separate local record action is explicitly requested; recorded proposals still require deterministic policy checks and manual approval.
 - Operator posture is explained through `/ops/unattended-status`, including broker profiles, paper mandate state, audit summaries, consistency summaries, scheduler summaries, lifecycle warnings, `primary_blocker`, `local_repair_available`, `latest_evidence_at`, and a short `operator_posture_reason`.

@@ -10,6 +10,10 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert response.status_code == 200
     assert 'data-lang-option="zh"' in response.text
     assert 'data-lang-option="en"' in response.text
+    assert 'data-view-mode="focus"' in response.text
+    assert 'data-view-mode-option="focus"' in response.text
+    assert 'data-view-mode-option="all"' in response.text
+    assert response.text.count('data-view-priority="secondary"') >= 5
     assert "Auto Reconciliation" in response.text
     assert "Account Sync" in response.text
     assert "Orders Sync" in response.text
@@ -33,7 +37,8 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Bull Put Strategy" in response.text
     assert "Lottery Strategy" in response.text
     assert "Preview Lottery" in response.text
-    assert "Force Scan" in response.text
+    assert "Preview Only" in response.text
+    assert "Force Scan" not in response.text
     assert "Strategy Experiment Bench" in response.text
     assert "Market Event Calendar" in response.text
     assert "Strategy Proposals" in response.text
@@ -49,7 +54,7 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Entry Status" in response.text
     assert "Next Action" in response.text
     assert "Latest Skip Reason" in response.text
-    assert "Run Scan" in response.text
+    assert "Execute Preview" in response.text
     assert "Run Review" in response.text
     assert "Latest Review" in response.text
     assert "Bull Put Monitor" in response.text
@@ -59,6 +64,12 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert "Last Monitor" in response.text
     assert "Orders" in response.text
     assert "Positions" in response.text
+    assert 'id="trade-confirm-dialog"' in response.text
+    assert 'id="trade-confirm-details"' in response.text
+    assert 'id="trade-confirm-accept"' in response.text
+    assert 'id="desktop-trading-notice"' in response.text
+    assert 'role="status"' in response.text
+    assert 'aria-live="polite"' in response.text
     assert response.text.index("Bull Put Strategy") < response.text.index("Real-time Macro Board")
     assert "Watchlists" not in response.text
     assert "Longbridge Status" not in response.text
