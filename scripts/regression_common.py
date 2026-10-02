@@ -787,7 +787,15 @@ class ObservedRun:
                     self._append_event("child_interrupted", child=child_name, reason="process_exit")
             if self._state.get("status") == "running":
                 previous_owner = self._state.get("owner")
-                if self._process_record_alive(previous_owner):
+                owner_probe_state = process_identity_state(previous_owner)
+                if owner_probe_state == "unknown":
+                    self._state["status"] = "needs_review"
+                    self._state["next_action"] = "inspect previous owner process identity before resuming"
+                    with self._state_lock:
+                        self._write_state_locked(force=True)
+                    self._append_event("resume_blocked", reason="owner_probe_unknown", owner=previous_owner)
+                    raise ObservabilityError("Cannot determine previous owner process identity; inspect it before resuming.")
+                if owner_probe_state == "live":
                     raise RunAlreadyActiveError(
                         f"Evidence run {self.run_id} is already owned by PID {previous_owner.get('pid')}."
                     )

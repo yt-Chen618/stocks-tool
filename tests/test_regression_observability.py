@@ -306,6 +306,26 @@ def test_finish_passed_rejects_failed_child(tmp_path: Path) -> None:
         runner.finish("passed")
 
 
+def test_unknown_owner_probe_blocks_resume_without_os_lock(tmp_path: Path, monkeypatch) -> None:
+    evidence_dir = tmp_path / "evidence"
+    source = _source_root(tmp_path)
+    seed = ObservedRun(evidence_dir, source_root=source)
+    seed._write_state_locked(force=True)
+    state_path = evidence_dir / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state.update(status="running", owner={"pid": 12345678, "start_identity": "owner-token"})
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    original_probe = common.process_identity_probe
+    monkeypatch.setattr(common, "process_identity_probe", lambda pid: ("unknown", None) if pid == 12345678 else original_probe(pid))
+
+    resumed = ObservedRun(evidence_dir, source_root=source)
+    with pytest.raises(ObservabilityError, match="previous owner"):
+        resumed.start()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "needs_review"
+    assert resumed._lock_handle is None
+    assert not any(event["event"] == "owner_lost" for event in _events(evidence_dir))
+
+
 def test_volatile_p0_children_are_never_cacheable(tmp_path: Path) -> None:
     specs = child_specs(
         Namespace(
