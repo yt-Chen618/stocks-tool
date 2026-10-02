@@ -375,6 +375,9 @@ def main() -> None:
                 "chart-view.js",
                 "research-view.js",
                 "watchlist-view.js",
+                "account-loader.js",
+                "advisor-view.js",
+                "orders-view.js",
                 "execution-drawer.js",
                 "workspace-shell.js",
             ):
@@ -383,54 +386,26 @@ def main() -> None:
             app_js = client.get("/static/app.js")
             app_js.raise_for_status()
             for marker in (
-                "order-ticket-form",
-                "replace-order-form",
-                "selected-order-card",
-                "selected-order-execution",
-                "journal-entry-form",
-                "selected-order-journal",
-                "strategy-runtime-strip",
-                "strategy-experiment-strip",
-                "market-events-card",
-                "preopen-summary-strip",
-                "preopen-assessment-card",
-                "preopen-run-review",
-                "LANGUAGE_STORAGE_KEY",
+                "initializeViewModules",
+                "runConfirmedBrokerMutation(",
                 "prepareMarketOverlayPanels()",
                 "renderPreOpenAssessment(",
                 "renderLatestPreOpenRun()",
                 "saveCurrentPreOpenBoard()",
-                "strategy-controls-form",
-                "zero-dte-lottery-controls-form",
-                "previewZeroDteLottery()",
-                "zero-dte-lottery/runtime",
-                "runConfirmedBrokerMutation(",
-                '"Idempotency-Key"',
-                "Promise.allSettled",
                 "runStrategyScan(",
                 "runStrategyReview()",
                 "saveStrategyControls(",
                 "reconcileCoveredCallLifecycle(",
                 "covered-call/lifecycle",
-                "Refresh Lifecycle",
                 "renderCoveredCallLatestMonitor(",
-                "Latest Monitor",
                 "renderStrategyRuntime()",
                 "renderStrategyExperiment()",
                 "renderMarketEvents()",
-                "spread-summary-strip",
-                "spreads-body",
-                "submitOrder(",
-                "submitJournalEntry()",
-                "replaceSelectedOrder(",
                 "renderSpreads()",
                 "monitorSpread(",
                 "recoverCloseSpread(",
-                "recover-close/eligibility",
-                "renderSelectedExecution()",
-                "renderSelectedJournal()",
             ):
-                assert marker in app_js.text, f"Missing dashboard app marker: {marker}"
+                assert marker in app_js.text, f"Missing dashboard coordinator marker: {marker}"
             assert "stocks-tool-view-mode" not in app_js.text
 
             module_markers = {
@@ -461,6 +436,30 @@ def main() -> None:
                     "window.LightweightCharts",
                     "attributionLogo: true",
                     "CandlestickSeries",
+                ),
+                "/static/api-client.js": (
+                    "window.StocksToolApiClient",
+                    "decodeCursorPage",
+                    "mergeAbortSignals",
+                ),
+                "/static/account-loader.js": (
+                    "window.StocksToolAccountLoader",
+                    "createAccountLoader",
+                    "/orders/paged",
+                    "ensureSelectedOrderDetail",
+                ),
+                "/static/advisor-view.js": (
+                    "window.StocksToolAdvisorView",
+                    "createAdvisorView",
+                    "/strategies/advisor-context",
+                    "recordAdvisorResponse",
+                ),
+                "/static/orders-view.js": (
+                    "window.StocksToolOrdersView",
+                    "createOrdersView",
+                    "/executions/paged",
+                    "/journals/paged",
+                    "loadMoreOrders",
                 ),
             }
             for module_path, markers in module_markers.items():

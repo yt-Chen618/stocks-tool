@@ -1444,6 +1444,20 @@ class MockDashboardState:
             rows = [row for row in rows if row["order_id"] == order_id]
         return deepcopy(rows)
 
+    def list_executions_page(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_executions(external_account_id=external_account_id, order_id=order_id),
+            limit=limit,
+            cursor=cursor,
+        )
+
     def list_journals(
         self,
         external_account_id: str | None = None,
@@ -1461,6 +1475,27 @@ class MockDashboardState:
         if entry_type is not None:
             rows = [row for row in rows if row["entry_type"] == entry_type]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def list_journals_page(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_journals(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                trade_plan_id=trade_plan_id,
+                entry_type=entry_type,
+            ),
+            limit=limit,
+            cursor=cursor,
+        )
 
     def create_journal(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._journal_counter += 1
@@ -1604,13 +1639,57 @@ class MockDashboardState:
         self,
         external_account_id: str | None = None,
         status: str | None = None,
+        mode: str | None = None,
+        symbol: str | None = None,
+        statuses: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         rows = self.spreads
         if external_account_id is not None:
             rows = [row for row in rows if row["external_account_id"] == external_account_id]
         if status is not None:
             rows = [row for row in rows if row["status"] == status]
+        if mode is not None:
+            rows = [row for row in rows if row.get("mode", "paper") == mode]
+        if symbol is not None:
+            rows = [row for row in rows if row.get("underlying_symbol") == symbol.upper()]
+        if statuses is not None:
+            rows = [row for row in rows if row["status"] in statuses]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    @staticmethod
+    def _page_rows(
+        rows: list[dict[str, Any]],
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        offset = 0
+        if cursor:
+            try:
+                offset = int(cursor)
+            except ValueError as exc:
+                raise ValueError("Invalid pagination cursor.") from exc
+        page = rows[offset : offset + limit]
+        next_offset = offset + len(page)
+        return {
+            "items": deepcopy(page),
+            "next_cursor": str(next_offset) if next_offset < len(rows) else None,
+            "has_more": next_offset < len(rows),
+            "limit": limit,
+        }
+
+    def list_orders_page(
+        self,
+        external_account_id: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_orders(external_account_id),
+            limit=limit,
+            cursor=cursor,
+        )
 
     def recover_close_eligibility(
         self,
@@ -2729,12 +2808,43 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock required orders failure.")
         return state.list_orders(external_account_id)
 
+    @app.get("/orders/paged")
+    def orders_paged(
+        external_account_id: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        state._orders_request_count += 1
+        if state.scenario == "core-data-failure" and state._orders_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock required orders failure.")
+        try:
+            return state.list_orders_page(
+                external_account_id=external_account_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
     @app.get("/strategies/bull-put/spreads")
     def spreads(
         external_account_id: str | None = Query(default=None),
         status: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
         return state.list_spreads(external_account_id=external_account_id, status=status)
+
+    @app.get("/strategies/bull-put/active-spreads")
+    def active_spreads(
+        external_account_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+        symbol: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return state.list_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+            symbol=symbol,
+            statuses={"entry_pending_long", "entry_pending_short", "open", "exit_pending_short", "exit_pending_long", "rollback_failed"},
+        )
 
     @app.get("/strategies/bull-put/readiness")
     def bull_put_readiness(
@@ -2832,6 +2942,23 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     ) -> list[dict[str, Any]]:
         return state.list_executions(external_account_id=external_account_id, order_id=order_id)
 
+    @app.get("/executions/paged")
+    def executions_paged(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_executions_page(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
     @app.get("/journals")
     def journals(
         external_account_id: str | None = Query(default=None),
@@ -2845,6 +2972,27 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
             trade_plan_id=trade_plan_id,
             entry_type=entry_type,
         )
+
+    @app.get("/journals/paged")
+    def journals_paged(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        trade_plan_id: str | None = Query(default=None),
+        entry_type: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_journals_page(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                trade_plan_id=trade_plan_id,
+                entry_type=entry_type,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
     @app.get("/orders/{order_id}")
     def get_order(order_id: str) -> dict[str, Any]:

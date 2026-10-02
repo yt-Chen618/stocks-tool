@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import traceback
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from regression_common import build_report, emit_report
+try:
+    from regression_common import build_report, emit_report
+except ModuleNotFoundError:
+    from scripts.regression_common import build_report, emit_report
 
 import sys
 
@@ -20,29 +26,37 @@ from stocks_tool.application.services.bull_put_strategy import BullPutStrategySe
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
-    AssetType,
     BrokerName,
     ExecutionMode,
     OptionRight,
     OrderSide,
     OrderStatus,
-    OrderType,
     SpreadStatus,
-    TimeInForce,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
+    BrokerOrderIntent,
     BrokerAccount,
     BullPutSpread,
     BullPutStrategyRuntimeState,
+    CreateOrderRequest,
     CreateJournalEntryRequest,
-    ExecuteBullPutSpreadRequest,
     HistoricalPriceBar,
     OptionChainEntry,
-    OptionContractRef,
     OptionMarketSnapshot,
     Order,
+    OrderSyncResult,
+    PreparedTradeActionIntent,
     SecurityQuoteSnapshot,
+    TradeActionIntent,
+    TradingActionContext,
+    TradingIntentReconciliationResult,
+)
+from stocks_tool.domain.enums import TradingIntentState, TradingOperation
+from stocks_tool.application.services.orders import (
+    TradingIntentConflictError,
+    TradingIntentOutcomeUnknownError,
+    TradingIntentRejectedError,
 )
 
 
@@ -61,6 +75,17 @@ class InMemoryRuntimeRepository:
         if self.state.external_account_id != external_account_id or self.state.strategy_id != strategy_id:
             return None
         return self.state
+
+    def lock_for_entry(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str = "paper_bull_put_v1",
+    ) -> BullPutStrategyRuntimeState | None:
+        return self.get_runtime_state(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+        )
 
     def upsert_runtime_state(self, state: BullPutStrategyRuntimeState) -> BullPutStrategyRuntimeState:
         self.state = state
@@ -82,15 +107,29 @@ class InMemorySpreadRepository:
         self,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        *,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
     ) -> list[BullPutSpread]:
         rows = list(self.items.values())
         if external_account_id is not None:
             rows = [row for row in rows if row.external_account_id == external_account_id]
         if status is not None:
             rows = [row for row in rows if row.status == status]
-        return sorted(rows, key=lambda row: row.updated_at, reverse=True)
+        if statuses is not None:
+            normalized_statuses = set(statuses)
+            if not normalized_statuses:
+                return []
+            rows = [row for row in rows if row.status in normalized_statuses]
+        if mode is not None:
+            rows = [row for row in rows if row.mode == mode]
+        if underlying_symbol is not None:
+            normalized_symbol = underlying_symbol.strip().upper()
+            rows = [row for row in rows if row.underlying_symbol == normalized_symbol]
+        return sorted(rows, key=lambda row: (row.created_at, row.id), reverse=True)
 
-    def update_spread(self, spread: BullPutSpread) -> BullPutSpread:
+    def update_spread(self, spread: BullPutSpread, **kwargs) -> BullPutSpread:
         self.items[spread.id] = spread
         return spread
 
@@ -129,6 +168,9 @@ class InMemoryPreOpenRunRepository:
         self.items[(run.external_account_id, run.target_session_date, run.strategy_id)] = run
         return run
 
+    def upsert_run(self, run):
+        return self.update_run(run)
+
 
 class InMemoryJournalService:
     def __init__(self) -> None:
@@ -148,6 +190,14 @@ class StaticBrokerAccounts:
             return self.account
         return None
 
+    def update_account_sync_state(self, external_account_id: str, **kwargs) -> None:
+        if external_account_id != self.account.external_account_id:
+            raise LookupError(f"Unknown account '{external_account_id}'.")
+
+    def update_orders_sync_state(self, external_account_id: str, **kwargs) -> None:
+        if external_account_id != self.account.external_account_id:
+            raise LookupError(f"Unknown account '{external_account_id}'.")
+
 
 class StaticSnapshots:
     def __init__(self, snapshot: AccountSnapshot) -> None:
@@ -158,6 +208,10 @@ class StaticSnapshots:
             return []
         return [self.snapshot]
 
+    def create_account_snapshot(self, snapshot: AccountSnapshot) -> AccountSnapshot:
+        self.snapshot = snapshot
+        return snapshot
+
 
 class FakeAdapter:
     def __init__(self) -> None:
@@ -166,8 +220,10 @@ class FakeAdapter:
     def get_quote(self, *, symbol: str, mode: ExecutionMode) -> SecurityQuoteSnapshot:
         if self.exit_phase:
             last_done = Decimal("501.25")
+            quote_timestamp = datetime(2026, 5, 23, 15, 5, tzinfo=timezone.utc)
         else:
             last_done = Decimal("500.00")
+            quote_timestamp = datetime(2026, 5, 22, 14, 45, tzinfo=timezone.utc)
         return SecurityQuoteSnapshot(
             symbol=symbol,
             last_done=last_done,
@@ -175,11 +231,30 @@ class FakeAdapter:
             open=Decimal("499.00"),
             high=Decimal("502.00"),
             low=Decimal("497.00"),
-            timestamp=datetime(2026, 5, 23, 14, 45, tzinfo=timezone.utc),
+            timestamp=quote_timestamp,
             volume=1_000_000,
             turnover=Decimal("500000000"),
             trade_status="Normal",
         )
+
+    def build_account_snapshot(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        currency: str,
+        options_level: str | None,
+    ) -> AccountSnapshot:
+        return build_snapshot().model_copy(
+            update={
+                "account_id": external_account_id,
+                "currency": currency,
+                "options_level": options_level,
+            }
+        )
+
+    def get_us_market_calendar(self, local_date: date, mode: ExecutionMode) -> tuple[bool, bool]:
+        return True, False
 
     def get_recent_daily_bars(self, *, symbol: str, count: int, mode: ExecutionMode) -> list[HistoricalPriceBar]:
         start = datetime(2026, 3, 1, tzinfo=timezone.utc)
@@ -285,57 +360,329 @@ class FakeAdapter:
 class FakeOrderService:
     def __init__(self) -> None:
         self.counter = 0
+        self.action_counter = 0
+        self.child_counter = 0
         self.orders: dict[str, Order] = {}
+        self.actions: dict[str, TradeActionIntent] = {}
+        self.trading_intents: dict[str, BrokerOrderIntent] = {}
+        self._action_by_key: dict[tuple[str, ExecutionMode, str], str] = {}
+        self._child_by_key: dict[tuple[str, ExecutionMode, str], str] = {}
         self.exit_phase = False
 
-    def submit_order(self, request) -> Order:
-        self.counter += 1
-        order_id = f"mock-order-{self.counter}"
-        now = datetime.now(timezone.utc)
-        limit_price = request.limit_price
-        status = OrderStatus.FILLED
-        if self.exit_phase and request.side == OrderSide.SELL and limit_price is None:
-            limit_price = Decimal("0.30")
-        order = Order(
-            id=order_id,
-            broker=BrokerName.LONGBRIDGE,
-            external_account_id=request.external_account_id,
-            external_order_id=f"remote-{order_id}",
-            symbol=request.symbol,
-            asset_type=AssetType.OPTION,
-            side=request.side,
-            quantity=request.quantity,
-            order_type=request.order_type,
-            time_in_force=TimeInForce.DAY,
-            mode=request.mode,
-            status=status,
-            limit_price=limit_price,
-            option_contract=OptionContractRef(
-                underlying_symbol=request.option_contract.underlying_symbol,
-                expiration_date=request.option_contract.expiration_date,
-                strike=request.option_contract.strike,
-                right=request.option_contract.right,
-            ),
-            raw_payload={
-                "remote_order": {
-                    "executed_price": str(limit_price) if limit_price is not None else None,
-                }
-            },
-            submitted_at=now,
+    @staticmethod
+    def _request_hash(payload: dict) -> str:
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
+    def prepare_trade_action(
+        self,
+        *,
+        external_account_id: str,
+        broker: BrokerName,
+        mode: ExecutionMode,
+        idempotency_key: str,
+        request_hash: str,
+        action_context: TradingActionContext,
+        request_payload: dict,
+    ) -> PreparedTradeActionIntent:
+        key = (external_account_id, mode, idempotency_key)
+        existing_id = self._action_by_key.get(key)
+        if existing_id is not None:
+            existing = self.actions[existing_id]
+            if existing.request_hash != request_hash:
+                raise TradingIntentConflictError(existing.id)
+            return PreparedTradeActionIntent(intent=existing, created=False)
+
+        now = self._now()
+        self.action_counter += 1
+        action = TradeActionIntent(
+            id=f"parent-action-{self.action_counter}",
+            external_account_id=external_account_id,
+            broker=broker,
+            mode=mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            action=action_context.action,
+            strategy_id=action_context.strategy_id,
+            entity_id=action_context.entity_id,
+            state=TradingIntentState.PREPARED,
+            request_payload=request_payload,
             created_at=now,
             updated_at=now,
         )
+        self.actions[action.id] = action
+        self._action_by_key[key] = action.id
+        return PreparedTradeActionIntent(intent=action, created=True)
+
+    def get_trade_action(self, action_intent_id: str) -> TradeActionIntent | None:
+        return self.actions.get(action_intent_id)
+
+    def mark_trade_action_submitting(self, action_intent_id: str) -> TradeActionIntent:
+        action = self.actions[action_intent_id]
+        updated = action.model_copy(update={"state": TradingIntentState.SUBMITTING, "updated_at": self._now()})
+        self.actions[action_intent_id] = updated
+        return updated
+
+    def complete_trade_action(self, action_intent_id: str, response_payload: dict) -> TradeActionIntent:
+        action = self.actions[action_intent_id]
+        updated = action.model_copy(
+            update={
+                "state": TradingIntentState.PERSISTED,
+                "response_payload": response_payload,
+                "last_error": None,
+                "updated_at": self._now(),
+            }
+        )
+        self.actions[action_intent_id] = updated
+        return updated
+
+    def mark_trade_action_unknown(self, action_intent_id: str, error: str) -> TradeActionIntent:
+        action = self.actions[action_intent_id]
+        updated = action.model_copy(
+            update={"state": TradingIntentState.UNKNOWN, "last_error": error, "updated_at": self._now()}
+        )
+        self.actions[action_intent_id] = updated
+        return updated
+
+    def mark_trade_action_rejected(self, action_intent_id: str, error: str) -> TradeActionIntent:
+        action = self.actions[action_intent_id]
+        updated = action.model_copy(
+            update={"state": TradingIntentState.REJECTED, "last_error": error, "updated_at": self._now()}
+        )
+        self.actions[action_intent_id] = updated
+        return updated
+
+    def list_trade_actions(self, *, external_account_id=None, mode=None, state=None, limit=100):
+        rows = list(self.actions.values())
+        if external_account_id is not None:
+            rows = [row for row in rows if row.external_account_id == external_account_id]
+        if mode is not None:
+            rows = [row for row in rows if row.mode == mode]
+        if state is not None:
+            rows = [row for row in rows if row.state == state]
+        return rows[:limit]
+
+    def list_trading_intents(
+        self,
+        *,
+        external_account_id=None,
+        mode=None,
+        state=None,
+        limit=100,
+    ) -> list[BrokerOrderIntent]:
+        rows = list(self.trading_intents.values())
+        if external_account_id is not None:
+            rows = [row for row in rows if row.external_account_id == external_account_id]
+        if mode is not None:
+            rows = [row for row in rows if row.mode == mode]
+        if state is not None:
+            rows = [row for row in rows if row.state == state]
+        return rows[:limit]
+
+    def reconcile_unresolved_intents(
+        self,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+    ) -> TradingIntentReconciliationResult:
+        unresolved = [
+            intent
+            for intent in self.list_trading_intents(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+            if intent.state
+            in {
+                TradingIntentState.PREPARED,
+                TradingIntentState.SUBMITTING,
+                TradingIntentState.UNKNOWN,
+                TradingIntentState.BROKER_ACKNOWLEDGED,
+            }
+        ]
+        return TradingIntentReconciliationResult(
+            external_account_id=external_account_id,
+            mode=mode,
+            scanned_intents=len(unresolved),
+            resolved_intents=0,
+            unresolved_intents=len(unresolved),
+        )
+
+    def sync_today_orders(
+        self,
+        external_account_id: str,
+        mode: ExecutionMode,
+        symbol: str | None = None,
+    ) -> OrderSyncResult:
+        orders = self.list_orders(external_account_id=external_account_id, mode=mode, symbol=symbol)
+        return OrderSyncResult(
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id=external_account_id,
+            mode=mode,
+            synced_orders=len(orders),
+            created_orders=0,
+            updated_orders=len(orders),
+            orders=orders,
+        )
+
+    def has_unresolved_intents(
+        self,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        *,
+        exclude_action_intent_id: str | None = None,
+    ) -> bool:
+        return any(
+            intent.trade_action_intent_id != exclude_action_intent_id
+            and intent.state
+            in {
+                TradingIntentState.PREPARED,
+                TradingIntentState.SUBMITTING,
+                TradingIntentState.UNKNOWN,
+                TradingIntentState.BROKER_ACKNOWLEDGED,
+            }
+            for intent in self.list_trading_intents(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+        )
+
+    def submit_order(
+        self,
+        request: CreateOrderRequest,
+        *,
+        idempotency_key: str | None = None,
+        action_context: TradingActionContext | None = None,
+        parent_action_intent_id: str | None = None,
+    ) -> Order:
+        idempotency_key = idempotency_key or f"internal-{self.counter + 1}"
+        action_context = action_context or TradingActionContext(action="order_submit")
+        request_payload = request.model_dump(mode="json")
+        request_hash = self._request_hash(request_payload)
+        child_key = (request.external_account_id, request.mode, idempotency_key)
+        existing_id = self._child_by_key.get(child_key)
+        if existing_id is not None:
+            existing = self.trading_intents[existing_id]
+            if existing.request_hash != request_hash:
+                raise TradingIntentConflictError(existing.id)
+            if existing.state == TradingIntentState.PERSISTED and existing.response_payload:
+                return Order.model_validate(existing.response_payload).model_copy(update={"idempotent_replayed": True})
+            if existing.state == TradingIntentState.REJECTED:
+                raise TradingIntentRejectedError(existing.id, existing.last_error)
+            raise TradingIntentOutcomeUnknownError(existing.id)
+
+        now = self._now()
+        self.child_counter += 1
+        child_id = f"child-intent-{self.child_counter}"
+        child = BrokerOrderIntent(
+            id=child_id,
+            trade_action_intent_id=parent_action_intent_id or "standalone-action",
+            external_account_id=request.external_account_id,
+            broker=request.broker,
+            mode=request.mode,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            operation=TradingOperation.SUBMIT,
+            action=action_context.action,
+            strategy_id=action_context.strategy_id,
+            entity_id=action_context.entity_id,
+            leg=action_context.leg,
+            broker_marker=f"fake:{idempotency_key}",
+            state=TradingIntentState.PREPARED,
+            request_payload=request_payload,
+            created_at=now,
+            updated_at=now,
+        )
+        self.trading_intents[child_id] = child
+        self._child_by_key[child_key] = child_id
+        self.trading_intents[child_id] = child.model_copy(
+            update={"state": TradingIntentState.SUBMITTING, "updated_at": self._now()}
+        )
+
+        try:
+            self.counter += 1
+            order_id = f"mock-order-{self.counter}"
+            limit_price = request.limit_price
+            if self.exit_phase and request.side == OrderSide.SELL and limit_price is None:
+                limit_price = Decimal("0.30")
+            order = Order(
+                id=order_id,
+                broker=BrokerName.LONGBRIDGE,
+                external_account_id=request.external_account_id,
+                external_order_id=f"remote-{order_id}",
+                client_order_id=f"client-{order_id}",
+                order_intent_id=child_id,
+                symbol=request.symbol,
+                asset_type=request.asset_type,
+                side=request.side,
+                quantity=request.quantity,
+                order_type=request.order_type,
+                time_in_force=request.time_in_force,
+                mode=request.mode,
+                status=OrderStatus.FILLED,
+                executed_quantity=request.quantity,
+                executed_price=limit_price,
+                limit_price=limit_price,
+                option_contract=request.option_contract,
+                raw_payload={
+                    "submission_request": request_payload,
+                    "remote_order": {"executed_price": str(limit_price) if limit_price is not None else None},
+                },
+                submitted_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        except Exception as exc:
+            self.trading_intents[child_id] = self.trading_intents[child_id].model_copy(
+                update={"state": TradingIntentState.UNKNOWN, "last_error": str(exc), "updated_at": self._now()}
+            )
+            raise TradingIntentOutcomeUnknownError(child_id) from exc
+
         self.orders[order.id] = order
+        self.trading_intents[child_id] = self.trading_intents[child_id].model_copy(
+            update={
+                "state": TradingIntentState.PERSISTED,
+                "external_order_id": order.external_order_id,
+                "response_payload": order.model_dump(mode="json"),
+                "updated_at": self._now(),
+            }
+        )
         return order
 
-    def refresh_order(self, order_id: str) -> Order:
+    def list_orders(
+        self,
+        external_account_id: str | None = None,
+        *,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+    ) -> list[Order]:
+        rows = list(self.orders.values())
+        if external_account_id is not None:
+            rows = [row for row in rows if row.external_account_id == external_account_id]
+        if mode is not None:
+            rows = [row for row in rows if row.mode == mode]
+        if symbol is not None:
+            rows = [row for row in rows if row.symbol == symbol]
+        return rows
+
+    def refresh_order(self, order_id: str, **kwargs) -> Order:
         return self.orders[order_id]
 
     def get_order(self, order_id: str) -> Order | None:
         return self.orders.get(order_id)
 
-    def cancel_order(self, order_id: str) -> Order:
-        order = self.orders[order_id].model_copy(update={"status": OrderStatus.CANCELED})
+    def cancel_order(
+        self,
+        order_id: str,
+        *,
+        idempotency_key: str | None = None,
+        action_context: TradingActionContext | None = None,
+        parent_action_intent_id: str | None = None,
+    ) -> Order:
+        order = self.orders[order_id].model_copy(update={"status": OrderStatus.CANCELED, "updated_at": self._now()})
         self.orders[order_id] = order
         return order
 
@@ -380,7 +727,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     try:
-        settings = Settings()
+        settings = Settings(_env_file=None, bull_put_strategy={"entry_kill_switch_active": False})
         adapter = FakeAdapter()
         order_service = FakeOrderService()
         journal_service = InMemoryJournalService()

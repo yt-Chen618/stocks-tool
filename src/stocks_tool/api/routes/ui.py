@@ -28,6 +28,9 @@ def render_dashboard() -> HTMLResponse:
     chart_view_js_url = _asset_url("chart-view.js")
     research_view_js_url = _asset_url("research-view.js")
     watchlist_view_js_url = _asset_url("watchlist-view.js")
+    account_loader_js_url = _asset_url("account-loader.js")
+    advisor_view_js_url = _asset_url("advisor-view.js")
+    orders_view_js_url = _asset_url("orders-view.js")
     execution_drawer_js_url = _asset_url("execution-drawer.js")
     workspace_shell_js_url = _asset_url("workspace-shell.js")
     app_js_url = _asset_url("app.js")
@@ -909,6 +912,7 @@ def render_dashboard() -> HTMLResponse:
                             <div id="selected-order-execution" class="selected-order-execution empty">
                               No fills recorded for this order yet.
                             </div>
+                            <button id="executions-load-more" class="table-action" type="button" hidden>Load more fills</button>
                           </section>
                           <section class="selected-order-journal-shell">
                             <div class="form-header">
@@ -954,6 +958,7 @@ def render_dashboard() -> HTMLResponse:
                             <div id="selected-order-journal" class="selected-order-journal empty">
                               Select an order to load journal entries.
                             </div>
+                            <button id="journals-load-more" class="table-action" type="button" hidden>Load more journal entries</button>
                           </section>
                           <form id="replace-order-form" class="ticket-form hidden">
                             <div class="form-header">
@@ -1021,6 +1026,7 @@ def render_dashboard() -> HTMLResponse:
                             </tbody>
                           </table>
                         </div>
+                        <div class="table-footer"><button id="orders-load-more" class="table-action" type="button" hidden>Load more orders</button></div>
                       </section>
                     </section>
                     </div>
@@ -1084,6 +1090,9 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{chart_view_js_url}" defer></script>
                 <script src="{research_view_js_url}" defer></script>
                 <script src="{watchlist_view_js_url}" defer></script>
+                <script src="{account_loader_js_url}" defer></script>
+                <script src="{advisor_view_js_url}" defer></script>
+                <script src="{orders_view_js_url}" defer></script>
                 <script src="{execution_drawer_js_url}" defer></script>
                 <script src="{workspace_shell_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>
