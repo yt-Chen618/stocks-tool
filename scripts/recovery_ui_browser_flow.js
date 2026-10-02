@@ -7,6 +7,7 @@ const {
   waitFor,
   waitResponsiveSettled,
 } = require("./browser_test_helpers");
+const { runFrontendStateBrowserChecks } = require("./frontend_state_browser_checks");
 
 const PRIMARY_ACCOUNT = "LBPT10087357";
 const ALT_ACCOUNT = "LBPT10087357-ALT";
@@ -267,6 +268,24 @@ function replaceAccountInUrl(rawUrl, accountId) {
   return url.toString();
 }
 
+function cloneFixtureAccountFields(value, fromAccount, toAccount) {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneFixtureAccountFields(item, fromAccount, toAccount));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const clone = {};
+  for (const [key, item] of Object.entries(value)) {
+    if ((key === "external_account_id" || key === "account_id") && item === fromAccount) {
+      clone[key] = toAccount;
+    } else {
+      clone[key] = cloneFixtureAccountFields(item, fromAccount, toAccount);
+    }
+  }
+  return clone;
+}
+
 async function fulfillJson(route, payload, status = 200) {
   await route.fulfill({
     status,
@@ -407,13 +426,24 @@ async function main() {
           delayedOrdersResolver = resolve;
         });
       }
-      const items = syntheticOrders.slice(cursor, cursor + limit);
+      const items = syntheticOrders
+        .slice(cursor, cursor + limit)
+        .map((item) => url.searchParams.get("external_account_id") === ALT_ACCOUNT
+          ? cloneFixtureAccountFields(item, PRIMARY_ACCOUNT, ALT_ACCOUNT)
+          : item);
       const nextCursor = cursor + items.length < syntheticOrders.length ? String(cursor + items.length) : null;
       await fulfillJson(route, { items, next_cursor: nextCursor, has_more: nextCursor !== null, limit });
       return;
     }
     if (url.searchParams.get("external_account_id") === ALT_ACCOUNT) {
-      await route.fetch({ url: replaceAccountInUrl(request.url(), PRIMARY_ACCOUNT) }).then((response) => route.fulfill({ response }));
+      const response = await route.fetch({ url: replaceAccountInUrl(request.url(), PRIMARY_ACCOUNT) });
+      const contentType = response.headers()["content-type"] || "";
+      if (contentType.includes("application/json")) {
+        const payload = await response.json();
+        await fulfillJson(route, cloneFixtureAccountFields(payload, PRIMARY_ACCOUNT, ALT_ACCOUNT), response.status());
+      } else {
+        await route.fulfill({ response });
+      }
       return;
     }
     await route.fallback();
@@ -427,6 +457,7 @@ async function main() {
   let reasonEvidence = null;
   let sdkEvidence = null;
   let tradingSafetyEvidence = null;
+  let frontendStateEvidence = null;
 
   const runTradingSafetyDomChecks = async () => {
     recoveryMode = "rich";
@@ -672,6 +703,12 @@ async function main() {
     await assertBrokerGuard(true, "parent-only unknown recovery");
     const parentOnlyEvidence = { parent_only: true, child_count_visible: 0, broker_gate_blocked: true };
     tradingSafetyEvidence = await runTradingSafetyDomChecks();
+    frontendStateEvidence = await runFrontendStateBrowserChecks({
+      page,
+      timeoutMs,
+      setRecoveryMode: (mode) => { recoveryMode = mode; },
+      mutationRequests,
+    });
 
     const refreshDashboardForMode = async (mode, expectedText) => {
       recoveryMode = mode;
@@ -837,6 +874,7 @@ async function main() {
       recovery_failure: failureEvidence,
       pagination: paginationEvidence,
       trading_safety: tradingSafetyEvidence,
+      frontend_state: frontendStateEvidence,
       mutation_requests: mutationRequests,
       screenshots,
     };
