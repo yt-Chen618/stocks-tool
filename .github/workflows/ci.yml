@@ -1,0 +1,65 @@
+name: Local safety gates
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safety-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONUTF8: "1"
+      RECONCILIATION_SCHEDULER_ENABLED: "false"
+      LONGBRIDGE_MARKET_DATA_PREWARM_ENABLED: "false"
+      ALLOW_LIVE_TRADING: "false"
+      EXECUTION_MODE: paper
+      LONGBRIDGE_APP_KEY: ""
+      LONGBRIDGE_APP_SECRET: ""
+      LONGBRIDGE_ACCESS_TOKEN: ""
+      LONGBRIDGE_PAPER_ACCESS_TOKEN: ""
+      DEEPSEEK_API_KEY: ""
+      FMP_API_KEY: ""
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/stocks_tool
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Install locked environments
+        run: python scripts/setup_environment.py --skip-browser
+      - name: Install pinned Chromium and Linux libraries
+        run: npm run browsers:install:with-deps
+      - name: Start pinned PostgreSQL
+        run: docker compose up -d --wait db
+      - name: Apply all migrations
+        run: .venv/bin/python -m alembic upgrade head
+      - name: Verify the environment and schema
+        run: .venv/bin/python scripts/check_environment.py --strict --json-output artifacts/ci/environment.json
+      - name: Run safety gates without external broker access
+        run: .venv/bin/python scripts/run_regression.py p0-safety --skip-running-api-checks --evidence-dir artifacts/ci/p0 --json-output artifacts/ci/p0-manifest.json
+      - name: Save verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-safety-evidence
+          path: |
+            artifacts/ci/
+            output/playwright/
+          if-no-files-found: warn
+      - name: Stop the CI database
+        if: always()
+        run: docker compose down

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import subprocess
 import sys
 import time
@@ -11,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from browser_runtime import browser_environment, resolve_node, resolve_playwright_core
 from regression_common import build_report, emit_report
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,37 +127,10 @@ def require_ok(response: httpx.Response) -> Any:
     raise RegressionError(detail)
 
 
-def resolve_playwright_core() -> str:
-    npm_command = shutil.which("npm.cmd") or shutil.which("npm")
-    if npm_command is None:
-        raise RegressionError("Could not find npm. Install Node.js/npm before running browser regression.")
-    npm_root = subprocess.run(
-        [npm_command, "root", "-g"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    ).stdout.strip()
-    candidates = [
-        Path(npm_root) / "@playwright" / "cli" / "node_modules" / "playwright-core",
-        Path(npm_root) / "playwright-core",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    raise RegressionError(
-        "Could not locate a global playwright-core install. Install @playwright/cli and browsers first."
-    )
-
-
 def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, Any]:
     screenshot_path = ROOT / "output" / "playwright" / f"mock-ui-{scenario}-regression.png"
     playwright_core_path = resolve_playwright_core()
-    node_command = shutil.which("node.exe") or shutil.which("node")
-    if node_command is None:
-        raise RegressionError("Could not find node. Install Node.js before running browser regression.")
+    node_command = resolve_node()
     completed = subprocess.run(
         [
             node_command,
@@ -174,7 +146,7 @@ def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, An
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ},
+        env=browser_environment(),
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."

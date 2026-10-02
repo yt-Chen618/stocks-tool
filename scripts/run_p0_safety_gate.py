@@ -47,6 +47,14 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         for path in sorted(static_dir.rglob("*.js"))
     ]
     specs: list[dict[str, Any]] = [
+        {
+            "name": "environment-preflight",
+            "command": [
+                sys.executable,
+                str(ROOT / "scripts" / "check_environment.py"),
+                "--strict", "--json-output", str(evidence_dir / "environment.json"),
+            ],
+        },
         {"name": "pytest", "command": [sys.executable, "-m", "pytest", "-q"]},
         {
             "name": "py-compile-scripts",
@@ -65,11 +73,11 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         ],
         {
             "name": "alembic-heads",
-            "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "heads"],
+            "command": [sys.executable, "-m", "alembic", "heads"],
         },
         {
             "name": "alembic-current",
-            "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "current"],
+            "command": [sys.executable, "-m", "alembic", "current"],
         },
         {
             "name": "alembic-head-current-match",

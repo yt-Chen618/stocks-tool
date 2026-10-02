@@ -551,12 +551,7 @@ async function main() {
 
 function resolveBrowserExecutable() {
   const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-  const candidates = [
-    configured,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+  return configured && fs.existsSync(configured) ? configured : null;
 }
 
 async function selectWorkspace(page, workspace) {
@@ -643,6 +638,9 @@ async function assertResponsiveShell(page, label) {
   if (label === "1024") {
     await page.waitForFunction(
       () => Math.abs((document.getElementById("workspace-sidebar")?.getBoundingClientRect().width || 0) - 64) <= 1,
+    );
+    await page.waitForFunction(
+      () => Math.abs(parseFloat(getComputedStyle(document.getElementById("workspace-sidebar")).width) - 64) < 0.01,
     );
     const sidebar = await page.locator("#workspace-sidebar").evaluate((node) => ({
       computedWidth: getComputedStyle(node).width,

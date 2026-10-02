@@ -1,0 +1,16 @@
+{
+  "name": "stocks-tool-browser-regression",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Project-local browser runtime for stocks-tool regression gates.",
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "scripts": {
+    "browsers:install": "playwright install chromium",
+    "browsers:install:with-deps": "playwright install --with-deps chromium"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_BY_WORKFLOW = {
+    "environment": ROOT / "scripts" / "check_environment.py",
     "60h-completion-audit": ROOT / "scripts" / "run_60h_completion_audit.py",
     "audit-export": ROOT / "scripts" / "run_audit_export_regression.py",
     "bull-put-recovery-drill": ROOT / "scripts" / "run_bull_put_recovery_drill.py",

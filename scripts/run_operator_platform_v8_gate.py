@@ -53,8 +53,8 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         {"name": "pytest", "command": [sys.executable, "-m", "pytest", "-q"]},
         {"name": "py-compile-scripts", "command": [sys.executable, "-m", "py_compile", *py_compile_paths]},
         *dashboard_node_specs,
-        {"name": "alembic-heads", "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "heads"]},
-        {"name": "alembic-current", "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "current"]},
+        {"name": "alembic-heads", "command": [sys.executable, "-m", "alembic", "heads"]},
+        {"name": "alembic-current", "command": [sys.executable, "-m", "alembic", "current"]},
         {
             "name": "worktree-release-inventory",
             "command": [

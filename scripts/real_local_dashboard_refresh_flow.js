@@ -88,12 +88,7 @@ async function main() {
 
 function resolveBrowserExecutable() {
   const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-  const candidates = [
-    configured,
-    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  ].filter(Boolean);
-  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+  return configured && fs.existsSync(configured) ? configured : null;
 }
 
 async function measureSelectedChartReady(page, timeoutMs) {

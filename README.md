@@ -1,6 +1,6 @@
 # Stocks Tool
 
-`stocks-tool` is the first-pass architecture skeleton for a US equities and options trading workbench.
+`stocks-tool` is a local, paper-first research and execution workbench for U.S. equities and options.
 
 The project is intentionally scoped around:
 
@@ -76,28 +76,24 @@ tests/
 
 ## Quick start
 
-1. Create a virtual environment.
-2. Copy `.env.example` to `.env`.
-3. Start PostgreSQL with Docker Compose.
-4. Install the package in editable mode.
-5. Apply database migrations.
-6. Start the API server.
+The verified development baseline uses Python 3.12, Node 24.15.0, uv 0.12.22, and the PostgreSQL image pinned by digest in `compose.yaml`. Python patch versions are reported by preflight; `.python-version` deliberately supports the maintained 3.12 series. Runtime and transitive Python packages are pinned in `uv.lock` to the tested baseline. Build dependencies are constrained in `pyproject.toml`. Browser tooling is project-local and pinned in `package-lock.json`; it does not add a frontend build service.
 
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-copy .env.example .env
-docker compose up -d db
-pip install -e .[dev]
-alembic upgrade head
-uvicorn --app-dir src stocks_tool.main:app --reload
+Start Docker Desktop/Engine, then use the setup entry point. It creates `.venv`, installs the locked Python and Node dependencies, and installs the matching Chromium build. It bootstraps the pinned uv tool if needed and explicitly checks the declared Node version.
+
+```powershell
+python scripts\setup_environment.py --start-postgres
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe scripts\run_regression.py environment --strict
+.venv\Scripts\python.exe -m uvicorn --app-dir src stocks_tool.main:app --reload
 ```
 
-If you already installed the project before the Longbridge SDK dependency was added, rerun:
+On Linux/macOS use `.venv/bin/python` for the corresponding commands. Linux browser hosts need the libraries installed by `npm run browsers:install:with-deps`; CI performs that step explicitly.
 
-```bash
-pip install -e .[dev]
-```
+For local broker access, copy `.env.example` to `.env` and configure credentials separately. A clean checkout can run unit tests, isolated PostgreSQL proofs, and mock browser scenarios without `.env` or broker credentials. Back up an existing database before upgrading it.
+
+`uv sync --locked --extra dev` updates an existing development environment from the committed lock. Change dependency constraints and regenerate the lock intentionally when upgrading; setup never silently refreshes the lock. `python scripts/check_environment.py --strict` reports version/lock/schema drift without installing anything or opening a broker connection. It reads schema state from explicit `DATABASE_URL`, or from the existing local PostgreSQL container, and does not read `.env`.
+
+The browser gates use the project Chromium build by default. An explicit `PLAYWRIGHT_CHROME_PATH` remains available for diagnostics, but strict preflight reports it as a non-reproducible override. GitHub CI in `.github/workflows/ci.yml` applies all migrations and runs the local P0 gate with empty broker/advisor credentials; external-market checks remain a separate operator activity.
 
 For Longbridge integration, fill these values in `.env`:
 
