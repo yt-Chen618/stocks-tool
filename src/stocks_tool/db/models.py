@@ -436,6 +436,13 @@ class BullPutSpreadRecord(TimestampMixin, Base):
             "created_at",
             "id",
         ),
+        Index(
+            "ix_bull_put_spreads_history_page",
+            "external_account_id",
+            "execution_mode",
+            "created_at",
+            "id",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))

@@ -111,6 +111,7 @@ from stocks_tool.domain.models import (
     UpdateBullPutStrategyRuntimeRequest,
 )
 from stocks_tool.domain.option_symbols import same_day_expiring_option_positions
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
 
 
@@ -207,6 +208,33 @@ class BullPutStrategyService:
             statuses=statuses,
             mode=mode,
             underlying_symbol=underlying_symbol,
+        )
+
+    def list_spreads_page(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[BullPutSpread]:
+        return self.spreads.list_spreads_page(
+            external_account_id=external_account_id,
+            mode=mode,
+            limit=limit,
+            cursor=cursor,
+        )
+
+    def list_working_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode = ExecutionMode.PAPER,
+    ) -> list[BullPutSpread]:
+        return self.spreads.list_working_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+            active_statuses=ACTIVE_SPREAD_STATUSES,
         )
 
     def get_spread(self, spread_id: str) -> BullPutSpread | None:

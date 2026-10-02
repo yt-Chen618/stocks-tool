@@ -44,6 +44,7 @@ from stocks_tool.domain.models import (
     RecoverBullPutCloseRequest,
     UpdateBullPutStrategyRuntimeRequest,
 )
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.ports.repository import BullPutSpreadRepository
 
 router = APIRouter()
@@ -165,6 +166,40 @@ def list_active_bull_put_spreads(
         mode=mode,
         underlying_symbol=symbol,
     )
+
+
+@router.get("/bull-put/spreads/paged", response_model=CursorPage[BullPutSpread])
+def list_bull_put_spreads_page(
+    external_account_id: str = Query(...),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> CursorPage[BullPutSpread]:
+    try:
+        return service.list_spreads_page(
+            external_account_id=external_account_id,
+            mode=mode,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/bull-put/working-spreads", response_model=list[BullPutSpread])
+def list_working_bull_put_spreads(
+    external_account_id: str = Query(...),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
+) -> list[BullPutSpread]:
+    try:
+        return service.list_working_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/bull-put/spreads/{spread_id}", response_model=BullPutSpread)

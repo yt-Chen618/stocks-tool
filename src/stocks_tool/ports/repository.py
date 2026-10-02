@@ -340,6 +340,27 @@ class BullPutSpreadRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_spreads_page(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_working_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        active_statuses: Collection[SpreadStatus],
+    ) -> list[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
     def update_spread(
         self,
         spread: BullPutSpread,
