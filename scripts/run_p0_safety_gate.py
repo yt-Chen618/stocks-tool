@@ -118,6 +118,15 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 str(evidence_dir / "mock-ui.json"),
             ],
         },
+        {
+            "name": "recovery-ui",
+            "command": [
+                sys.executable,
+                str(ROOT / "scripts" / "run_recovery_ui_regression.py"),
+                "--json-output",
+                str(evidence_dir / "recovery-ui.json"),
+            ],
+        },
     ]
     if not args.skip_running_api_checks:
         specs.append(

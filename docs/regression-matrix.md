@@ -4,6 +4,18 @@ Last updated: 2026-10-02
 
 Run the smallest relevant test first, then the broader gates before treating an optimization slice as done.
 
+## Reproducible Environment Gates
+
+Use the repository-owned setup entry point from a clean checkout. It reads `.python-version` and `.node-version`, installs the locked Python environment from `uv.lock`, installs the project-local browser dependency from `package-lock.json`, downloads Chromium into the repository browser cache, and can start the pinned PostgreSQL service:
+
+```powershell
+python scripts\setup_environment.py --start-postgres
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe scripts\check_environment.py --strict --json-output artifacts\environment-preflight.json
+```
+
+`check_environment.py --strict` is read-only: it does not install packages, start containers, read `.env`, or open a broker connection. It reports tool versions, lock synchronization, local Chromium, PostgreSQL reachability, and Alembic head/current state. A `PLAYWRIGHT_CHROME_PATH` override is diagnostic evidence rather than the reproducible browser runtime. Use `--skip-browser` on setup only when browser gates are intentionally out of scope.
+
 ## Local Code Gates
 
 ```powershell
@@ -22,17 +34,48 @@ node --check src\stocks_tool\ui\static\state.js
 node --check src\stocks_tool\ui\static\watchlist-view.js
 node --check src\stocks_tool\ui\static\workspace-shell.js
 node --check src\stocks_tool\ui\static\vendor\lightweight-charts-5.2.0.standalone.production.js
+node --check src\stocks_tool\ui\static\account-loader.js
+node --check src\stocks_tool\ui\static\advisor-view.js
+node --check src\stocks_tool\ui\static\orders-view.js
+node --check src\stocks_tool\ui\static\operations-recovery-view.js
+.venv\Scripts\python.exe -m py_compile scripts\setup_environment.py scripts\check_environment.py scripts\browser_runtime.py scripts\run_history_query_regression.py
 .venv\Scripts\python.exe -m py_compile scripts\mock_dashboard_fixtures.py scripts\mock_dashboard_server.py scripts\run_mock_ui_order_regression.py scripts\run_unattended_paper.py scripts\run_audit_export_regression.py scripts\run_consistency_report.py scripts\run_bull_put_recovery_drill.py scripts\run_data_hygiene_audit.py scripts\run_paper_session_gate.py scripts\run_worktree_release_inventory.py scripts\run_zero_dte_lottery_drill.py scripts\run_60h_completion_audit.py scripts\run_scheduler_on_long_gate.py scripts\run_operator_platform_v8_gate.py scripts\run_regression.py
-.venv\Scripts\alembic.exe heads
-.venv\Scripts\alembic.exe current
+.venv\Scripts\python.exe -m alembic heads
+.venv\Scripts\python.exe -m alembic current
 .venv\Scripts\python.exe scripts\run_regression.py p0-safety --skip-running-api-checks
 ```
 
 These gates verify Python behavior, API imports, migration-sensitive models used by tests, and dashboard JavaScript syntax.
 
-`p0-safety` additionally runs the duplicate-external-order preflight, an isolated temporary-PostgreSQL two-request concurrency proof, and the full mock browser safety matrix. Without `--skip-running-api-checks` it also reads `/ops/consistency` from the configured local API. Its manifest fixes `broker_order_submit_allowed=false`, `local_repair_allowed=false`, and `destructive_actions_allowed=false`; the temporary database is created, migrated, tested, and dropped without touching broker state.
+`p0-safety` starts with the strict environment preflight, then runs the duplicate-external-order preflight, an isolated temporary-PostgreSQL two-request concurrency proof, and the full mock browser safety matrix. Without `--skip-running-api-checks` it also reads `/ops/consistency` from the configured local API. Its manifest fixes `broker_order_submit_allowed=false`, `local_repair_allowed=false`, and `destructive_actions_allowed=false`; the temporary database is created, migrated, tested, and dropped without touching broker state.
 
 Both aggregate gates discover every JavaScript file under `ui/static`, including vendor assets. The temporary PostgreSQL gate also verifies five independent first-lease races and Advisor Record Output from two separate sessions. A database trigger injects a review-insert failure to prove that proposals, reviews, signals, audit records, and advisor-run status roll back together. Unit regressions cover old unresolved intents, incomplete history evidence, option metadata import, proposal-linked roll orders, scheduler acquisition failures, watchlist conflicts, and research events beyond the former global cutoff.
+
+## Bounded Reads and Recovery Gates
+
+Run the focused tests after changing the paged reads, active-spread query, Covered Call decision filters, or recovery read model:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_history_pagination.py tests\test_recovery_status.py tests\test_strategy_query_filters.py tests\test_covered_call_query_boundaries.py tests\test_ui_pagination_contract.py -q
+```
+
+The isolated PostgreSQL history gate creates and removes its own temporary database:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py history-query --json-output artifacts\history-query-regression.json
+```
+
+It applies the current migrations, seeds 10,000 and then 100,000 rows per history table with another account interleaved, and checks the 50-row order/execution/journal keyset pages. The gate verifies account isolation, tied `(created_at, id)` page boundaries, no duplicate or missing rows across pages, deep cursors after 80,001 account rows at the 100,000-row scale, bounded ORM materialization, and an `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` index plan without an unbounded scan. It uses no broker call and drops the temporary database in its cleanup path. A failed run is evidence that the query shape or index contract still needs work; it must not be reported as a completed large-history gate.
+
+The active-spread route and recovery read model are local read contracts. Targeted tests must keep `GET /strategies/bull-put/spreads` as a complete historical read, verify that `GET /strategies/bull-put/active-spreads` pushes lifecycle status into SQL, and verify that `GET /ops/recovery-status` reports truncation and evidence guidance without reconciliation, local resolution, broker-session initialization, or order submission.
+
+Run the actual recovery-panel interaction gate through the shared entry point:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py recovery-ui
+```
+
+It uses the local mock dashboard and real Playwright DOM interactions. Required cases include parent-only unknown actions, totals beyond the displayed page, coverage/check/time evidence, known broker orders, SDK quarantine, clear-to-blocked and error transitions, account and pagination response races, language switching, and desktop/mobile captures. The test requires zero broker mutations. This gate is also a required child of `p0-safety`.
 
 ## Operator Posture Gates
 
@@ -46,6 +89,7 @@ Targeted pytest coverage should include:
 - durable strategy audit event append/filter behavior through `strategy_audit_events`
 - `/ops/audit/summary` aggregation and durable/synthetic dedupe preference
 - `/ops/consistency` read-only ledger checks and guarded `/ops/consistency/repairs/{repair_id}` local-only repair
+- `/ops/recovery-status` parent/child intent grouping, coverage evidence, truncation, next-action guidance, and SDK quarantine read-only behavior
 - scheduler nonblocking behavior while `run_once` blocks, plus DB-backed task-state lease/backoff projection
 - bull put recover-close eligibility, accept/reject paths, and API route mapping
 - advisor playbook registry through `/strategies/advisor/playbooks`

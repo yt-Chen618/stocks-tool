@@ -166,6 +166,12 @@ def test_timed_out_sdk_mutation_is_unknown_and_quarantines_running_future() -> N
         with pytest.raises(LongbridgeMutationOutcomeUnknownError, match="outcome is unknown"):
             first.result(timeout=2)
 
+        runtime = adapter.get_market_data_runtime_status()
+        assert runtime.sdk_quarantine.pending_count == 1
+        assert runtime.sdk_quarantine.oldest_started_at is not None
+        assert runtime.sdk_quarantine.oldest_duration_seconds is not None
+        assert runtime.sdk_quarantine.next_action
+
         adapter._circuit_open_until_by_key.clear()
         with pytest.raises(LongbridgeIntegrationError, match="timed-out SDK action is still running"):
             adapter._run_sdk_action(

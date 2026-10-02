@@ -5,11 +5,13 @@ Last updated: 2026-10-02
 ## Local Startup
 
 ```powershell
-docker compose up -d db
-.venv\Scripts\python.exe -m pip install -e .[dev]
-.venv\Scripts\alembic.exe upgrade head
+python scripts\setup_environment.py --start-postgres
+.venv\Scripts\python.exe scripts\check_environment.py --strict --json-output artifacts\environment-preflight.json
+.venv\Scripts\python.exe -m alembic upgrade head
 .venv\Scripts\uvicorn.exe --app-dir src stocks_tool.main:app --reload
 ```
+
+`setup_environment.py` is the clean-checkout entry point. It enforces the versions in `.python-version` and `.node-version`, installs the locked Python dependencies from `uv.lock`, installs the project-local Playwright dependency from `package-lock.json`, downloads Chromium into `.playwright-browsers`, and starts the PostgreSQL image pinned in `compose.yaml`. `check_environment.py --strict` is read-only: it reports tool versions, lock synchronization, browser availability, PostgreSQL reachability, and Alembic head/current without installing packages, starting containers, reading `.env`, or opening a broker connection. For an existing environment, use `uv sync --locked --extra dev` rather than refreshing the lock implicitly.
 
 Open:
 
@@ -32,9 +34,11 @@ $env:ALLOW_LIVE_TRADING = "false"
 $env:BULL_PUT_STRATEGY__ENTRY_KILL_SWITCH_ACTIVE = "true"
 $env:RECONCILIATION_SCHEDULER_ENABLED = "false"
 .venv\Scripts\python.exe scripts\check_order_external_id_duplicates.py
-.venv\Scripts\alembic.exe upgrade head
+.venv\Scripts\python.exe -m alembic upgrade head
 .venv\Scripts\python.exe scripts\check_alembic_head_current.py
 ```
+
+The current optimization branch adds migration `20261002_0018` after `20261002_0017`. It is additive: it creates the bounded-history keyset indexes for orders, executions, and journals, the Covered Call proposal/run decision-scope indexes, and the active Bull Put spread scope index. It does not rewrite or delete persisted rows. `alembic upgrade head` must be run before using the new query paths; `alembic heads` and `alembic current` are evidence of schema state, not a substitute for running the regression gates.
 
 Then run mock/fault/concurrency verification and a read-only account consistency check. The aggregate command is:
 
@@ -128,6 +132,22 @@ Use `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility?exte
 
 Use `scripts\run_regression.py bull-put-recovery-drill` for a read-only recovery drill report. The script inspects all listed spreads or a selected `--spread-id`, classifies the operator action, and never calls `POST /recover-close`.
 
+## Bounded History and Recovery Reads
+
+The dashboard uses the bounded history routes for account activity:
+
+- `GET /orders/paged` accepts `external_account_id`, optional `status`, `mode`, and `symbol`, plus `limit=1..100` (default `50`) and an opaque `cursor`.
+- `GET /executions/paged` accepts `external_account_id`, optional `order_id`, `limit`, and `cursor`.
+- `GET /journals/paged` accepts `external_account_id`, optional `order_id`, `trade_plan_id`, `entry_type`, `limit`, and `cursor`.
+
+Each returns `items`, `next_cursor`, `has_more`, and `limit`. The cursor is a keyset position over `(created_at, id)` and is bound to the complete filter scope. Reusing it with another account or filter is rejected. The legacy `/orders`, `/executions`, and `/journals` routes remain complete reads for explicit history and reconciliation; do not replace a complete-history decision with a page response.
+
+`GET /strategies/bull-put/active-spreads?external_account_id=LBPT10087357&mode=paper` pushes the active lifecycle-status predicate into PostgreSQL and accepts an optional `symbol`. It is a read-only strategy/dashboard view. `GET /strategies/bull-put/spreads` remains the complete historical route, and the active view must not be used for order capacity or lifecycle decisions.
+
+`GET /ops/recovery-status?external_account_id=LBPT10087357&mode=paper&limit=100` composes local unresolved parent/child intent evidence with the SDK timeout-quarantine read model. It reports total versus displayed counts, `truncated`, coverage start/end, count and time evidence, reason codes, next actions, and whether recovery is blocked. The endpoint does not reconcile, resolve, submit, or initialize a Longbridge context. Treat `truncated=true` or unavailable quarantine state as incomplete operator evidence.
+
+Migration `20261002_0018` adds the query indexes supporting these paths: account/time/id keysets for orders, executions, and journals; decision-scope indexes for strategy proposals and runs; and the account/mode/status/symbol scope for active Bull Put spreads. The migration is additive and does not alter the legacy complete-read contract.
+
 ## Ledger Consistency and Local Repair
 
 Use `GET /ops/consistency?external_account_id=LBPT10087357&mode=paper` or `scripts\run_regression.py consistency-report` to inspect read-only consistency evidence. The report currently checks:
@@ -156,6 +176,14 @@ Use these read-only checks before leaving the local process running:
 .venv\Scripts\python.exe scripts\run_regression.py 60h-completion-audit
 .venv\Scripts\python.exe scripts\run_regression.py operator-platform-v8
 ```
+
+For the bounded-read scale check, run the isolated gate directly:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py history-query --json-output artifacts\history-query-regression.json
+```
+
+The gate requires PostgreSQL, applies migrations to a temporary database, seeds 10,000 and 100,000 rows per history table, and validates 50-row keyset pages for account isolation, tied timestamps, duplicate/omission-free cursors, bounded ORM materialization, and indexed `EXPLAIN` plans. It performs no broker call and removes the temporary database. A failed or interrupted run is incomplete evidence and must not be described as a passing large-history gate.
 
 Use `unattended-paper arm` to disable new bull put entries while leaving existing spread monitoring and lifecycle reconciliation active. Use `resume` only after intentionally restoring auto-entry posture.
 

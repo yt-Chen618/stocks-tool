@@ -1047,6 +1047,108 @@ class MockDashboardState:
             "checks": deepcopy(filtered),
         }
 
+    def recovery_status_snapshot(self, *, external_account_id: str, mode: str = "paper") -> dict[str, Any]:
+        if external_account_id != self.account_id or mode != "paper":
+            raise KeyError(external_account_id)
+        generated_at = iso_now()
+        if self.scenario != "unknown-intent" or not self._unknown_intent_created:
+            return {
+                "generated_at": generated_at,
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "status": "clear",
+                "recovery_blocked": False,
+                "unresolved_count": 0,
+                "displayed_unresolved_count": 0,
+                "unknown_count": 0,
+                "displayed_unknown_count": 0,
+                "unresolved_parent_count": 0,
+                "displayed_parent_count": 0,
+                "unknown_parent_count": 0,
+                "displayed_unknown_parent_count": 0,
+                "truncated": False,
+                "primary_blocker": None,
+                "next_action": "No recovery action is required.",
+                "parents": [],
+                "intents": [],
+                "sdk_quarantine": {
+                    "available": True,
+                    "pending_count": 0,
+                    "oldest_started_at": None,
+                    "oldest_duration_seconds": None,
+                    "next_action": None,
+                },
+            }
+        return {
+            "generated_at": generated_at,
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "status": "blocked",
+            "recovery_blocked": True,
+            "unresolved_count": 1,
+            "displayed_unresolved_count": 1,
+            "unknown_count": 1,
+            "displayed_unknown_count": 1,
+            "unresolved_parent_count": 1,
+            "displayed_parent_count": 1,
+            "unknown_parent_count": 1,
+            "displayed_unknown_parent_count": 1,
+            "truncated": False,
+            "primary_blocker": "order_outcome_unknown",
+            "next_action": "Review the parent trade action and wait for reconciliation.",
+            "parents": [{
+                "id": "mock-unknown-action-1",
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "action": "order_submit",
+                "strategy_id": "paper_bull_put_v1",
+                "entity_id": "mock-unknown-intent-1",
+                "state": "unknown",
+                "child_count": 1,
+                "unresolved_child_count": 1,
+                "evidence_ready_child_count": 0,
+                "children_truncated": False,
+                "reason_code": "order_outcome_unknown",
+                "next_action": "Review the parent trade action and wait for reconciliation.",
+            }],
+            "intents": [{
+                "id": "mock-unknown-intent-1",
+                "trade_action_intent_id": "mock-unknown-action-1",
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "operation": "submit",
+                "action": "order_submit",
+                "strategy_id": "paper_bull_put_v1",
+                "entity_id": "mock-unknown-intent-1",
+                "leg": "entry",
+                "state": "unknown",
+                "external_order_id": None,
+                "target_order_id": None,
+                "parent_action": "order_submit",
+                "parent_state": "unknown",
+                "created_at": generated_at,
+                "updated_at": generated_at,
+                "reconciliation_attempts": 0,
+                "first_reconciled_at": None,
+                "last_reconciled_at": None,
+                "coverage_start_at": None,
+                "coverage_end_at": None,
+                "coverage_covers_intent": False,
+                "checks_satisfied": False,
+                "check_span_seconds": None,
+                "reason_code": "order_outcome_unknown",
+                "reason_detail": "Mock broker response timed out.",
+                "next_action": "Review the parent trade action and wait for reconciliation.",
+            }],
+            "sdk_quarantine": {
+                "available": True,
+                "pending_count": 0,
+                "oldest_started_at": None,
+                "oldest_duration_seconds": None,
+                "next_action": None,
+            },
+        }
+
     def operator_status_snapshot(self) -> dict[str, Any]:
         lifecycle_warnings = self.lifecycle_warnings()
         audit_events = self.audit_events()
@@ -2459,6 +2561,18 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         if external_account_id != state.account_id or mode != "paper":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock operator status not found.")
         return state.operator_status_snapshot()
+
+    @app.get("/ops/recovery-status")
+    def recovery_status(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        _ = limit
+        try:
+            return state.recovery_status_snapshot(external_account_id=external_account_id, mode=mode)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock recovery status not found.") from error
 
     @app.get("/ops/trading-intents")
     def trading_intents(

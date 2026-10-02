@@ -18,6 +18,7 @@ SCRIPT_BY_WORKFLOW = {
     "consistency-report": ROOT / "scripts" / "run_consistency_report.py",
     "market-data-runtime": ROOT / "scripts" / "run_market_data_runtime_report.py",
     "mock-ui": ROOT / "scripts" / "run_mock_ui_order_regression.py",
+    "recovery-ui": ROOT / "scripts" / "run_recovery_ui_regression.py",
     "operator-platform-v8": ROOT / "scripts" / "run_operator_platform_v8_gate.py",
     "p0-safety": ROOT / "scripts" / "run_p0_safety_gate.py",
     "data-hygiene-audit": ROOT / "scripts" / "run_data_hygiene_audit.py",

@@ -34,6 +34,7 @@ from stocks_tool.domain.models import (
     MarketDataModeRuntime,
     MarketDataOperationRuntime,
     MarketDataRuntimeSnapshot,
+    SdkTimeoutQuarantineStatus,
     OptionChainEntry,
     OptionMarketSnapshot,
     PositionSnapshot,
@@ -118,6 +119,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         self._circuit_reason_by_key: dict[str, str] = {}
         self._sdk_quarantine_lock = threading.Lock()
         self._sdk_quarantined_futures: set[Future[Any]] = set()
+        self._sdk_quarantine_started_at_by_future: dict[Future[Any], datetime] = {}
         self._quote_cache_lock = threading.Lock()
         self._quote_cache: dict[tuple[str, str], tuple[float, SecurityQuoteSnapshot]] = {}
         self._market_sessions_lock = threading.Lock()
@@ -214,6 +216,37 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
 
     def get_market_data_runtime_status(self) -> MarketDataRuntimeSnapshot:
         """Return local metrics without opening a broker connection or reading credentials."""
+        now = datetime.now(timezone.utc)
+        with self._sdk_quarantine_lock:
+            completed = {
+                future
+                for future in self._sdk_quarantined_futures
+                if future.done()
+            }
+            self._sdk_quarantined_futures.difference_update(completed)
+            for future in completed:
+                self._sdk_quarantine_started_at_by_future.pop(future, None)
+            quarantine_started_at = [
+                started_at
+                for future, started_at in self._sdk_quarantine_started_at_by_future.items()
+                if future in self._sdk_quarantined_futures
+            ]
+        oldest_started_at = min(quarantine_started_at) if quarantine_started_at else None
+        sdk_quarantine = SdkTimeoutQuarantineStatus(
+            pending_count=len(quarantine_started_at),
+            oldest_started_at=oldest_started_at,
+            oldest_duration_seconds=(
+                max(0, int((now - oldest_started_at).total_seconds()))
+                if oldest_started_at is not None
+                else None
+            ),
+            next_action=(
+                "Wait for the timed-out SDK call to finish. Keep broker writes paused "
+                "and reconcile any unknown mutation before retrying."
+                if oldest_started_at is not None
+                else None
+            ),
+        )
         with self._market_sessions_lock:
             closed = self._closed
             sessions = list(self._market_sessions.values())
@@ -236,7 +269,12 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                         operations=operations,
                     )
                 )
-        return MarketDataRuntimeSnapshot(closed=closed, sessions=snapshots)
+        return MarketDataRuntimeSnapshot(
+            generated_at=now,
+            closed=closed,
+            sessions=snapshots,
+            sdk_quarantine=sdk_quarantine,
+        )
 
     def get_us_market_calendar(
         self,
@@ -1040,9 +1078,10 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
 
     def _raise_if_sdk_action_quarantined(self, action: str) -> None:
         with self._sdk_quarantine_lock:
-            self._sdk_quarantined_futures = {
-                future for future in self._sdk_quarantined_futures if not future.done()
-            }
+            completed = {future for future in self._sdk_quarantined_futures if future.done()}
+            self._sdk_quarantined_futures.difference_update(completed)
+            for future in completed:
+                self._sdk_quarantine_started_at_by_future.pop(future, None)
             if not self._sdk_quarantined_futures:
                 return
         raise LongbridgeIntegrationError(
@@ -1055,11 +1094,13 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             if future.done():
                 return
             self._sdk_quarantined_futures.add(future)
+            self._sdk_quarantine_started_at_by_future[future] = datetime.now(timezone.utc)
         future.add_done_callback(self._release_quarantined_sdk_future)
 
     def _release_quarantined_sdk_future(self, future: Future[Any]) -> None:
         with self._sdk_quarantine_lock:
             self._sdk_quarantined_futures.discard(future)
+            self._sdk_quarantine_started_at_by_future.pop(future, None)
 
     def _raise_if_circuit_open(self, action: str, *, circuit_key: str) -> None:
         with self._circuit_lock:

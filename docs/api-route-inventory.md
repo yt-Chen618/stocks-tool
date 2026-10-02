@@ -1,6 +1,6 @@
 # API Route Inventory
 
-Last updated: 2026-08-10
+Last updated: 2026-10-02
 
 This inventory groups public routes by bounded context. Paths are part of the compatibility surface for the dashboard and regression scripts.
 
@@ -37,14 +37,19 @@ This inventory groups public routes by bounded context. Paths are part of the co
 Every broker-mutation route requires a 16-128 character ASCII `Idempotency-Key` matching `[A-Za-z0-9._:-]`. This includes direct order submit/replace/cancel and Bull Put/Covered Call lifecycle writes. Missing keys return `428`; conflicting or unresolved keys return a structured `409`; completed replays preserve the original result and add `Idempotent-Replayed: true`.
 
 - `GET /orders`
+- `GET /orders/paged`
 - `POST /orders/submit`
 - `POST /orders/{order_id}/refresh`
 - `POST /orders/{order_id}/replace`
 - `POST /orders/{order_id}/cancel`
 - `POST /orders/sync/longbridge/{external_account_id}`
 - `GET /executions`
+- `GET /executions/paged`
 - `GET /journals`
+- `GET /journals/paged`
 - `POST /journals`
+
+The historical `GET /orders`, `GET /executions`, and `GET /journals` routes keep their complete-list contract for reconciliation and explicit history reads. The three `/paged` routes are bounded dashboard reads. They return a `CursorPage` with `items`, `next_cursor`, `has_more`, and `limit`; `limit` is 1–100 and defaults to 50. Cursors are opaque and bound to the account and other filters used to create them. Orders accept `status`, `mode`, and `symbol`; executions accept `order_id`; journals accept `order_id`, `trade_plan_id`, and `entry_type`. A cursor reused with different filters is rejected.
 
 ## Market Events and Watchlists
 
@@ -101,6 +106,7 @@ Adding a watchlist item trims and uppercases its symbol, rejects blank/overlong 
 - `GET /strategies/bull-put/preview`
 - `GET /strategies/bull-put/readiness`
 - `GET /strategies/bull-put/spreads`
+- `GET /strategies/bull-put/active-spreads`
 - `GET /strategies/bull-put/spreads/{spread_id}`
 - `GET /strategies/bull-put/dashboard`
 - `GET /strategies/bull-put/runtime`
@@ -148,6 +154,7 @@ Only Preview is executable in P0. The execute route, `force=true` scan, and atte
 - `GET /ops/unattended-status`
 - `GET /ops/reason-codes`
 - `GET /ops/market-data-runtime`
+- `GET /ops/recovery-status`
 - `GET /ops/scheduler`
 - `GET /ops/consistency`
 - `POST /ops/consistency/repairs/{repair_id}`
@@ -162,3 +169,13 @@ Only Preview is executable in P0. The execute route, `force=true` scan, and atte
 No-order resolution requires explicit paper confirmation and three complete zero-match reconciliations spanning at least 60 seconds. Migration `20261002_0017` adds the persisted coverage evidence required by this check; legacy counts alone do not qualify. Incomplete history reads or conflicting broker identity evidence keep the intent unresolved.
 
 Advisor Record Output is atomic across its local ledger and audit writes. With `advisor_run_id`, matching retries return the linked proposal/review records; mismatched payloads or run ownership return `409`. Covered-call roll continuation validates that both order IDs belong to the current proposal's latest roll run and that quantities match the proposal; an existing linked sell ID cannot be omitted to request a new sell.
+
+### Bounded strategy and recovery reads
+
+`GET /strategies/bull-put/active-spreads` is the bounded strategy/dashboard read. It applies the active lifecycle-status predicate in the database and accepts `external_account_id`, `mode` (default `paper`), and an optional `symbol`. The historical `GET /strategies/bull-put/spreads` route remains the complete read. The active route is read-only and is not used for order-capacity or lifecycle decisions.
+
+`GET /ops/recovery-status?external_account_id=LBPT10087357&mode=paper&limit=100` is a read-only operator explanation of unresolved parent trade actions and child order intents. It reports total and displayed counts, unknown states, coverage timestamps, no-order evidence status, per-parent and per-child reason codes, next actions, and local SDK timeout quarantine state. `limit` bounds the displayed unresolved records (1–500); the `truncated` flag must be checked before treating the displayed list as complete. The endpoint does not reconcile intents, resolve them, initialize a broker context, or submit an order.
+
+Migration `20261002_0018` adds the account/time/id keyset indexes used by the paged history reads, the proposal/run decision-scope indexes used by Covered Call lifecycle and reservation queries, and the active-spread scope index used by the database-filtered route. It is additive and does not change the complete-list semantics of the legacy routes.
+
+Covered Call lifecycle reconciliation accepts `mode` (default `paper`). Its former `limit` query parameter remains accepted but is marked deprecated: complete lifecycle evidence queries now ignore that old history cap. Paper scheduler work, spread capacity, and the paper dashboard apply explicit mode filters. The legacy Bull Put spread history route accepts an optional `mode`; omitting it preserves the prior complete-history contract.

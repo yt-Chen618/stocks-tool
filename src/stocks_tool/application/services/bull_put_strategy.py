@@ -716,7 +716,10 @@ class BullPutStrategyService:
             mode=mode,
             as_of=evaluated_at,
         )
-        closed_spreads = self._list_closed_spreads(external_account_id=external_account_id)
+        closed_spreads = self._list_closed_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
         if not force:
             due_reason = self._review_not_due_reason(
                 state=state,
@@ -2550,10 +2553,16 @@ class BullPutStrategyService:
             return None
         return "Bull put review is not due yet."
 
-    def _list_closed_spreads(self, *, external_account_id: str) -> list[BullPutSpread]:
+    def _list_closed_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+    ) -> list[BullPutSpread]:
         spreads = self.spreads.list_spreads(
             external_account_id=external_account_id,
             status=SpreadStatus.CLOSED,
+            mode=mode,
         )
         return sorted(
             [spread for spread in spreads if spread.closed_at is not None],

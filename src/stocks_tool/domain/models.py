@@ -998,6 +998,16 @@ class MarketDataOperationRuntime(BaseModel):
     max_latency_ms: float | None = None
 
 
+class SdkTimeoutQuarantineStatus(BaseModel):
+    """Read-only state for SDK calls that outlived their local deadline."""
+
+    available: bool = True
+    pending_count: int = 0
+    oldest_started_at: datetime | None = None
+    oldest_duration_seconds: int | None = None
+    next_action: str | None = None
+
+
 class MarketDataModeRuntime(BaseModel):
     mode: ExecutionMode
     context_initialized: bool
@@ -1011,6 +1021,7 @@ class MarketDataRuntimeSnapshot(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed: bool
     sessions: list[MarketDataModeRuntime] = Field(default_factory=list)
+    sdk_quarantine: SdkTimeoutQuarantineStatus = Field(default_factory=SdkTimeoutQuarantineStatus)
 
 
 class WatchlistItem(BaseModel):
@@ -2016,6 +2027,80 @@ class OperatorConsistencyRepairResult(BaseModel):
     created_signal: StrategySignal | None = None
     broker_order_submitted: bool = False
     local_repair_executed: bool = False
+
+
+class OperatorRecoveryIntent(BaseModel):
+    """Operator-facing, read-only reconciliation evidence for one child intent."""
+
+    id: str
+    trade_action_intent_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    operation: TradingOperation
+    action: str
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    leg: str | None = None
+    state: TradingIntentState
+    external_order_id: str | None = None
+    target_order_id: str | None = None
+    parent_action: str | None = None
+    parent_state: TradingIntentState | None = None
+    created_at: datetime
+    updated_at: datetime
+    reconciliation_attempts: int = 0
+    first_reconciled_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    coverage_start_at: datetime | None = None
+    coverage_end_at: datetime | None = None
+    coverage_covers_intent: bool = False
+    checks_satisfied: bool = False
+    check_span_seconds: int | None = None
+    reason_code: str
+    reason_detail: str
+    next_action: str
+
+
+class OperatorRecoveryParent(BaseModel):
+    """Aggregated parent trade-action state for child intent recovery."""
+
+    id: str
+    external_account_id: str
+    mode: ExecutionMode
+    action: str | None = None
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    state: TradingIntentState | None = None
+    child_count: int = 0
+    unresolved_child_count: int = 0
+    evidence_ready_child_count: int = 0
+    children_truncated: bool = False
+    reason_code: str | None = None
+    next_action: str | None = None
+
+
+class OperatorRecoveryStatusSnapshot(BaseModel):
+    """Read-only explanation of trading-intent and SDK recovery blockers."""
+
+    generated_at: datetime
+    external_account_id: str
+    mode: ExecutionMode
+    status: str
+    recovery_blocked: bool
+    unresolved_count: int = 0
+    displayed_unresolved_count: int = 0
+    unknown_count: int = 0
+    displayed_unknown_count: int = 0
+    unresolved_parent_count: int = 0
+    displayed_parent_count: int = 0
+    unknown_parent_count: int = 0
+    displayed_unknown_parent_count: int = 0
+    truncated: bool = False
+    primary_blocker: str | None = None
+    next_action: str
+    parents: list[OperatorRecoveryParent] = Field(default_factory=list)
+    intents: list[OperatorRecoveryIntent] = Field(default_factory=list)
+    sdk_quarantine: SdkTimeoutQuarantineStatus = Field(default_factory=SdkTimeoutQuarantineStatus)
 
 
 class CreateStrategyAuditEventRequest(BaseModel):

@@ -35,6 +35,7 @@ from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.operator_status import OperatorStatusService
+from stocks_tool.application.services.recovery_status import RecoveryStatusService
 from stocks_tool.application.services.strategy_advisor_intake import (
     StrategyAdvisorIntakeService,
 )
@@ -442,4 +443,14 @@ def get_operator_status_service(
         scheduler_task_states=scheduler_task_states,
         audit_events=audit_events,
         broker_adapter=adapter,
+    )
+
+
+def get_recovery_status_service(
+    intent_ledger: TradingIntentLedger = Depends(get_trading_intent_ledger),
+    adapter: BrokerGateway = Depends(get_longbridge_adapter),
+) -> RecoveryStatusService:
+    return RecoveryStatusService(
+        intent_ledger=intent_ledger,
+        runtime_gateway=adapter,
     )

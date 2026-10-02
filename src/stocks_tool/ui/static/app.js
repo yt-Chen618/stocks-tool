@@ -49,6 +49,7 @@ const els = {};
 let accountLoader = null;
 let advisorView = null;
 let ordersView = null;
+let operationsRecoveryView = null;
 let isApplyingLanguage = false;
 let languageObserver = null;
 let languageFrame = null;
@@ -75,6 +76,10 @@ function initializeViewModules() {
   const fetchJson = window.StocksToolApiClient.fetchJson;
   const decodeCursorPage = window.StocksToolApiClient.decodeCursorPage;
   const createOverlayStatus = window.StocksToolState.createOverlayStatus;
+  operationsRecoveryView = window.StocksToolOperationsRecovery;
+  operationsRecoveryView?.init({
+    root: "#operations-recovery-panel",
+  });
   accountLoader = window.StocksToolAccountLoader?.createAccountLoader({
     state,
     fetchJson,
@@ -84,6 +89,9 @@ function initializeViewModules() {
     renderAccountOptions: () => renderAccountOptions(),
     renderEmptyState: () => renderEmptyAccountState(),
     renderAccountState: (payload) => renderAccountDataState(payload),
+    renderRecoveryLoading: () => operationsRecoveryView?.renderLoading(),
+    renderRecoveryStatus: (snapshot) => operationsRecoveryView?.render(snapshot),
+    renderRecoveryError: (error) => operationsRecoveryView?.renderError(error),
     applyTradingSafetyState,
     updateSyncButtons,
     updateOrderTicketAvailability: () => ordersView?.updateOrderTicketAvailability(),
@@ -782,7 +790,12 @@ function isMobileTradingViewport() {
 function applyTradingSafetyState() {
   const mobileBlocked = isMobileTradingViewport();
   const coreBlocked = !state.coreDataHealthy;
-  const intentBlocked = (state.unresolvedTradingIntents || []).length > 0;
+  const recoveryReady = state.recoveryStatusState === "ready"
+    && state.recoveryStatus?.external_account_id === state.selectedAccountId
+    && state.recoveryStatus?.mode === "paper";
+  const recoveryUnavailable = Boolean(state.selectedAccountId) && !recoveryReady;
+  const recoveryBlocked = recoveryReady && state.recoveryStatus?.recovery_blocked === true;
+  const intentBlocked = (state.unresolvedTradingIntents || []).length > 0 || recoveryBlocked || recoveryUnavailable;
   window.StocksToolExecution?.setMobileReadonly(mobileBlocked);
   document.querySelectorAll("button[data-broker-mutation='true']").forEach((button) => {
     const pending = state.pendingActionKeys.has(button.dataset.actionKey || "");
@@ -798,6 +811,10 @@ function applyTradingSafetyState() {
       button.title = "Use the desktop workbench for broker-writing actions.";
     } else if (coreBlocked) {
       button.title = "Required account data is stale. Refresh the dashboard before trading.";
+    } else if (recoveryUnavailable) {
+      button.title = "Recovery status is loading or unavailable. Broker-writing actions remain locked.";
+    } else if (recoveryBlocked) {
+      button.title = "Recovery evidence blocks broker-writing actions until reconciliation is complete.";
     } else if (intentBlocked) {
       button.title = "An unresolved trading intent blocks all broker-writing actions.";
     } else if (button.dataset.safetyOriginalTitle !== undefined) {
@@ -1013,6 +1030,7 @@ function formatPanelLoadLabel(key) {
     spreads: "Bull Put spreads",
     runtime: "Bull Put runtime",
     operatorStatus: "Operator status",
+    recoveryStatus: "Recovery status",
     tradingIntents: "Trading intents",
     tradeActions: "Trade actions",
     zeroDteLotteryRuntime: "Zero-DTE runtime",

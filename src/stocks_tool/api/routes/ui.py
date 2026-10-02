@@ -31,6 +31,8 @@ def render_dashboard() -> HTMLResponse:
     account_loader_js_url = _asset_url("account-loader.js")
     advisor_view_js_url = _asset_url("advisor-view.js")
     orders_view_js_url = _asset_url("orders-view.js")
+    operations_recovery_js_url = _asset_url("operations-recovery-view.js")
+    operations_recovery_css_url = _asset_url("operations-recovery-view.css")
     execution_drawer_js_url = _asset_url("execution-drawer.js")
     workspace_shell_js_url = _asset_url("workspace-shell.js")
     app_js_url = _asset_url("app.js")
@@ -44,7 +46,8 @@ def render_dashboard() -> HTMLResponse:
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>Stocks Tool Workbench</title>
                 <link rel="stylesheet" href="{app_css_url}" />
-                <link rel="stylesheet" href="{workspace_css_url}" />
+                    <link rel="stylesheet" href="{workspace_css_url}" />
+                    <link rel="stylesheet" href="{operations_recovery_css_url}" />
               </head>
               <body data-workspace="research" data-sidebar-collapsed="false">
                 <div id="app-shell" class="workbench-shell">
@@ -265,6 +268,10 @@ def render_dashboard() -> HTMLResponse:
                           <span class="reconciliation-detail">No account selected.</span>
                         </article>
                       </div>
+
+                      <section class="panel operations-recovery-panel-shell" aria-labelledby="operations-recovery-title">
+                        <div id="operations-recovery-panel" data-operations-recovery aria-live="polite"></div>
+                      </section>
 
                     </section>
 
@@ -1093,6 +1100,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{account_loader_js_url}" defer></script>
                 <script src="{advisor_view_js_url}" defer></script>
                 <script src="{orders_view_js_url}" defer></script>
+                <script src="{operations_recovery_js_url}" defer></script>
                 <script src="{execution_drawer_js_url}" defer></script>
                 <script src="{workspace_shell_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>

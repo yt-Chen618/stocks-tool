@@ -12,6 +12,9 @@
     renderAccountOptions,
     renderAccountState,
     renderEmptyState,
+    renderRecoveryLoading,
+    renderRecoveryStatus,
+    renderRecoveryError,
     applyTradingSafetyState,
     updateSyncButtons,
     updateOrderTicketAvailability,
@@ -50,6 +53,9 @@
         external_account_id: accountId,
         limit: String(ACTIVITY_PAGE_SIZE),
       });
+      if (kind === "orders") {
+        params.set("mode", "paper");
+      }
       if (cursor) {
         params.set("cursor", cursor);
       }
@@ -172,6 +178,8 @@
       state.advisorDraft = null;
       state.advisorRuns = [];
       state.operatorStatus = null;
+      state.recoveryStatus = null;
+      state.recoveryStatusState = "idle";
       state.unresolvedTradingIntents = [];
       state.coreDataHealthy = false;
       state.coreLoadFailures = ["account selection"];
@@ -197,6 +205,7 @@
         "Select a broker account before loading advisor context.",
       );
       renderEmptyState?.();
+      renderRecoveryStatus?.(null);
     }
 
     async function loadRecoverCloseEligibility(spreads) {
@@ -244,15 +253,19 @@
 
       state.coreDataHealthy = false;
       state.coreLoadFailures = ["Account data loading"];
+      state.recoveryStatus = null;
+      state.recoveryStatusState = "loading";
+      renderRecoveryLoading?.();
       applyTradingSafetyState?.();
 
       const accountId = encodeURIComponent(selectedAccountId);
       const requestSpecs = [
         ["latestSnapshot", true, `/account-snapshots/latest?external_account_id=${accountId}`],
         ["orders", true, activityUrl("orders", selectedAccountId)],
-        ["spreads", true, `/strategies/bull-put/spreads?external_account_id=${accountId}`],
+        ["spreads", true, `/strategies/bull-put/spreads?external_account_id=${accountId}&mode=paper`],
         ["runtime", true, `/strategies/bull-put/runtime?external_account_id=${accountId}`],
         ["operatorStatus", true, `/ops/unattended-status?external_account_id=${accountId}&mode=paper`],
+        ["recoveryStatus", true, `/ops/recovery-status?external_account_id=${accountId}&mode=paper&limit=100`],
         ["tradingIntents", true, `/ops/trading-intents?external_account_id=${accountId}&mode=paper&limit=100`],
         ["tradeActions", true, `/ops/trade-actions?external_account_id=${accountId}&mode=paper&limit=100`],
         ["zeroDteLotteryRuntime", false, `/strategies/zero-dte-lottery/runtime?external_account_id=${accountId}&mode=paper`],
@@ -285,6 +298,22 @@
             delete values[key];
             errors[key] = "Required account data was empty.";
           }
+        }
+      }
+
+      if ("recoveryStatus" in values) {
+        const recovery = objectPayload(values.recoveryStatus);
+        if (
+          recovery.external_account_id !== selectedAccountId ||
+          recovery.mode !== "paper" ||
+          typeof recovery.recovery_blocked !== "boolean" ||
+          !recovery.status
+        ) {
+          delete values.recoveryStatus;
+          errors.recoveryStatus = "Recovery status did not match the selected paper account.";
+        } else {
+          state.recoveryStatus = recovery;
+          state.recoveryStatusState = "ready";
         }
       }
 
@@ -355,6 +384,13 @@
       }
 
       renderAccountState?.({ errors, values, requiredFailures, optionalFailures });
+      if ("recoveryStatus" in values && !errors.recoveryStatus) {
+        renderRecoveryStatus?.(state.recoveryStatus);
+      } else if (errors.recoveryStatus) {
+        state.recoveryStatus = null;
+        state.recoveryStatusState = "error";
+        renderRecoveryError?.(new Error(errors.recoveryStatus));
+      }
       updateSyncButtons?.();
       updateOrderTicketAvailability?.();
       updatePreOpenButtons?.();
@@ -371,6 +407,9 @@
         state.accountListHealthy = false;
         state.coreDataHealthy = false;
         state.coreLoadFailures = ["Broker accounts"];
+        state.recoveryStatus = null;
+        state.recoveryStatusState = "error";
+        renderRecoveryError?.(error);
         applyTradingSafetyState?.();
         throw error;
       }

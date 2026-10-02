@@ -39,14 +39,14 @@ The pre-shrink historical handoff was copied to a local archive outside the repo
 - Covered call: `/strategies/covered-call/*`
 - Zero-DTE lottery: `/strategies/zero-dte-lottery/*`
 - Strategy ledger and advisor: `/strategies/experiment`, `/strategies/proposals*`, `/strategies/runs*`, `/strategies/signals*`, `/strategies/reviews*`, `/strategies/advisor*`
-- Operator posture and audit: `/ops/unattended-status`, `/ops/scheduler`, `/ops/consistency`, `/ops/audit`, `/ops/audit/summary`, `/ops/trading-intents`, `/ops/trade-actions`, `/ops/reason-codes`
+- Operator posture and audit: `/ops/unattended-status`, `/ops/recovery-status`, `/ops/scheduler`, `/ops/consistency`, `/ops/audit`, `/ops/audit/summary`, `/ops/trading-intents`, `/ops/trade-actions`, `/ops/reason-codes`
 
 ## Local Startup
 
 ```powershell
-docker compose up -d db
-.venv\Scripts\python.exe -m pip install -e .[dev]
-.venv\Scripts\alembic.exe upgrade head
+python scripts\setup_environment.py --start-postgres
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe scripts\check_environment.py --strict
 $env:RECONCILIATION_SCHEDULER_ENABLED="true"
 .venv\Scripts\python.exe -m uvicorn --app-dir src stocks_tool.main:app --reload
 ```
@@ -57,6 +57,17 @@ Open:
 - Swagger: `http://127.0.0.1:8000/docs`
 
 ## Current Implementation State
+
+### 2026-10-02 Four-batch optimization (complete)
+
+- Branch: `codex/four-batch-optimization-20261002`, from baseline `3f708ef`. All four accepted batches are implemented and verified; the requirement audit is `artifacts/four-batch-20261002/completion-audit.json`.
+- Reproducible setup locks the tested Python dependencies, uv, PostgreSQL image digest, project Playwright and Chromium. Strict read-only preflight checks versions, dependency/lock synchronization, schema, and direct package import from this checkout with `PYTHONPATH` removed. Hatch exact editable mode also works from the Windows Chinese path. CI is configured in `.github/workflows/ci.yml`; no remote CI run is claimed.
+- Lifecycle decisions use complete account/mode/status/entity queries instead of recent 100/500-row caps. Paper scheduler, spread capacity, closed-spread review, and dashboard queries are mode scoped. `/orders/paged`, `/executions/paged`, and `/journals/paged` use immutable `(created_at, id)` keysets; the UI loads 25 rows and explicitly loads more. Legacy list routes retain complete-history semantics. Research uses SQL-filtered active spreads; the Bull Put history view remains complete.
+- PostgreSQL fixtures at 10,000 and 100,000 rows per table passed. After 80,001 preceding account rows, each deep page uses an index and examines 51 candidate keys to materialize 50 records. Migration `20261002_0018` was applied after backup; all rows in 24 business tables matched a restored pre-migration backup by sorted row hashes.
+- Bull Put pre-open research now owns proxy/overlay, scoring, checkpoint, fallback, capture, and review work behind the existing facade. Dashboard account loading, Advisor, and order views are separate native modules. `bull_put_strategy.py` decreased from 5,724 to 4,342 lines and `app.js` from 5,758 to 4,540; these are responsibility moves, not removed product features.
+- Operations now displays unresolved parent/child intent totals, coverage/check/time evidence, reason and next-step guidance, and SDK quarantine. The read model shares no-order policy with the ledger. Loading, errors, parent-only unknown outcomes, and quarantine retain write blocking; the view never resolves or retries an order. Account-loader alone owns requests, account/mode validation, and response generations.
+- Final independent clean-checkout P0 passed **27 checks**, including **550 pytest tests**, **18 mock posture scenarios**, PostgreSQL concurrency/rollback proof, and the new real-DOM recovery gate. Recovery checks include clear-to-SDK-blocked/error transitions, parent-only outcomes, truncation, account success/failure races, late pagination, language changes, healthy-panel retention, and settled 1440/760px captures with zero mutations. The in-memory Bull Put open/close/review/journal flow also passed.
+- Source, setup, and clean-checkout evidence live under `artifacts/four-batch-20261002/`. `.cn`, mainland buying restrictions, and real external-market checks remain deferred by the user. No real or paper broker order was submitted, no `.env` value was changed, and no broker scheduler was enabled for this validation.
 
 ### 2026-10-02 Repository correctness pass
 

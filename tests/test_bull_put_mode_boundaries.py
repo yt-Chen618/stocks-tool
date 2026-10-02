@@ -22,7 +22,7 @@ def compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
     return "JSON"
 
 
-def _build_service_with_mixed_spreads() -> tuple[object, object]:
+def _build_service_with_mixed_spreads(*, closed: bool = False) -> tuple[object, object]:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
     session = Session(engine, expire_on_commit=False)
@@ -38,9 +38,20 @@ def _build_service_with_mixed_spreads() -> tuple[object, object]:
     )
     session.commit()
     repository = SQLAlchemyBullPutSpreadRepository(session)
-    paper = build_open_spread().model_copy(update={"id": "paper-spread", "mode": ExecutionMode.PAPER})
+    base_updates = (
+        {
+            "status": SpreadStatus.CLOSED,
+            "closed_at": datetime(2026, 6, 20, 14, 45, tzinfo=timezone.utc),
+            "raw_payload": {"close": {"realized_pnl": "80.00"}},
+        }
+        if closed
+        else {"status": SpreadStatus.OPEN}
+    )
+    paper = build_open_spread().model_copy(
+        update={"id": "paper-spread", "mode": ExecutionMode.PAPER, **base_updates}
+    )
     live = build_open_spread().model_copy(
-        update={"id": "live-spread", "mode": ExecutionMode.LIVE, "status": SpreadStatus.OPEN}
+        update={"id": "live-spread", "mode": ExecutionMode.LIVE, **base_updates}
     )
     for spread in (paper, live):
         record = BullPutSpreadRecord(id=spread.id)
@@ -111,5 +122,21 @@ def test_runtime_projection_counts_only_spreads_in_state_mode() -> None:
 
         assert computed.active_spread_count == 1
         assert computed.open_spread_count == 1
+    finally:
+        engine.dispose()
+
+
+def test_bull_put_review_uses_requested_mode_for_closed_history() -> None:
+    service, engine = _build_service_with_mixed_spreads(closed=True)
+    try:
+        service.journal_service.create_entry.return_value = None
+        result = service.run_review(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            as_of=datetime(2026, 6, 22, 14, 45, tzinfo=timezone.utc),
+            force=True,
+        )
+
+        assert result.reviewed_spread_ids == ["paper-spread"]
     finally:
         engine.dispose()

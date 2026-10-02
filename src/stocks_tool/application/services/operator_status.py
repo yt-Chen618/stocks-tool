@@ -76,6 +76,20 @@ OPERATOR_REASON_CODE_DETAILS = {
     "order_sync_backoff": "Broker order synchronization is in backoff.",
     "quote_cache_fallback": "A read-only quote cache fallback was used for degraded rendering.",
     "broker_rate_limited": "Broker market-data or order-detail requests are rate limited.",
+    "order_outcome_unknown": "A broker order outcome is unknown and requires reconciliation before another mutation.",
+    "order_reconciliation_pending": "A broker order intent is still unresolved and requires reconciliation.",
+    "reconciliation_coverage_incomplete": "Broker-history evidence does not cover the intent creation time.",
+    "reconciliation_checks_pending": "Fewer than three complete zero-match reconciliation checks are recorded.",
+    "reconciliation_wait_window": "Complete zero-match checks have not yet spanned the required 60 seconds.",
+    "reconciliation_evidence_ready": "Read-only no-order evidence meets the count, coverage, and time checks.",
+    "reconciliation_timestamps_incomplete": "The first and latest reconciliation timestamps are incomplete.",
+    "external_order_id_present": "An external order id is already recorded; inspect that broker order instead of treating it as no order.",
+    "intent_state_not_resolvable": "The intent state is not eligible for a no-order review.",
+    "parent_action_persisted": "The parent trade action is already persisted and cannot accept a child no-order resolution.",
+    "parent_intent_missing": "The parent trade action cannot be read for this child intent.",
+    "paper_resolution_not_allowed": "Only paper-mode intents can be reviewed for no-order resolution.",
+    "sdk_timeout_quarantine": "A timed-out SDK call is still running; broker writes remain paused until it finishes.",
+    "sdk_runtime_unavailable": "Local SDK quarantine state cannot be read; broker writes remain paused.",
 }
 
 

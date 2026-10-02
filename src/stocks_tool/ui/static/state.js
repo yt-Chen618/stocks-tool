@@ -32,6 +32,8 @@
       advisorDraft: null,
       advisorRuns: [],
       operatorStatus: null,
+      recoveryStatus: null,
+      recoveryStatusState: "idle",
       unresolvedTradingIntents: [],
       coreDataHealthy: false,
       accountListHealthy: false,
