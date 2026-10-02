@@ -468,6 +468,154 @@ async function main() {
   let languageEvidence = null;
   let reasonEvidence = null;
   let sdkEvidence = null;
+  let tradingSafetyEvidence = null;
+
+  const runTradingSafetyDomChecks = async () => {
+    recoveryMode = "rich";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "券商历史覆盖不完整");
+    const blockedNoButton = await page.evaluate(async () => {
+      window.__m1MutationCalls = 0;
+      const result = await window.runConfirmedBrokerMutation({
+        actionKey: "m1-no-button-blocked",
+        confirmation: { title: "M1 blocked", summary: "M1 blocked", details: {} },
+        requestSignature: "blocked",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return { blocked: result.blocked === true, calls: window.__m1MutationCalls, dialogOpen: Boolean(document.querySelector("#trade-confirm-dialog[open]")) };
+    });
+    if (!blockedNoButton.blocked || blockedNoButton.calls !== 0 || blockedNoButton.dialogOpen) {
+      throw new Error(`No-button recovery guard failed: ${JSON.stringify(blockedNoButton)}`);
+    }
+
+    recoveryMode = "clear";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+
+    const accountRaceStart = await page.evaluate(() => {
+      window.__m1MutationCalls = 0;
+      window.__m1AccountRacePromise = window.runConfirmedBrokerMutation({
+        actionKey: "m1-account-race",
+        confirmation: { title: "M1 account race", summary: "M1 account race", details: {} },
+        requestSignature: "account-race",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return true;
+    });
+    if (!accountRaceStart) throw new Error("Could not start account race mutation.");
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await page.evaluate(() => {
+      const select = document.getElementById("account-select");
+      select.value = "LBPT10087357-ALT";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitFor(() => page.locator("#account-select").inputValue().then((value) => value === ALT_ACCOUNT), timeoutMs, "account change during confirmation");
+    await page.click("#trade-confirm-accept");
+    const accountRaceResult = await page.evaluate(async () => window.__m1AccountRacePromise);
+    if (accountRaceResult.executed || accountRaceResult.contextChanged !== true) {
+      throw new Error(`Account-change confirmation recheck failed: ${JSON.stringify(accountRaceResult)}`);
+    }
+
+    await page.evaluate(() => {
+      const select = document.getElementById("account-select");
+      select.value = "LBPT10087357";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitFor(() => page.locator("#account-select").inputValue().then((value) => value === PRIMARY_ACCOUNT), timeoutMs, "primary account restore");
+    recoveryMode = "clear";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+
+    const recoveryRaceStart = await page.evaluate(() => {
+      window.__m1MutationCalls = 0;
+      window.__m1RecoveryRacePromise = window.runConfirmedBrokerMutation({
+        actionKey: "m1-recovery-race",
+        confirmation: { title: "M1 recovery race", summary: "M1 recovery race", details: {} },
+        requestSignature: "recovery-race",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return true;
+    });
+    if (!recoveryRaceStart) throw new Error("Could not start recovery race mutation.");
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    recoveryMode = "rich";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "券商历史覆盖不完整");
+    await page.click("#trade-confirm-accept");
+    const recoveryRaceResult = await page.evaluate(async () => window.__m1RecoveryRacePromise);
+    if (recoveryRaceResult.executed || recoveryRaceResult.contextChanged !== true) {
+      throw new Error(`Recovery-change confirmation recheck failed: ${JSON.stringify(recoveryRaceResult)}`);
+    }
+
+    recoveryMode = "clear";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+    const signatureStart = await page.evaluate(() => {
+      window.__m1MutationCalls = 0;
+      window.__m1RequestSignature = "old-signature";
+      window.__m1SignaturePromise = window.runConfirmedBrokerMutation({
+        actionKey: "m1-signature-change",
+        confirmation: { title: "M1 signature change", summary: "M1 signature change", details: {} },
+        requestSignature: "old-signature",
+        getRequestSignature: () => window.__m1RequestSignature,
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return true;
+    });
+    if (!signatureStart) throw new Error("Could not start signature-change mutation.");
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await page.evaluate(() => { window.__m1RequestSignature = "new-signature"; });
+    await page.click("#trade-confirm-accept");
+    const signatureResult = await page.evaluate(async () => window.__m1SignaturePromise);
+    if (signatureResult.executed || signatureResult.contextChanged !== true) {
+      throw new Error(`Request-signature confirmation recheck failed: ${JSON.stringify(signatureResult)}`);
+    }
+
+    recoveryMode = "clear";
+    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
+    await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+    await page.evaluate(() => {
+      window.__m1MutationCalls = 0;
+      window.__m1Release = null;
+      window.__m1FirstPromise = window.runConfirmedBrokerMutation({
+        actionKey: "m1-duplicate",
+        confirmation: { title: "M1 duplicate", summary: "M1 duplicate", details: {} },
+        requestSignature: "duplicate",
+        statusElement: null,
+      }, async () => {
+        window.__m1MutationCalls += 1;
+        await new Promise((resolve) => { window.__m1Release = resolve; });
+        return { ok: true };
+      });
+      return true;
+    });
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await page.click("#trade-confirm-accept");
+    await waitFor(() => page.evaluate(() => window.__m1MutationCalls === 1), timeoutMs, "first mutation operation");
+    const duplicateResult = await page.evaluate(async () => window.runConfirmedBrokerMutation({
+      actionKey: "m1-duplicate",
+      confirmation: { title: "M1 duplicate", summary: "M1 duplicate", details: {} },
+      requestSignature: "duplicate",
+      statusElement: null,
+    }, async () => { window.__m1MutationCalls += 1; return { ok: true }; }));
+    if (duplicateResult.executed || duplicateResult.blocked !== true) {
+      throw new Error(`Duplicate mutation was not blocked: ${JSON.stringify(duplicateResult)}`);
+    }
+    await page.evaluate(() => window.__m1Release?.());
+    const firstResult = await page.evaluate(async () => window.__m1FirstPromise);
+    const duplicateCalls = await page.evaluate(() => window.__m1MutationCalls);
+    if (!firstResult.executed || duplicateCalls !== 1) {
+      throw new Error(`Duplicate mutation operation count was not exactly one: ${JSON.stringify({ firstResult, duplicateCalls })}`);
+    }
+    return {
+      blockedWithoutButton: true,
+      accountChangeRejected: true,
+      recoveryChangeRejected: true,
+      signatureChangeRejected: true,
+      duplicateOperationCount: duplicateCalls,
+      ownPendingAllowed: true,
+    };
+  };
 
   try {
     await page.goto(baseUrl, { waitUntil: "load" });
@@ -509,6 +657,7 @@ async function main() {
     };
     await assertBrokerGuard(true, "parent-only unknown recovery");
     const parentOnlyEvidence = { parent_only: true, child_count_visible: 0, broker_gate_blocked: true };
+    tradingSafetyEvidence = await runTradingSafetyDomChecks();
 
     const refreshDashboardForMode = async (mode, expectedText) => {
       recoveryMode = mode;
@@ -673,6 +822,7 @@ async function main() {
       account_race: accountRaceEvidence,
       recovery_failure: failureEvidence,
       pagination: paginationEvidence,
+      trading_safety: tradingSafetyEvidence,
       mutation_requests: mutationRequests,
       screenshots,
     };
