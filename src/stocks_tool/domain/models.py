@@ -2007,6 +2007,12 @@ class OperatorConsistencySummary(BaseModel):
     warn_count: int = 0
     fail_count: int = 0
     repair_available_count: int = 0
+    total_check_count: int = 0
+    total_fail_count: int = 0
+    total_warn_count: int = 0
+    total_repair_available_count: int = 0
+    truncated: bool = False
+    coverage_complete: bool = True
     checks: list[OperatorConsistencyCheck] = Field(default_factory=list)
 
 

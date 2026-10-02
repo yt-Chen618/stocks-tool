@@ -581,9 +581,14 @@ class OperatorStatusService:
                     limit=50,
                 )
                 consistency_status = consistency_summary.status
+                consistency_repair_count = (
+                    consistency_summary.total_repair_available_count
+                    if consistency_summary.total_check_count
+                    else consistency_summary.repair_available_count
+                )
                 consistency_reason_code = self._consistency_reason_code(
                     status=consistency_status,
-                    repair_available_count=consistency_summary.repair_available_count,
+                    repair_available_count=consistency_repair_count,
                 )
                 self._add_check(
                     checks,
@@ -644,7 +649,15 @@ class OperatorStatusService:
             consistency_summary=consistency_summary,
             primary_blocker=self._primary_blocker(checks),
             local_repair_available=(
-                consistency_summary.repair_available_count > 0 if consistency_summary is not None else None
+                (
+                    (
+                        consistency_summary.total_repair_available_count
+                        if consistency_summary.total_check_count
+                        else consistency_summary.repair_available_count
+                    ) > 0
+                    if consistency_summary is not None
+                    else None
+                )
             ),
             latest_evidence_at=self._latest_evidence_at(
                 generated_at=generated_at,
@@ -1139,15 +1152,18 @@ class OperatorStatusService:
 
     @staticmethod
     def _consistency_check_detail(summary: OperatorConsistencySummary) -> str:
-        if summary.repair_available_count:
+        repair_count = summary.total_repair_available_count if summary.total_check_count else summary.repair_available_count
+        fail_count = summary.total_fail_count if summary.total_check_count else summary.fail_count
+        warn_count = summary.total_warn_count if summary.total_check_count else summary.warn_count
+        if repair_count:
             return (
-                f"{summary.repair_available_count} guarded local ledger repair(s) available; "
+                f"{repair_count} guarded local ledger repair(s) available; "
                 "explicit operator confirmation is required."
             )
-        if summary.fail_count:
-            return f"{summary.fail_count} local ledger consistency check(s) failed."
-        if summary.warn_count:
-            return f"{summary.warn_count} local ledger consistency check(s) returned warnings."
+        if fail_count:
+            return f"{fail_count} local ledger consistency check(s) failed."
+        if warn_count:
+            return f"{warn_count} local ledger consistency check(s) returned warnings."
         return "Local strategy/order ledger consistency checks passed."
 
     @staticmethod

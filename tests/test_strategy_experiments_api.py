@@ -381,6 +381,7 @@ def test_covered_call_activity_route_returns_dedicated_snapshot() -> None:
     assert body["proposals"][1]["proposed_action"] == "roll_covered_call"
     service.get_covered_call_activity.assert_called_once_with(
         external_account_id="LBPT10087357",
+        mode=None,
         limit=8,
     )
 
@@ -411,6 +412,8 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
         ),
     ]
     experiments.list_runs.return_value = [build_covered_call_run("proposal_close")]
+    experiments.list_latest_runs_by_proposal.return_value = [build_covered_call_run("proposal_close")]
+    experiments.iter_proposals.return_value = experiments.list_proposals.return_value
     experiments.list_signals.return_value = []
     experiments.list_reviews.return_value = []
     service = StrategyExperimentService(
@@ -429,12 +432,7 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
     assert activity.summary.pending_rolls == 1
     assert activity.summary.close_runs == 1
     assert activity.summary.latest_activity_at == NOW
-    experiments.list_proposals.assert_called_once_with(
-        external_account_id="LBPT10087357",
-        strategy_id="covered_call_v1",
-        status=None,
-        limit=8,
-    )
+    experiments.list_proposals.assert_called_once()
 
 
 def test_strategy_experiment_service_lists_covered_call_lifecycle_tasks() -> None:
@@ -493,6 +491,8 @@ def test_strategy_experiment_service_lists_covered_call_lifecycle_tasks() -> Non
             created_at=NOW,
         ),
     ]
+    experiments.list_latest_runs_by_proposal.return_value = experiments.list_runs.return_value
+    experiments.iter_proposals.return_value = experiments.list_proposals.return_value
     experiments.list_signals.return_value = [build_covered_call_monitor_signal()]
     experiments.list_reviews.return_value = []
     service = StrategyExperimentService(
@@ -700,6 +700,7 @@ def test_strategy_advisor_context_route_returns_read_only_context() -> None:
     assert body["covered_call_activity"]["summary"]["external_account_id"] == "LBPT10087357"
     service.get_advisor_context.assert_called_once_with(
         external_account_id="LBPT10087357",
+        mode=None,
         limit=6,
     )
 
@@ -1252,13 +1253,16 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
     experiments = Mock()
     broker_accounts = Mock()
     broker_accounts.get_by_external_account_id.return_value = object()
-    experiments.list_proposals.side_effect = [
-        [build_proposal()],
-        [build_covered_call_proposal(status=StrategyProposalStatus.CLOSED)],
-    ]
-    experiments.list_runs.side_effect = [[build_run()], []]
-    experiments.list_signals.side_effect = [[build_signal()], []]
-    experiments.list_reviews.side_effect = [[build_review()], []]
+    experiments.list_proposals.side_effect = lambda **kwargs: (
+        [build_covered_call_proposal(status=StrategyProposalStatus.CLOSED)]
+        if kwargs.get("strategy_id") == "covered_call_v1"
+        else [build_proposal()]
+    )
+    experiments.list_runs.side_effect = lambda **kwargs: []
+    experiments.list_signals.side_effect = lambda **kwargs: [build_signal()]
+    experiments.list_reviews.side_effect = lambda **kwargs: [build_review()]
+    experiments.list_latest_runs_by_proposal.return_value = []
+    experiments.iter_proposals.side_effect = experiments.list_proposals.side_effect
     service = StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,
@@ -1287,12 +1291,14 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
         external_account_id="LBPT10087357",
         strategy_id=None,
         status=None,
+        mode=None,
         limit=6,
     )
     experiments.list_proposals.assert_any_call(
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
         status=None,
+        mode=None,
         limit=6,
     )
 

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
@@ -531,6 +531,17 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def iter_proposals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        status: StrategyProposalStatus | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> Iterator[StrategyProposal]:
+        raise NotImplementedError
+
+    @abstractmethod
     def create_run(self, request: CreateStrategyRunRequest) -> StrategyRun:
         raise NotImplementedError
 
@@ -544,6 +555,7 @@ class StrategyExperimentRepository(ABC):
         statuses: Collection[StrategyRunStatus] | None = None,
         mode: ExecutionMode | None = None,
         symbol: str | None = None,
+        order_id: str | None = None,
         proposal_id: str | None = None,
         proposal_ids: Collection[str] | None = None,
         run_types: Collection[str] | None = None,
@@ -562,6 +574,28 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_latest_runs_by_proposal(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_types: Collection[str],
+    ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        order_id: str | None = None,
+    ) -> Iterator[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         raise NotImplementedError
 
@@ -571,8 +605,23 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+        limit: int | None = 20,
     ) -> list[StrategySignal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_signals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+    ) -> Iterator[StrategySignal]:
         raise NotImplementedError
 
     @abstractmethod
@@ -585,7 +634,8 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyReview]:
         raise NotImplementedError
 

@@ -1430,11 +1430,17 @@ class CoveredCallStrategyService:
         if self.order_service is None:
             raise RuntimeError("Covered call lifecycle reconciliation requires an order service.")
         evaluated_at = self._reference_time(as_of)
-        runs = self.experiments.list_runs(
+        runs = self.experiments.list_latest_runs_by_proposal(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
             mode=mode,
-            limit=None,
+            run_types={
+                "proposal_execution",
+                "open_lifecycle_refresh",
+                "proposal_close",
+                "roll_execution",
+                "roll_continuation",
+            },
         )
         execution_runs = self._latest_runs_by_proposal(runs, {"proposal_execution", "open_lifecycle_refresh"})
         close_runs = self._latest_runs_by_proposal(runs, {"proposal_close"})

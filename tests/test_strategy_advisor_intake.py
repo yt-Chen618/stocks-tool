@@ -79,6 +79,10 @@ def build_strategy_experiment_service(experiments: Mock) -> StrategyExperimentSe
     experiments.list_runs.side_effect = [[], []]
     experiments.list_signals.side_effect = [[], []]
     experiments.list_reviews.side_effect = [[], []]
+    experiments.iter_proposals.return_value = []
+    experiments.iter_runs.return_value = []
+    experiments.iter_signals.return_value = []
+    experiments.list_latest_runs_by_proposal.return_value = []
     return StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,

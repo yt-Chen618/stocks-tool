@@ -246,6 +246,28 @@ class FakeExperiments:
             runs = [item for item in runs if item.run_type in run_types]
         return runs if limit is None else runs[:limit]
 
+    def list_latest_runs_by_proposal(
+        self,
+        *,
+        external_account_id=None,
+        strategy_id=None,
+        mode=None,
+        run_types,
+    ):
+        runs = self.list_runs(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            mode=mode,
+            limit=None,
+        )
+        latest = {}
+        for run in runs:
+            if run.proposal_id is None or run.run_type not in run_types:
+                continue
+            if run.proposal_id not in latest:
+                latest[run.proposal_id] = run
+        return list(latest.values())
+
     def get_latest_run_for_proposal(self, *, proposal_id, strategy_id, run_types):
         for run in self.runs:
             if (

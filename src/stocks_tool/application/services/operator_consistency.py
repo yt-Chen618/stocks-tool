@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -68,11 +68,10 @@ class OperatorConsistencyService:
         generated_at = datetime.now(timezone.utc)
         effective_limit = max(1, min(int(limit), 200))
         strategy_filter = strategy.strip() if strategy else None
-        orders = [
-            order
-            for order in self.order_service.list_orders(external_account_id=external_account_id)
-            if order.mode == mode
-        ]
+        orders = self.order_service.list_orders(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
         checks: list[OperatorConsistencyCheck] = []
         if strategy_filter in (None, ZERO_DTE_STRATEGY_ID):
             checks.extend(
@@ -103,11 +102,14 @@ class OperatorConsistencyService:
                     limit=effective_limit,
                 )
             )
-        checks = checks[:effective_limit]
-        fail_count = sum(1 for check in checks if check.status == "fail")
-        warn_count = sum(1 for check in checks if check.status == "warn")
-        pass_count = sum(1 for check in checks if check.status == "pass")
-        status = "fail" if fail_count else "warn" if warn_count else "pass"
+        display_checks = checks[:effective_limit]
+        fail_count = sum(1 for check in display_checks if check.status == "fail")
+        warn_count = sum(1 for check in display_checks if check.status == "warn")
+        pass_count = sum(1 for check in display_checks if check.status == "pass")
+        total_fail_count = sum(1 for check in checks if check.status == "fail")
+        total_warn_count = sum(1 for check in checks if check.status == "warn")
+        total_repair_count = sum(1 for check in checks if check.repair_available)
+        status = "fail" if total_fail_count else "warn" if total_warn_count else "pass"
         return OperatorConsistencySummary(
             generated_at=generated_at,
             external_account_id=external_account_id,
@@ -115,12 +117,18 @@ class OperatorConsistencyService:
             strategy=strategy_filter,
             limit=effective_limit,
             status=status,
-            check_count=len(checks),
+            check_count=len(display_checks),
             pass_count=pass_count,
             warn_count=warn_count,
             fail_count=fail_count,
-            repair_available_count=sum(1 for check in checks if check.repair_available),
-            checks=checks,
+            repair_available_count=sum(1 for check in display_checks if check.repair_available),
+            total_check_count=len(checks),
+            total_fail_count=total_fail_count,
+            total_warn_count=total_warn_count,
+            total_repair_available_count=total_repair_count,
+            truncated=len(display_checks) < len(checks),
+            coverage_complete=True,
+            checks=display_checks,
         )
 
     def apply_repair(
@@ -144,18 +152,33 @@ class OperatorConsistencyService:
         if brief is None:
             raise ValueError(f"Order '{order_id}' is not an eligible zero-DTE manual-scan paper order.")
 
-        runs = self.strategy_experiments.list_runs(
-            external_account_id=request.external_account_id,
-            strategy_id=ZERO_DTE_STRATEGY_ID,
-            limit=200,
+        run = next(
+            (
+                candidate
+                for candidate in self.strategy_experiments.iter_runs(
+                    external_account_id=request.external_account_id,
+                    strategy_id=ZERO_DTE_STRATEGY_ID,
+                    mode=request.mode,
+                )
+                if self._run_links_order(candidate, order.id)
+            ),
+            None,
         )
-        signals = self.strategy_experiments.list_signals(
-            external_account_id=request.external_account_id,
-            strategy_id=ZERO_DTE_STRATEGY_ID,
-            limit=200,
+        signal_source = (
+            self.strategy_experiments.iter_signals(
+                external_account_id=request.external_account_id,
+                strategy_id=ZERO_DTE_STRATEGY_ID,
+                mode=request.mode,
+                run_id=run.id,
+            )
+            if run is not None
+            else self.strategy_experiments.iter_signals(
+                external_account_id=request.external_account_id,
+                strategy_id=ZERO_DTE_STRATEGY_ID,
+                mode=request.mode,
+            )
         )
-        run = self._find_zero_dte_run_for_order(runs, order_id=order.id)
-        signal = self._find_zero_dte_execution_signal(signals, run=run, order_id=order.id)
+        signal = self._find_zero_dte_execution_signal(signal_source, run=run, order_id=order.id)
         if run is not None and signal is not None:
             check = self._zero_dte_check_for_order(
                 external_account_id=request.external_account_id,
@@ -258,19 +281,9 @@ class OperatorConsistencyService:
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
-        runs = self.strategy_experiments.list_runs(
-            external_account_id=external_account_id,
-            strategy_id=ZERO_DTE_STRATEGY_ID,
-            limit=max(100, limit),
-        )
-        signals = self.strategy_experiments.list_signals(
-            external_account_id=external_account_id,
-            strategy_id=ZERO_DTE_STRATEGY_ID,
-            limit=max(100, limit),
-        )
         manual_scan_orders = [
             order for order in orders if self._zero_dte_manual_scan_order_brief(order) is not None
-        ][:limit]
+        ]
         if not manual_scan_orders:
             return [
                 self._check(
@@ -284,6 +297,49 @@ class OperatorConsistencyService:
                     recommended_action="No operator action required.",
                 )
             ]
+        order_ids = {order.id for order in manual_scan_orders}
+        runs = [
+            run
+            for run in self.strategy_experiments.iter_runs(
+                external_account_id=external_account_id,
+                strategy_id=ZERO_DTE_STRATEGY_ID,
+                mode=mode,
+            )
+            if run.order_id in order_ids
+            or bool(
+                order_ids
+                & {
+                    str(value)
+                    for key, value in (run.metrics_payload or {}).items()
+                    if isinstance(run.metrics_payload, dict)
+                    and key.endswith("order_id")
+                    and value
+                }
+            )
+        ]
+        run_ids = {run.id for run in runs}
+        signals = [
+            signal
+            for signal in self.strategy_experiments.iter_signals(
+                external_account_id=external_account_id,
+                strategy_id=ZERO_DTE_STRATEGY_ID,
+                mode=mode,
+            )
+            if signal.run_id in run_ids
+            or bool(
+                order_ids
+                & {
+                    str(payload.get("id"))
+                    for key in ("reconciled_order", "order")
+                    for payload in [
+                        signal.signal_payload.get(key)
+                        if isinstance(signal.signal_payload, dict)
+                        else None
+                    ]
+                    if isinstance(payload, Mapping) and payload.get("id")
+                }
+            )
+        ]
         return [
             self._zero_dte_check_for_order(
                 external_account_id=external_account_id,
@@ -308,38 +364,34 @@ class OperatorConsistencyService:
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
-        proposals = [
-            proposal
-            for proposal in self.strategy_experiments.list_proposals(
-                external_account_id=external_account_id,
-                strategy_id=COVERED_CALL_STRATEGY_ID,
-                limit=max(100, limit),
-            )
-            if proposal.mode == mode
-        ]
-        runs = [
-            run
-            for run in self.strategy_experiments.list_runs(
-                external_account_id=external_account_id,
-                strategy_id=COVERED_CALL_STRATEGY_ID,
-                limit=max(100, limit),
-            )
-            if run.mode == mode
-        ]
-        executed = [
-            proposal
-            for proposal in proposals
-            if proposal.status in {
+        runs_by_proposal: dict[str, list[StrategyRun]] = {}
+        for run in self.strategy_experiments.iter_runs(
+            external_account_id=external_account_id,
+            strategy_id=COVERED_CALL_STRATEGY_ID,
+            mode=mode,
+        ):
+            if run.proposal_id is not None:
+                runs_by_proposal.setdefault(run.proposal_id, []).append(run)
+        missing: list[StrategyProposal] = []
+        executed_ids: list[str] = []
+        for proposal in self.strategy_experiments.iter_proposals(
+            external_account_id=external_account_id,
+            strategy_id=COVERED_CALL_STRATEGY_ID,
+            mode=mode,
+        ):
+            if proposal.status not in {
                 StrategyProposalStatus.EXECUTED,
                 StrategyProposalStatus.CLOSED,
                 StrategyProposalStatus.ROLLED,
-            }
-        ]
-        missing = [
-            proposal
-            for proposal in executed
-            if not self._covered_call_has_order_link(proposal=proposal, runs=runs)
-        ][:limit]
+            }:
+                continue
+            if len(executed_ids) < 5:
+                executed_ids.append(proposal.id)
+            if not self._covered_call_has_order_link(
+                proposal=proposal,
+                runs=runs_by_proposal.get(proposal.id, []),
+            ):
+                missing.append(proposal)
         if not missing:
             return [
                 self._check(
@@ -351,7 +403,7 @@ class OperatorConsistencyService:
                     reason_code="covered_call_order_linkage_clean",
                     summary="Covered-call executed proposals have observable order linkage.",
                     recommended_action="No operator action required.",
-                    related_proposal_ids=[proposal.id for proposal in executed[: min(5, len(executed))]],
+                    related_proposal_ids=executed_ids,
                 )
             ]
         return [
@@ -381,8 +433,10 @@ class OperatorConsistencyService:
     ) -> list[OperatorConsistencyCheck]:
         spreads = [
             spread
-            for spread in self.bull_put_strategy.list_spreads(external_account_id=external_account_id)
-            if spread.mode == mode
+            for spread in self.bull_put_strategy.list_spreads(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
         ]
         orders_by_id = self._orders_by_id(orders)
         drifted: list[tuple[BullPutSpread, dict[str, Any]]] = []
@@ -434,7 +488,7 @@ class OperatorConsistencyService:
                 recommended_action="Use recover-close eligibility before considering any paper recovery order.",
                 payload={"warning": warning},
             )
-            for spread, warning in drifted[:limit]
+            for spread, warning in drifted
         ]
 
     def _zero_dte_check_for_order(
@@ -539,12 +593,23 @@ class OperatorConsistencyService:
         )
 
     @staticmethod
-    def _find_zero_dte_run_for_order(runs: list[StrategyRun], *, order_id: str) -> StrategyRun | None:
-        return next((run for run in runs if run.order_id == order_id), None)
+    def _find_zero_dte_run_for_order(runs: Iterable[StrategyRun], *, order_id: str) -> StrategyRun | None:
+        return next((run for run in runs if OperatorConsistencyService._run_links_order(run, order_id)), None)
+
+    @staticmethod
+    def _run_links_order(run: StrategyRun, order_id: str) -> bool:
+        if run.order_id == order_id:
+            return True
+        payload = run.metrics_payload if isinstance(run.metrics_payload, dict) else {}
+        return any(
+            str(payload.get(key)) == order_id
+            for key in ("order_id", "reconciled_order_id", "manual_scan_order_id")
+            if payload.get(key) is not None
+        )
 
     @staticmethod
     def _find_zero_dte_execution_signal(
-        signals: list[StrategySignal],
+        signals: Iterable[StrategySignal],
         *,
         run: StrategyRun | None,
         order_id: str,

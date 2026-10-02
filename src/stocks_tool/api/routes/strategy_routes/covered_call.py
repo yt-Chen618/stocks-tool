@@ -289,12 +289,14 @@ def close_covered_call_proposal(
 @router.get("/covered-call/activity", response_model=CoveredCallActivitySnapshot)
 def get_covered_call_activity(
     external_account_id: str | None = Query(default=None, description="Optional broker account id filter, e.g. LBPT10087357"),
+    mode: ExecutionMode | None = Query(default=None),
     limit: int = Query(default=12, ge=1, le=100),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> CoveredCallActivitySnapshot:
     try:
         return service.get_covered_call_activity(
             external_account_id=external_account_id,
+            mode=mode,
             limit=limit,
         )
     except LookupError as exc:

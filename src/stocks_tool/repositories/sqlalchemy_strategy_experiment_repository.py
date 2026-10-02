@@ -5,7 +5,7 @@ from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import (
@@ -141,6 +141,33 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.limit(limit)
         return [self._to_proposal(record) for record in self.session.execute(query).scalars().all()]
 
+    def iter_proposals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        status: StrategyProposalStatus | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        query = select(StrategyProposalRecord).order_by(
+            StrategyProposalRecord.updated_at.desc(),
+            StrategyProposalRecord.created_at.desc(),
+            StrategyProposalRecord.id.desc(),
+        )
+        if external_account_id is not None:
+            query = query.where(StrategyProposalRecord.external_account_id == external_account_id)
+        if strategy_id is not None:
+            query = query.where(StrategyProposalRecord.strategy_id == strategy_id)
+        if status is not None:
+            query = query.where(StrategyProposalRecord.status == status.value)
+        if mode is not None:
+            query = query.where(StrategyProposalRecord.execution_mode == mode.value)
+        result = self.session.execute(
+            query.execution_options(stream_results=True, yield_per=200)
+        ).scalars()
+        for record in result:
+            yield self._to_proposal(record)
+
     def create_run(self, request: CreateStrategyRunRequest) -> StrategyRun:
         run = StrategyRun(
             strategy_id=request.strategy_id.strip(),
@@ -176,6 +203,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         statuses: Collection[StrategyRunStatus] | None = None,
         mode: ExecutionMode | None = None,
         symbol: str | None = None,
+        order_id: str | None = None,
         proposal_id: str | None = None,
         proposal_ids: Collection[str] | None = None,
         run_types: Collection[str] | None = None,
@@ -200,6 +228,8 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyRunRecord.execution_mode == mode.value)
         if symbol is not None:
             query = query.where(StrategyRunRecord.symbol == symbol.strip().upper())
+        if order_id is not None:
+            query = query.where(StrategyRunRecord.order_id == order_id)
         if proposal_id is not None:
             query = query.where(StrategyRunRecord.proposal_id == proposal_id)
         if proposal_ids is not None:
@@ -215,6 +245,32 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         if limit is not None:
             query = query.limit(limit)
         return [self._to_run(record) for record in self.session.execute(query).scalars().all()]
+
+    def iter_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        order_id: str | None = None,
+    ):
+        query = select(StrategyRunRecord).order_by(
+            StrategyRunRecord.created_at.desc(),
+            StrategyRunRecord.id.desc(),
+        )
+        if external_account_id is not None:
+            query = query.where(StrategyRunRecord.external_account_id == external_account_id)
+        if strategy_id is not None:
+            query = query.where(StrategyRunRecord.strategy_id == strategy_id)
+        if mode is not None:
+            query = query.where(StrategyRunRecord.execution_mode == mode.value)
+        if order_id is not None:
+            query = query.where(StrategyRunRecord.order_id == order_id)
+        result = self.session.execute(
+            query.execution_options(stream_results=True, yield_per=200)
+        ).scalars()
+        for record in result:
+            yield self._to_run(record)
 
     def get_latest_run_for_proposal(
         self,
@@ -236,6 +292,45 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         )
         record = self.session.execute(query).scalar_one_or_none()
         return self._to_run(record) if record is not None else None
+
+    def list_latest_runs_by_proposal(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_types: Collection[str],
+    ) -> list[StrategyRun]:
+        normalized_types = [item.strip() for item in run_types if item.strip()]
+        if not normalized_types:
+            return []
+        ranked = select(
+            StrategyRunRecord.id.label("run_id"),
+            func.row_number()
+            .over(
+                partition_by=StrategyRunRecord.proposal_id,
+                order_by=(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc()),
+            )
+            .label("row_number"),
+        ).where(
+            StrategyRunRecord.proposal_id.is_not(None),
+            StrategyRunRecord.run_type.in_(normalized_types),
+        )
+        if external_account_id is not None:
+            ranked = ranked.where(StrategyRunRecord.external_account_id == external_account_id)
+        if strategy_id is not None:
+            ranked = ranked.where(StrategyRunRecord.strategy_id == strategy_id)
+        if mode is not None:
+            ranked = ranked.where(StrategyRunRecord.execution_mode == mode.value)
+        ranked_subquery = ranked.subquery()
+        query = (
+            select(StrategyRunRecord)
+            .join(ranked_subquery, StrategyRunRecord.id == ranked_subquery.c.run_id)
+            .where(ranked_subquery.c.row_number == 1)
+            .order_by(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc())
+        )
+        records = self.session.execute(query).scalars().all()
+        return [self._to_run(record) for record in records]
 
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         signal = StrategySignal(
@@ -265,18 +360,58 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+        limit: int | None = 20,
     ) -> list[StrategySignal]:
         query = (
             select(StrategySignalRecord)
             .order_by(StrategySignalRecord.emitted_at.desc(), StrategySignalRecord.created_at.desc())
-            .limit(limit)
         )
         if external_account_id is not None:
             query = query.where(StrategySignalRecord.external_account_id == external_account_id)
         if strategy_id is not None:
             query = query.where(StrategySignalRecord.strategy_id == strategy_id)
+        if mode is not None:
+            query = query.where(StrategySignalRecord.execution_mode == mode.value)
+        if run_id is not None:
+            query = query.where(StrategySignalRecord.run_id == run_id)
+        if proposal_id is not None:
+            query = query.where(StrategySignalRecord.proposal_id == proposal_id)
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_signal(record) for record in self.session.execute(query).scalars().all()]
+
+    def iter_signals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+    ):
+        query = select(StrategySignalRecord).order_by(
+            StrategySignalRecord.emitted_at.desc(),
+            StrategySignalRecord.created_at.desc(),
+            StrategySignalRecord.id.desc(),
+        )
+        if external_account_id is not None:
+            query = query.where(StrategySignalRecord.external_account_id == external_account_id)
+        if strategy_id is not None:
+            query = query.where(StrategySignalRecord.strategy_id == strategy_id)
+        if mode is not None:
+            query = query.where(StrategySignalRecord.execution_mode == mode.value)
+        if run_id is not None:
+            query = query.where(StrategySignalRecord.run_id == run_id)
+        if proposal_id is not None:
+            query = query.where(StrategySignalRecord.proposal_id == proposal_id)
+        result = self.session.execute(
+            query.execution_options(stream_results=True, yield_per=200)
+        ).scalars()
+        for record in result:
+            yield self._to_signal(record)
 
     def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:
         review = self._review_from_request(request)
@@ -292,17 +427,21 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyReview]:
         query = (
             select(StrategyReviewRecord)
             .order_by(StrategyReviewRecord.reviewed_at.desc(), StrategyReviewRecord.created_at.desc())
-            .limit(limit)
         )
         if external_account_id is not None:
             query = query.where(StrategyReviewRecord.external_account_id == external_account_id)
         if strategy_id is not None:
             query = query.where(StrategyReviewRecord.strategy_id == strategy_id)
+        if mode is not None:
+            query = query.where(StrategyReviewRecord.execution_mode == mode.value)
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_review(record) for record in self.session.execute(query).scalars().all()]
 
     def create_advisor_run(self, request: CreateStrategyAdvisorRunRequest) -> StrategyAdvisorRun:

@@ -113,6 +113,7 @@ class StrategyExperimentService:
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 10,
     ) -> StrategyExperimentSnapshot:
         if external_account_id is not None:
@@ -122,21 +123,25 @@ class StrategyExperimentService:
             proposals=self.list_proposals(
                 external_account_id=external_account_id,
                 strategy_id=strategy_id,
+                mode=mode,
                 limit=limit,
             ),
             runs=self.list_runs(
                 external_account_id=external_account_id,
                 strategy_id=strategy_id,
+                mode=mode,
                 limit=limit,
             ),
             signals=self.list_signals(
                 external_account_id=external_account_id,
                 strategy_id=strategy_id,
+                mode=mode,
                 limit=limit,
             ),
             reviews=self.list_reviews(
                 external_account_id=external_account_id,
                 strategy_id=strategy_id,
+                mode=mode,
                 limit=limit,
             ),
         )
@@ -145,22 +150,109 @@ class StrategyExperimentService:
         self,
         *,
         external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 12,
     ) -> CoveredCallActivitySnapshot:
-        snapshot = self.get_snapshot(
+        display_snapshot = StrategyExperimentSnapshot(
+            external_account_id=external_account_id,
+            proposals=self.list_proposals(
+                external_account_id=external_account_id,
+                strategy_id="covered_call_v1",
+                mode=mode,
+                limit=limit,
+            ),
+            runs=self.list_runs(
+                external_account_id=external_account_id,
+                strategy_id="covered_call_v1",
+                mode=mode,
+                limit=limit,
+            ),
+            signals=self.list_signals(
+                external_account_id=external_account_id,
+                strategy_id="covered_call_v1",
+                mode=mode,
+                limit=limit,
+            ),
+            reviews=self.list_reviews(
+                external_account_id=external_account_id,
+                strategy_id="covered_call_v1",
+                mode=mode,
+                limit=limit,
+            ),
+        )
+        summary_active_statuses = {
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+        }
+        task_statuses = summary_active_statuses | {StrategyProposalStatus.EXECUTED}
+        active_proposals: list[StrategyProposal] = []
+        total_proposals = 0
+        active_proposal_count = 0
+        executed_position_count = 0
+        pending_roll_count = 0
+        latest_activity_candidates: list[datetime] = []
+        for proposal in self.iter_proposals(
             external_account_id=external_account_id,
             strategy_id="covered_call_v1",
-            limit=limit,
+            mode=mode,
+        ):
+            total_proposals += 1
+            if proposal.updated_at is not None:
+                latest_activity_candidates.append(proposal.updated_at)
+            if proposal.status in summary_active_statuses:
+                active_proposal_count += 1
+            if proposal.status in task_statuses:
+                active_proposals.append(proposal)
+            if proposal.proposed_action in {"sell_covered_call", "roll_covered_call"} and proposal.status == StrategyProposalStatus.EXECUTED:
+                executed_position_count += 1
+            if proposal.proposed_action == "roll_covered_call" and proposal.status in summary_active_statuses:
+                pending_roll_count += 1
+        lifecycle_runs = self.experiments.list_latest_runs_by_proposal(
+            external_account_id=external_account_id,
+            strategy_id="covered_call_v1",
+            mode=mode,
+            run_types={
+                "proposal_close",
+                "proposal_execution",
+                "open_lifecycle_refresh",
+                "roll_execution",
+                "roll_continuation",
+            },
+        )
+        latest_activity_candidates.extend(
+            run.created_at for run in lifecycle_runs if run.created_at is not None
+        )
+        latest_activity_candidates.extend(
+            signal.emitted_at for signal in display_snapshot.signals if signal.emitted_at is not None
+        )
+        latest_activity_candidates.extend(
+            review.reviewed_at for review in display_snapshot.reviews if review.reviewed_at is not None
+        )
+        summary = CoveredCallActivitySummary(
+            external_account_id=external_account_id,
+            total_proposals=total_proposals,
+            active_proposals=active_proposal_count,
+            executed_positions=executed_position_count,
+            pending_rolls=pending_roll_count,
+            close_runs=sum(1 for run in lifecycle_runs if run.run_type == "proposal_close"),
+            latest_activity_at=max(latest_activity_candidates) if latest_activity_candidates else None,
+        )
+        task_snapshot = StrategyExperimentSnapshot(
+            external_account_id=external_account_id,
+            proposals=active_proposals,
+            runs=lifecycle_runs,
+            signals=display_snapshot.signals,
+            reviews=display_snapshot.reviews,
         )
         return CoveredCallActivitySnapshot(
             external_account_id=external_account_id,
-            summary=self._covered_call_activity_summary(snapshot),
-            lifecycle_tasks=self._covered_call_lifecycle_tasks(snapshot),
-            latest_monitor=self._covered_call_latest_monitor(snapshot),
-            proposals=snapshot.proposals,
-            runs=snapshot.runs,
-            signals=snapshot.signals,
-            reviews=snapshot.reviews,
+            summary=summary,
+            lifecycle_tasks=self._covered_call_lifecycle_tasks(task_snapshot),
+            latest_monitor=self._covered_call_latest_monitor(display_snapshot),
+            proposals=display_snapshot.proposals,
+            runs=display_snapshot.runs,
+            signals=display_snapshot.signals,
+            reviews=display_snapshot.reviews,
         )
 
     def create_proposal(self, request: CreateStrategyProposalRequest) -> StrategyProposal:
@@ -291,6 +383,7 @@ class StrategyExperimentService:
         self,
         *,
         external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 10,
     ) -> StrategyAdvisorContext:
         controls = self.get_control_snapshot(external_account_id=external_account_id)
@@ -299,10 +392,12 @@ class StrategyExperimentService:
             controls=controls,
             experiment=self.get_snapshot(
                 external_account_id=external_account_id,
+                mode=mode,
                 limit=limit,
             ),
             covered_call_activity=self.get_covered_call_activity(
                 external_account_id=external_account_id,
+                mode=mode,
                 limit=limit,
             ),
             advisor_sources=sorted(self.advisor_sources),
@@ -335,7 +430,8 @@ class StrategyExperimentService:
         external_account_id: str | None = None,
         strategy_id: str | None = None,
         status: StrategyProposalStatus | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyProposal]:
         if external_account_id is not None:
             self._ensure_account(external_account_id)
@@ -343,7 +439,25 @@ class StrategyExperimentService:
             external_account_id=external_account_id,
             strategy_id=strategy_id,
             status=status,
+            mode=mode,
             limit=limit,
+        )
+
+    def iter_proposals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        status: StrategyProposalStatus | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        return self.experiments.iter_proposals(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            status=status,
+            mode=mode,
         )
 
     def create_run(self, request: CreateStrategyRunRequest) -> StrategyRun:
@@ -355,14 +469,41 @@ class StrategyExperimentService:
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        order_id: str | None = None,
+        proposal_id: str | None = None,
+        run_types: set[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyRun]:
         if external_account_id is not None:
             self._ensure_account(external_account_id)
         return self.experiments.list_runs(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
+            mode=mode,
+            symbol=symbol,
+            order_id=order_id,
+            proposal_id=proposal_id,
+            run_types=run_types,
             limit=limit,
+        )
+
+    def iter_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        order_id: str | None = None,
+    ):
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        return self.experiments.iter_runs(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            mode=mode,
+            order_id=order_id,
         )
 
     def get_latest_run_for_proposal(
@@ -388,14 +529,39 @@ class StrategyExperimentService:
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+        limit: int | None = 20,
     ) -> list[StrategySignal]:
         if external_account_id is not None:
             self._ensure_account(external_account_id)
         return self.experiments.list_signals(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
+            mode=mode,
+            run_id=run_id,
+            proposal_id=proposal_id,
             limit=limit,
+        )
+
+    def iter_signals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+    ):
+        if external_account_id is not None:
+            self._ensure_account(external_account_id)
+        return self.experiments.iter_signals(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            mode=mode,
+            run_id=run_id,
+            proposal_id=proposal_id,
         )
 
     def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:
@@ -437,13 +603,15 @@ class StrategyExperimentService:
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyReview]:
         if external_account_id is not None:
             self._ensure_account(external_account_id)
         return self.experiments.list_reviews(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
+            mode=mode,
             limit=limit,
         )
 

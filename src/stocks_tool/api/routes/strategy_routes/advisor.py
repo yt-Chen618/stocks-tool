@@ -38,12 +38,14 @@ _SENSITIVE_ERROR_VALUE = re.compile(
 @router.get("/advisor-context", response_model=StrategyAdvisorContext)
 def get_strategy_advisor_context(
     external_account_id: str | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> StrategyAdvisorContext:
     try:
         return service.get_advisor_context(
             external_account_id=external_account_id,
+            mode=mode,
             limit=limit,
         )
     except LookupError as exc:
