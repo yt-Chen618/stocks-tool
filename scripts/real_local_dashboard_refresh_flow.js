@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { resolveBrowserExecutable } = require("./browser_test_helpers");
 
 async function main() {
   const [, , baseUrl, screenshotPath, playwrightCorePath, iterationsArg, settleTimeoutArg, pauseMsArg] = process.argv;
@@ -84,11 +85,6 @@ async function main() {
   } finally {
     await browser.close();
   }
-}
-
-function resolveBrowserExecutable() {
-  const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-  return configured && fs.existsSync(configured) ? configured : null;
 }
 
 async function measureSelectedChartReady(page, timeoutMs) {

@@ -1082,6 +1082,60 @@ def build_report(
     return report
 
 
+def start_utf8_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+
+
+def stop_process(process: subprocess.Popen[Any], *, timeout_seconds: float = 5.0) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout_seconds)
+
+
+def wait_for_http(
+    url: str,
+    *,
+    process: subprocess.Popen[Any],
+    timeout_seconds: float,
+) -> None:
+    from urllib.error import URLError
+    from urllib.request import urlopen
+
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read() if process.stdout is not None else ""
+            raise RuntimeError(f"Process exited early with code {process.returncode}.\n{output}")
+        try:
+            with urlopen(url, timeout=2) as response:
+                if 200 <= response.status < 500:
+                    return
+        except (OSError, URLError) as error:
+            last_error = str(error)
+        time.sleep(0.25)
+    raise RuntimeError(f"Process did not become ready at {url}: {last_error}")
+
+
 def emit_report(report: dict[str, Any], json_output: str | None = None) -> None:
     rendered = json.dumps(report, indent=2)
     print(rendered)

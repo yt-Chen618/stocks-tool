@@ -363,6 +363,143 @@ def test_market_data_session_is_not_blocked_by_trade_executor_work() -> None:
     adapter.close()
 
 
+def test_market_data_queue_saturation_rejects_and_releases_slot() -> None:
+    adapter = build_adapter(
+        longbridge_market_data_max_pending_requests=1,
+        longbridge_executor_max_workers=1,
+    )
+    started = threading.Event()
+    release = threading.Event()
+    caller = ThreadPoolExecutor(max_workers=1)
+    adapter._market_context = Mock(return_value=(object(), {}))
+
+    def blocked_action(_context, _sdk):
+        started.set()
+        release.wait(timeout=2)
+        return "first"
+
+    try:
+        first = caller.submit(
+            adapter._run_market_data_action,
+            "queue saturation first",
+            ExecutionMode.PAPER,
+            blocked_action,
+            operation="queue_saturation",
+        )
+        assert started.wait(timeout=1)
+        with pytest.raises(LongbridgeIntegrationError, match="queue is full"):
+            adapter._run_market_data_action(
+                "queue saturation second",
+                ExecutionMode.PAPER,
+                lambda _context, _sdk: "never-called",
+                operation="queue_saturation",
+            )
+        release.set()
+        assert first.result(timeout=2) == "first"
+        assert (
+            adapter._run_market_data_action(
+                "queue saturation after release",
+                ExecutionMode.PAPER,
+                lambda _context, _sdk: "after-release",
+                operation="queue_saturation",
+            )
+            == "after-release"
+        )
+        runtime = adapter.get_market_data_runtime_status()
+        session = next(item for item in runtime.sessions if item.mode == ExecutionMode.PAPER)
+        assert session.pending_requests == 0
+        assert session.max_pending_requests == 1
+    finally:
+        release.set()
+        caller.shutdown(wait=True, cancel_futures=True)
+        adapter.close()
+
+
+def test_market_data_cancelled_queued_future_releases_slot() -> None:
+    adapter = build_adapter(
+        longbridge_market_data_max_pending_requests=2,
+        longbridge_executor_max_workers=1,
+    )
+    started = threading.Event()
+    release = threading.Event()
+    adapter._market_context = Mock(return_value=(object(), {}))
+
+    def occupy_session_executor():
+        started.set()
+        release.wait(timeout=2)
+        return "occupier-finished"
+
+    try:
+        session = adapter._get_market_session(ExecutionMode.PAPER)
+        occupier = session.executor.submit(occupy_session_executor)
+        assert started.wait(timeout=1)
+        with pytest.raises(LongbridgeIntegrationError, match="timed out"):
+            adapter._run_market_data_action(
+                "cancel queue second",
+                ExecutionMode.PAPER,
+                lambda _context, _sdk: "never-called",
+                operation="cancel_queue",
+            )
+        runtime = adapter.get_market_data_runtime_status()
+        session = next(item for item in runtime.sessions if item.mode == ExecutionMode.PAPER)
+        assert session.pending_requests == 0
+        release.set()
+        assert occupier.result(timeout=2) == "occupier-finished"
+        adapter._circuit_open_until_by_key.clear()
+        assert (
+            adapter._run_market_data_action(
+                "cancel queue after release",
+                ExecutionMode.PAPER,
+                lambda _context, _sdk: "after-cancel",
+                operation="cancel_queue",
+            )
+            == "after-cancel"
+        )
+    finally:
+        release.set()
+        adapter.close()
+
+
+def test_reference_cache_is_isolated_by_execution_mode_for_same_key() -> None:
+    adapter = build_adapter(longbridge_reference_data_cache_ttl_seconds=300)
+    sdk_calls: list[ExecutionMode] = []
+
+    class QuoteContext:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def option_chain_expiry_date_list(self, symbol):
+            sdk_calls.append(self.config)
+            return [datetime(2026, 7, 17, tzinfo=timezone.utc)]
+
+    adapter._load_sdk = Mock(return_value={"QuoteContext": QuoteContext})
+    adapter._build_config = Mock(side_effect=lambda mode, sdk: mode)
+
+    try:
+        adapter.list_option_expiry_dates("SPY.US", ExecutionMode.PAPER)
+        adapter.list_option_expiry_dates("SPY.US", ExecutionMode.PAPER)
+        adapter.list_option_expiry_dates("SPY.US", ExecutionMode.LIVE)
+        adapter.list_option_expiry_dates("SPY.US", ExecutionMode.LIVE)
+        assert sdk_calls == [ExecutionMode.PAPER, ExecutionMode.LIVE]
+    finally:
+        adapter.close()
+
+
+def test_market_session_close_failure_still_releases_context_and_executor() -> None:
+    adapter = build_adapter()
+    session = adapter._get_market_session(ExecutionMode.PAPER)
+    context = Mock()
+    context.close.side_effect = RuntimeError("close failed")
+    session.context = context
+    session.sdk = {}
+
+    adapter.close()
+
+    assert adapter._closed is True
+    assert session.context is None
+    assert session.sdk is None
+
+
 def test_reference_data_cache_coalesces_concurrent_expiry_reads() -> None:
     adapter = build_adapter(longbridge_reference_data_cache_ttl_seconds=300)
     sdk_started = threading.Event()

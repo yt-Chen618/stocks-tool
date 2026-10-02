@@ -1,5 +1,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  createRequestObserver,
+  expectText,
+  expectTextInsensitive,
+  isBrokerMutationPath,
+  resolveBrowserExecutable,
+} = require("./browser_test_helpers");
 
 async function main() {
   const [, , baseUrl, screenshotPath, playwrightCorePath, scenario = "normal"] = process.argv;
@@ -15,27 +22,17 @@ async function main() {
   });
   const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
   page.on("dialog", (dialog) => dialog.accept());
-  const brokerMutationRequests = [];
-  const bullPutReadRequests = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (
-      request.method() === "GET" &&
-      (url.pathname === "/strategies/bull-put/working-spreads" ||
-        url.pathname === "/strategies/bull-put/spreads/paged" ||
-        /^\/strategies\/bull-put\/spreads\/[^/]+$/.test(url.pathname) ||
-        /\/strategies\/bull-put\/spreads\/[^/]+\/recover-close\/eligibility$/.test(url.pathname))
-    ) {
-      bullPutReadRequests.push({ path: url.pathname, search: url.search });
-    }
-    if (request.method() === "POST" && isBrokerMutationPath(url.pathname, url.search)) {
-      brokerMutationRequests.push({
-        path: `${url.pathname}${url.search}`,
-        headers: request.headers(),
-        postData: request.postData(),
-      });
-    }
+  const requestObserver = createRequestObserver(page, {
+    readPredicate: (request, url) => request.method() === "GET" && (
+      url.pathname === "/strategies/bull-put/working-spreads" ||
+      url.pathname === "/strategies/bull-put/spreads/paged" ||
+      /^\/strategies\/bull-put\/spreads\/[^/]+$/.test(url.pathname) ||
+      /\/strategies\/bull-put\/spreads\/[^/]+\/recover-close\/eligibility$/.test(url.pathname)
+    ),
+    mutationPredicate: (pathname, search, request) => request.method() === "POST" && isBrokerMutationPath(pathname, search),
   });
+  const brokerMutationRequests = requestObserver.mutationRequests;
+  const bullPutReadRequests = requestObserver.readRequests;
   let journalPanelText = "";
   let strategySkipText = "";
   let strategyReviewText = "";
@@ -583,11 +580,6 @@ async function main() {
   }
 }
 
-function resolveBrowserExecutable() {
-  const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-  return configured && fs.existsSync(configured) ? configured : null;
-}
-
 async function selectWorkspace(page, workspace) {
   await page.locator(`[data-workspace-option='${workspace}']`).click();
   await page.waitForFunction(
@@ -715,23 +707,6 @@ async function assertResponsiveShell(page, label) {
       }
     }
   }
-}
-
-async function expectText(locator, text, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let content = "";
-  while (Date.now() < deadline) {
-    try {
-      content = await locator.innerText();
-      if (content.includes(text)) {
-        return;
-      }
-    } catch {
-      // ignore and retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Expected text '${text}' to appear in locator content. Current content: ${content}`);
 }
 
 async function runPostureScenarioAssertions(page, scenario) {
@@ -886,24 +861,6 @@ async function runPostureScenarioAssertions(page, scenario) {
   return { expectedText, matched: true };
 }
 
-async function expectTextInsensitive(locator, text, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  const expected = text.toLowerCase();
-  let content = "";
-  while (Date.now() < deadline) {
-    try {
-      content = await locator.innerText();
-      if (content.toLowerCase().includes(expected)) {
-        return;
-      }
-    } catch {
-      // ignore and retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Expected text '${text}' to appear in locator content. Current content: ${content}`);
-}
-
 async function confirmTradeDialog(page, titleText, detailText) {
   await page.waitForSelector("#trade-confirm-dialog[open]");
   await expectText(page.locator("#trade-confirm-dialog"), titleText);
@@ -912,15 +869,6 @@ async function confirmTradeDialog(page, titleText, detailText) {
   }
   await page.click("#trade-confirm-accept");
   await page.waitForSelector("#trade-confirm-dialog", { state: "hidden" });
-}
-
-function isBrokerMutationPath(pathname, search) {
-  if (pathname === "/orders/submit") return true;
-  if (pathname === "/strategies/bull-put/execute") return true;
-  if (/^\/orders\/[^/]+\/(replace|cancel)$/.test(pathname)) return true;
-  if (/^\/strategies\/bull-put\/spreads\/[^/]+\/(monitor|recover-close)$/.test(pathname)) return true;
-  if (pathname.includes("/strategies/bull-put/runtime/") && pathname.endsWith("/scan") && search.includes("force=true")) return true;
-  return /^\/strategies\/covered-call\/proposals\/[^/]+\/(execute|monitor|close|roll-execute|roll-continue)$/.test(pathname);
 }
 
 function countMutationRequests(requests, pathPrefix) {

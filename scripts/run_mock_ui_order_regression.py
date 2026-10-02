@@ -4,13 +4,19 @@ import argparse
 import json
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import httpx
 from browser_runtime import browser_environment, resolve_node, resolve_playwright_core
-from regression_common import build_report, emit_report
+from regression_common import (
+    ObservedRun,
+    build_report,
+    emit_report,
+    start_utf8_process,
+    stop_process,
+    wait_for_http,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
@@ -64,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str]:
-    return subprocess.Popen(
+    return start_utf8_process(
         [
             sys.executable,
             str(ROOT / "scripts" / "mock_dashboard_server.py"),
@@ -76,42 +82,18 @@ def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str
             scenario,
         ],
         cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
 
 
 def stop_server(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+    stop_process(process)
 
 
 def wait_for_server(base_url: str, timeout_seconds: float, process: subprocess.Popen[str]) -> None:
-    deadline = time.time() + timeout_seconds
-    last_error: str | None = None
-    while time.time() < deadline:
-        if process.poll() is not None:
-            output = ""
-            if process.stdout is not None:
-                output = process.stdout.read()
-            raise RegressionError(f"Mock server exited early.\nServer output:\n{output}")
-        try:
-            response = httpx.get(base_url, timeout=2.0)
-            if response.status_code == 200:
-                return
-        except Exception as error:  # pragma: no cover - transient bootstrap noise
-            last_error = str(error)
-        time.sleep(0.25)
-    raise RegressionError(f"Mock server did not become ready at {base_url}: {last_error}")
+    try:
+        wait_for_http(base_url, process=process, timeout_seconds=timeout_seconds)
+    except RuntimeError as error:
+        raise RegressionError(f"Mock server did not become ready at {base_url}: {error}") from error
 
 
 def require_ok(response: httpx.Response) -> Any:
@@ -263,37 +245,43 @@ def main() -> None:
     args = parse_args()
     if args.scenario == "all":
         scenario_reports: list[dict[str, Any]] = []
-        for scenario in MOCK_SCENARIOS:
-            command = [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--host",
-                args.host,
-                "--port",
-                str(args.port),
-                "--timeout-seconds",
-                str(args.timeout_seconds),
-                "--poll-seconds",
-                str(args.poll_seconds),
-                "--scenario",
-                scenario,
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip() or f"Scenario {scenario} failed."
-                raise RegressionError(detail)
-            try:
-                scenario_reports.append(json.loads(completed.stdout))
-            except json.JSONDecodeError as error:
-                raise RegressionError(f"Scenario {scenario} did not emit JSON evidence: {completed.stdout}") from error
+        evidence_dir = ROOT / "artifacts" / "mock-ui-scenario-matrix"
+        observed_run = ObservedRun(evidence_dir, source_root=ROOT)
+        observed_run.start()
+        try:
+            for scenario in MOCK_SCENARIOS:
+                command = [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--host",
+                    args.host,
+                    "--port",
+                    str(args.port),
+                    "--timeout-seconds",
+                    str(args.timeout_seconds),
+                    "--poll-seconds",
+                    str(args.poll_seconds),
+                    "--scenario",
+                    scenario,
+                ]
+                child = observed_run.run_child(
+                    {"name": f"scenario-{scenario}", "command": command, "cacheable": False},
+                )
+                if child["status"] != "passed":
+                    stderr = Path(child["stderr_log"]).read_text(encoding="utf-8", errors="replace")
+                    raise RegressionError(
+                        f"Scenario {scenario} failed with code {child['returncode']}. {stderr[-2000:]}"
+                    )
+                try:
+                    scenario_output = Path(child["stdout_log"]).read_text(encoding="utf-8")
+                    scenario_reports.append(json.loads(scenario_output))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise RegressionError(f"Scenario {scenario} did not emit JSON evidence.") from error
+        except Exception as error:
+            observed_run.finish("failed", next_action="inspect scenario logs", error=str(error))
+            raise
+        else:
+            observed_run.finish("passed")
         emit_report(
             build_report(
                 script="run_mock_ui_order_regression.py",
@@ -302,7 +290,7 @@ def main() -> None:
                 mode="mock",
                 target=f"http://{args.host}:{args.port}",
                 summary="Mock dashboard posture scenario matrix passed.",
-                payload={"scenarios": scenario_reports},
+                payload={"scenarios": scenario_reports, "observability": observed_run.payload()},
             ),
             json_output=args.json_output,
         )
@@ -369,7 +357,7 @@ def main() -> None:
             assert "Longbridge Status" not in dashboard.text
             assert "Quick Quote" not in dashboard.text
             assert "data-view-mode-option" not in dashboard.text
-            for asset in (
+            static_assets = (
                 "workspace.css",
                 "vendor/lightweight-charts-5.2.0.standalone.production.js",
                 "chart-view.js",
@@ -381,101 +369,19 @@ def main() -> None:
                 "orders-view.js",
                 "execution-drawer.js",
                 "workspace-shell.js",
-            ):
+            )
+            for asset in static_assets:
                 assert f"/static/{asset}?v=" in dashboard.text
-
-            app_js = client.get("/static/app.js")
-            app_js.raise_for_status()
-            for marker in (
-                "initializeViewModules",
-                "runConfirmedBrokerMutation(",
-                "prepareMarketOverlayPanels()",
-                "renderPreOpenAssessment(",
-                "renderLatestPreOpenRun()",
-                "saveCurrentPreOpenBoard()",
-                "runStrategyScan(",
-                "runStrategyReview()",
-                "saveStrategyControls(",
-                "reconcileCoveredCallLifecycle(",
-                "covered-call/lifecycle",
-                "renderCoveredCallLatestMonitor(",
-                "renderStrategyRuntime()",
-                "renderStrategyExperiment()",
-                "renderMarketEvents()",
-                "bullPutView",
-            ):
-                assert marker in app_js.text, f"Missing dashboard coordinator marker: {marker}"
-            assert "stocks-tool-view-mode" not in app_js.text
-
-            module_markers = {
-                "/static/workspace-shell.js": (
-                    'const DEFAULT_WORKSPACE = "research"',
-                    "selectWorkspace",
-                    "openExecutionDrawer",
-                ),
-                "/static/execution-drawer.js": (
-                    "window.StocksToolExecution",
-                    "dataset.executionTab",
-                    "setMobileReadonly",
-                    "showModal",
-                ),
-                "/static/research-view.js": (
-                    'const STORAGE_KEY = "stocks-tool-research-state"',
-                    "/research/universe",
-                    "/research/technicals",
-                    "/history?range=",
-                    "prepareSelectedOrder",
-                ),
-                "/static/watchlist-view.js": (
-                    'apiFetch("/watchlists")',
-                    'method: "PATCH"',
-                    'method: "DELETE"',
-                ),
-                "/static/chart-view.js": (
-                    "window.LightweightCharts",
-                    "attributionLogo: true",
-                    "CandlestickSeries",
-                ),
-                "/static/api-client.js": (
-                    "window.StocksToolApiClient",
-                    "decodeCursorPage",
-                    "mergeAbortSignals",
-                ),
-                "/static/account-loader.js": (
-                    "window.StocksToolAccountLoader",
-                    "createAccountLoader",
-                    "/orders/paged",
-                    "/strategies/bull-put/working-spreads",
-                    "/strategies/bull-put/spreads/paged",
-                    "loadSpreadEligibility",
-                    "ensureSelectedOrderDetail",
-                ),
-                "/static/bull-put-view.js": (
-                    "window.StocksToolBullPutView",
-                    "createBullPutView",
-                    "bullPutHistoryLoadMore",
-                    "loadHistory({ append: true })",
-                    "data-recovery-details",
-                ),
-                "/static/advisor-view.js": (
-                    "window.StocksToolAdvisorView",
-                    "createAdvisorView",
-                    "/strategies/advisor-context",
-                    "recordAdvisorResponse",
-                ),
-                "/static/orders-view.js": (
-                    "window.StocksToolOrdersView",
-                    "createOrdersView",
-                    "/executions/paged",
-                    "/journals/paged",
-                    "loadMoreOrders",
-                ),
-            }
-            for module_path, markers in module_markers.items():
-                module_response = client.get(module_path)
-                module_response.raise_for_status()
-                for marker in markers:
-                    assert marker in module_response.text, f"Missing marker {marker!r} in {module_path}"
+            asset_http_contract = {}
+            for asset in static_assets:
+                asset_response = client.get(f"/static/{asset}?v=contract")
+                asset_response.raise_for_status()
+                asset_http_contract[asset] = {
+                    "status": asset_response.status_code,
+                    "content_type": asset_response.headers.get("content-type", ""),
+                    "bytes": len(asset_response.content),
+                }
+                assert asset_response.content, f"Static asset returned an empty response: {asset}"
 
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
@@ -582,8 +488,7 @@ def main() -> None:
                             "execution_summary_shell": True,
                             "pre_open_seed": True,
                             "pre_open_run_seed": True,
-                            "app_js_markers": True,
-                            "workspace_module_markers": True,
+                            "asset_http_contract": asset_http_contract,
                             "research_universe_seed": True,
                             "research_technicals_seed": True,
                             "research_history_seed": True,

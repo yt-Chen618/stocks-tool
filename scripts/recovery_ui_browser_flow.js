@@ -1,59 +1,14 @@
-const fs = require("node:fs");
 const path = require("node:path");
+const {
+  expectText,
+  resolveBrowserExecutable,
+  sleep,
+  waitFor,
+  waitResponsiveSettled,
+} = require("./browser_test_helpers");
 
 const PRIMARY_ACCOUNT = "LBPT10087357";
 const ALT_ACCOUNT = "LBPT10087357-ALT";
-
-function resolveBrowserExecutable() {
-  const configured = process.env.PLAYWRIGHT_CHROME_PATH;
-  return configured && fs.existsSync(configured) ? configured : null;
-}
-
-function sleep(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function waitFor(predicate, timeoutMs = 15000, label = "condition") {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    try {
-      if (await predicate()) {
-        return;
-      }
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(100);
-  }
-  throw new Error(`Timed out waiting for ${label}${lastError ? `: ${lastError.message}` : ""}.`);
-}
-
-async function expectText(locator, text, timeoutMs = 15000) {
-  await waitFor(async () => (await locator.innerText()).includes(text), timeoutMs, `text '${text}'`);
-}
-
-async function waitResponsiveSettled(page, width, timeoutMs = 15000) {
-  await page.waitForFunction(
-    (expectedWidth) => {
-      const viewportWidth = window.innerWidth;
-      const sidebar = document.getElementById("workspace-sidebar")?.getBoundingClientRect();
-      const nav = document.getElementById("workspace-nav")?.getBoundingClientRect();
-      const main = document.querySelector(".workbench-main")?.getBoundingClientRect();
-      const documentWidth = Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0);
-      if (!sidebar || !nav || !main || Math.abs(viewportWidth - expectedWidth) > 1) {
-        return false;
-      }
-      const fullWidth = (rect) => Math.abs(rect.left) <= 1 && Math.abs(rect.right - viewportWidth) <= 1;
-      if (expectedWidth <= 780) {
-        return fullWidth(sidebar) && fullWidth(nav) && main.left <= 1 && main.right <= viewportWidth + 1 && documentWidth <= viewportWidth + 1;
-      }
-      return main.left >= 0 && main.right <= viewportWidth + 1 && documentWidth <= viewportWidth + 1;
-    },
-    width,
-    { timeout: timeoutMs },
-  );
-}
 
 function recoveryIntentFixture(id, overrides = {}) {
   return {
