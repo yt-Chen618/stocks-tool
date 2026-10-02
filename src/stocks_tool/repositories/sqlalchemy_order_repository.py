@@ -127,6 +127,27 @@ class SQLAlchemyOrderRepository(OrderRepository):
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
 
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        query = select(OrderRecord).order_by(OrderRecord.created_at.desc(), OrderRecord.id.desc())
+        query = query.options(selectinload(OrderRecord.broker_account))
+        if external_account_id is not None:
+            account_ids = select(BrokerAccountRecord.id).where(
+                BrokerAccountRecord.external_account_id == external_account_id
+            )
+            query = query.where(OrderRecord.broker_account_id.in_(account_ids))
+        if mode is not None:
+            query = query.where(OrderRecord.execution_mode == mode.value)
+        result = self.session.execute(
+            query.execution_options(stream_results=True, yield_per=200)
+        ).scalars()
+        for record in result:
+            yield self._to_domain(record)
+
     def list_orders_page(
         self,
         *,

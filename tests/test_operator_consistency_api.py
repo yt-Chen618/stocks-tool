@@ -119,6 +119,7 @@ def _consistency_service(
     bull_put.list_spreads.return_value = []
     orders = Mock()
     orders.list_orders.return_value = [_zero_dte_manual_scan_order()]
+    orders.iter_orders.return_value = [_zero_dte_manual_scan_order()]
     orders.get_order.return_value = _zero_dte_manual_scan_order()
     audit_events = Mock()
     return (

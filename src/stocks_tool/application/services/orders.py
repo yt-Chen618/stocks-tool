@@ -142,6 +142,17 @@ class OrderService:
             cursor=cursor,
         )
 
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        return self.orders.iter_orders(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+
     def get_order(self, order_id: str) -> Order | None:
         return self.orders.get_order(order_id)
 

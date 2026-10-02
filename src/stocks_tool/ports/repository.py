@@ -228,6 +228,15 @@ class OrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> Iterator[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
     def list_orders_page(
         self,
         *,

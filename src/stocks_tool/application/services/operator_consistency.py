@@ -68,7 +68,7 @@ class OperatorConsistencyService:
         generated_at = datetime.now(timezone.utc)
         effective_limit = max(1, min(int(limit), 200))
         strategy_filter = strategy.strip() if strategy else None
-        orders = self.order_service.list_orders(
+        order_factory = lambda: self.order_service.iter_orders(
             external_account_id=external_account_id,
             mode=mode,
         )
@@ -93,7 +93,7 @@ class OperatorConsistencyService:
                 self._zero_dte_manual_scan_checks(
                     external_account_id=external_account_id,
                     mode=mode,
-                    orders=orders,
+                    orders=order_factory(),
                     checked_at=generated_at,
                     limit=effective_limit,
                 )
@@ -112,7 +112,7 @@ class OperatorConsistencyService:
                 self._bull_put_lifecycle_drift_checks(
                     external_account_id=external_account_id,
                     mode=mode,
-                    orders=orders,
+                    orders=order_factory(),
                     checked_at=generated_at,
                     limit=effective_limit,
                 )
@@ -288,7 +288,7 @@ class OperatorConsistencyService:
         *,
         external_account_id: str,
         mode: ExecutionMode,
-        orders: list[Order],
+        orders: Iterable[Order],
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
@@ -438,7 +438,7 @@ class OperatorConsistencyService:
         *,
         external_account_id: str,
         mode: ExecutionMode,
-        orders: list[Order],
+        orders: Iterable[Order],
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
@@ -684,7 +684,7 @@ class OperatorConsistencyService:
         return str(value) if value else None
 
     @staticmethod
-    def _orders_by_id(orders: list[Order]) -> dict[str, dict[str, Any]]:
+    def _orders_by_id(orders: Iterable[Order]) -> dict[str, dict[str, Any]]:
         return {
             order.id: {
                 "status": order.status.value,
