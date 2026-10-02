@@ -32,6 +32,7 @@ def render_dashboard() -> HTMLResponse:
     advisor_view_js_url = _asset_url("advisor-view.js")
     orders_view_js_url = _asset_url("orders-view.js")
     operations_recovery_js_url = _asset_url("operations-recovery-view.js")
+    trading_safety_js_url = _asset_url("trading-safety.js")
     operations_recovery_css_url = _asset_url("operations-recovery-view.css")
     execution_drawer_js_url = _asset_url("execution-drawer.js")
     workspace_shell_js_url = _asset_url("workspace-shell.js")
@@ -1101,6 +1102,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{advisor_view_js_url}" defer></script>
                 <script src="{orders_view_js_url}" defer></script>
                 <script src="{operations_recovery_js_url}" defer></script>
+                <script src="{trading_safety_js_url}" defer></script>
                 <script src="{execution_drawer_js_url}" defer></script>
                 <script src="{workspace_shell_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>

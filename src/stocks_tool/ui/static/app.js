@@ -787,35 +787,56 @@ function isMobileTradingViewport() {
   return window.matchMedia?.(MOBILE_TRADING_QUERY).matches ?? window.innerWidth <= 780;
 }
 
+function evaluateCurrentTradingSafety(options = {}) {
+  const evaluator = window.StocksToolTradingSafety?.evaluateTradingSafety;
+  if (typeof evaluator !== "function") {
+    return { blocked: true, reasons: ["safety_module_unavailable"] };
+  }
+  return evaluator({
+    accountId: options.accountId ?? state.selectedAccountId,
+    selectedAccountId: state.selectedAccountId,
+    mode: options.mode ?? "paper",
+    expectedContext: options.expectedContext ?? null,
+    requestSignature: options.requestSignature,
+    coreDataHealthy: state.coreDataHealthy,
+    recoveryStatusState: state.recoveryStatusState,
+    recoveryStatus: state.recoveryStatus,
+    unresolvedTradingIntents: state.unresolvedTradingIntents,
+    mobileBlocked: options.mobileBlocked ?? isMobileTradingViewport(),
+    pendingActionKeys: state.pendingActionKeys,
+    actionKey: options.actionKey,
+    ignorePendingAction: options.ignorePendingAction === true,
+    businessDisabled: options.businessDisabled === true,
+  });
+}
+
 function applyTradingSafetyState() {
   const mobileBlocked = isMobileTradingViewport();
-  const coreBlocked = !state.coreDataHealthy;
-  const recoveryReady = state.recoveryStatusState === "ready"
-    && state.recoveryStatus?.external_account_id === state.selectedAccountId
-    && state.recoveryStatus?.mode === "paper";
-  const recoveryUnavailable = Boolean(state.selectedAccountId) && !recoveryReady;
-  const recoveryBlocked = recoveryReady && state.recoveryStatus?.recovery_blocked === true;
-  const intentBlocked = (state.unresolvedTradingIntents || []).length > 0 || recoveryBlocked || recoveryUnavailable;
   window.StocksToolExecution?.setMobileReadonly(mobileBlocked);
   document.querySelectorAll("button[data-broker-mutation='true']").forEach((button) => {
     const pending = state.pendingActionKeys.has(button.dataset.actionKey || "");
     const businessDisabled = button.dataset.businessDisabled === "true";
-    const blocked = mobileBlocked || coreBlocked || intentBlocked || pending || businessDisabled;
+    const safety = evaluateCurrentTradingSafety({
+      actionKey: button.dataset.actionKey || "",
+      mobileBlocked,
+      businessDisabled,
+    });
+    const blocked = safety.blocked;
     button.disabled = blocked;
     button.setAttribute("aria-disabled", String(blocked));
     button.setAttribute("aria-busy", String(pending));
-    if ((mobileBlocked || coreBlocked || intentBlocked) && !button.dataset.safetyOriginalTitle) {
+    if (safety.blocked && !button.dataset.safetyOriginalTitle) {
       button.dataset.safetyOriginalTitle = button.title || "";
     }
     if (mobileBlocked) {
       button.title = "Use the desktop workbench for broker-writing actions.";
-    } else if (coreBlocked) {
+    } else if (safety.reasons.includes("core_data_unhealthy")) {
       button.title = "Required account data is stale. Refresh the dashboard before trading.";
-    } else if (recoveryUnavailable) {
+    } else if (safety.reasons.includes("recovery_status_unavailable")) {
       button.title = "Recovery status is loading or unavailable. Broker-writing actions remain locked.";
-    } else if (recoveryBlocked) {
+    } else if (safety.reasons.includes("recovery_blocked")) {
       button.title = "Recovery evidence blocks broker-writing actions until reconciliation is complete.";
-    } else if (intentBlocked) {
+    } else if (safety.reasons.includes("unresolved_trading_intent")) {
       button.title = "An unresolved trading intent blocks all broker-writing actions.";
     } else if (button.dataset.safetyOriginalTitle !== undefined) {
       button.title = button.dataset.safetyOriginalTitle;
@@ -843,24 +864,25 @@ function setActionStatus(element, message, tone = "") {
   }
 }
 
-function tradingBlockedMessage() {
-  if (isMobileTradingViewport()) {
-    return "Broker-writing actions are desktop-only. No request was sent.";
-  }
-  if (!state.coreDataHealthy) {
-    return "Required account data is stale. Refresh the dashboard before trading.";
-  }
-  if ((state.unresolvedTradingIntents || []).length > 0) {
-    return "An unresolved trading intent blocks broker-writing actions until reconciliation completes.";
-  }
-  return "";
+function tradingBlockedMessage(options = {}) {
+  const safety = evaluateCurrentTradingSafety(options);
+  if (!safety.blocked) return "";
+  if (safety.reasons.includes("mobile_viewport")) return "Broker-writing actions are desktop-only. No request was sent.";
+  if (safety.reasons.includes("core_data_unhealthy")) return "Required account data is stale. Refresh the dashboard before trading.";
+  if (safety.reasons.includes("recovery_status_unavailable")) return "Recovery status is loading or unavailable. No request was sent.";
+  if (safety.reasons.includes("recovery_blocked")) return "Recovery evidence blocks broker-writing actions until reconciliation completes.";
+  if (safety.reasons.includes("unresolved_trading_intent")) return "An unresolved trading intent blocks all broker-writing actions until reconciliation completes.";
+  if (safety.reasons.includes("account_context_changed") || safety.reasons.includes("mode_context_changed")) return "The selected account or execution mode changed. Review the action again before sending.";
+  if (safety.reasons.includes("request_signature_changed")) return "The action details changed while confirmation was open. Review the action again before sending.";
+  if (safety.reasons.includes("safety_module_unavailable")) return "Trading safety checks are unavailable. No request was sent.";
+  return "Trading safety checks blocked this action. No request was sent.";
 }
-
 async function runConfirmedBrokerMutation(
-  { actionKey, button, confirmation, requestSignature, statusElement },
+  { actionKey, button, confirmation, requestSignature, getRequestSignature, statusElement, accountId = state.selectedAccountId, mode = "paper" },
   operation
 ) {
-  const blockedMessage = tradingBlockedMessage();
+  const expectedContext = { accountId, mode, requestSignature };
+  const blockedMessage = tradingBlockedMessage({ actionKey, accountId, mode, expectedContext, requestSignature });
   if (blockedMessage) {
     setActionStatus(statusElement, blockedMessage, "error");
     setStatus(blockedMessage, "error");
@@ -880,6 +902,23 @@ async function runConfirmedBrokerMutation(
       setActionStatus(statusElement, message, "warning");
       setStatus(message, "warning");
       return { executed: false, canceled: true };
+    }
+
+    const currentRequestSignature = typeof getRequestSignature === "function"
+      ? getRequestSignature()
+      : requestSignature;
+    const postConfirmationBlocked = tradingBlockedMessage({
+      actionKey,
+      accountId,
+      mode,
+      expectedContext,
+      requestSignature: currentRequestSignature,
+      ignorePendingAction: true,
+    });
+    if (postConfirmationBlocked) {
+      setActionStatus(statusElement, postConfirmationBlocked, "error");
+      setStatus(postConfirmationBlocked, "error");
+      return { executed: false, blocked: true, contextChanged: true };
     }
 
     const idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature);
@@ -1295,6 +1334,7 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
         actionKey: "bull-put-controls",
         button,
         requestSignature: JSON.stringify(payload),
+        getRequestSignature: () => JSON.stringify(payload),
         statusElement: els.strategyControlsHint,
         confirmation: {
           title: "Confirm Bull Put controls",
@@ -1379,6 +1419,14 @@ async function runStrategyScan(button = els.runStrategyScan) {
         button,
         requestSignature: JSON.stringify({
           account: accountId,
+          mode: "paper",
+          force: true,
+          symbol: preview.symbol,
+          candidateToken: preview.candidate_token,
+          minimumNetCredit: candidate.conservative_credit,
+        }),
+        getRequestSignature: () => JSON.stringify({
+          account: state.selectedAccountId,
           mode: "paper",
           force: true,
           symbol: preview.symbol,
@@ -1560,6 +1608,7 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
           actionKey,
           button,
           requestSignature: JSON.stringify({ proposal_id: proposalId, action, ...requestPayload.body }),
+          getRequestSignature: () => JSON.stringify({ proposal_id: proposalId, action, ...requestPayload.body }),
           statusElement: els.coveredCallActionStatus,
           confirmation: buildCoveredCallConfirmation(action, proposal, requestPayload.body),
         },
@@ -1813,6 +1862,7 @@ async function monitorSpread(spreadId, button = null) {
         actionKey,
         button,
         requestSignature: JSON.stringify({ spread_id: spreadId, action: "monitor" }),
+        getRequestSignature: () => JSON.stringify({ spread_id: spreadId, action: "monitor" }),
         statusElement: els.strategyControlsHint,
         confirmation: {
           title: "Confirm Bull Put monitor",
@@ -1883,6 +1933,7 @@ async function recoverCloseSpread(spreadId, formData, button = null) {
         actionKey,
         button,
         requestSignature: JSON.stringify({ spread_id: spreadId, ...payload }),
+        getRequestSignature: () => JSON.stringify({ spread_id: spreadId, ...payload }),
         statusElement: els.strategyControlsHint,
         confirmation: {
           title: "Confirm Bull Put recovery close",

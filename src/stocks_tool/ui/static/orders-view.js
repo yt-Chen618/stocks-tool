@@ -349,7 +349,7 @@
         const price = payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : payload.stop_price ? `Stop ${formatCurrency(payload.stop_price, "USD")}` : "Market / unbounded";
         const boundedNotional = payload.side === "buy" && payload.limit_price ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD") : "Not bounded in ticket";
         const mutation = await runConfirmedBrokerMutation({
-          actionKey: "order-submit", button, requestSignature: JSON.stringify(payload), statusElement: els.orderActionStatus,
+          actionKey: "order-submit", button, requestSignature: JSON.stringify(payload), getRequestSignature: () => JSON.stringify(payload), statusElement: els.orderActionStatus,
           confirmation: { title: "Confirm paper order", summary: `${payload.side.toUpperCase()} ${payload.quantity} ${payload.symbol}`, details: { Account: state.selectedAccountId, Mode: "Paper", Symbol: payload.symbol, Side: payload.side.toUpperCase(), Quantity: String(payload.quantity), Price: price, "Max Risk": boundedNotional, "Quote Time": matchingQuoteTime(payload.symbol) } },
         }, async (idempotencyKey) => {
           setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
@@ -391,7 +391,7 @@
       if (!isCancelableOrder(order)) { setStatus("This order can no longer be canceled.", "warning"); return; }
       try {
         const mutation = await runConfirmedBrokerMutation({
-          actionKey: `order-cancel:${orderId}`, button, requestSignature: JSON.stringify({ order_id: orderId, action: "cancel" }), statusElement: els.orderActionStatus,
+          actionKey: `order-cancel:${orderId}`, button, requestSignature: JSON.stringify({ order_id: orderId, action: "cancel" }), getRequestSignature: () => JSON.stringify({ order_id: orderId, action: "cancel" }), statusElement: els.orderActionStatus,
           confirmation: { title: "Confirm paper order cancellation", summary: `Cancel ${String(order.side || "").toUpperCase()} ${order.quantity} ${order.symbol}`, details: { Account: order.external_account_id || state.selectedAccountId, Mode: "Paper", Symbol: order.symbol, Side: String(order.side || "").toUpperCase(), Quantity: String(order.quantity), Price: formatOrderPrice(order), "Max Risk": "Cancel only", "Quote Time": matchingQuoteTime(order.symbol) } },
         }, async (idempotencyKey) => fetchJson(`/orders/${encodeURIComponent(orderId)}/cancel`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, timeoutMs: 25000 }));
         if (!mutation.executed) return;
@@ -417,7 +417,7 @@
         const actionKey = `order-replace:${order.id}`;
         if (button) button.dataset.actionKey = actionKey;
         const mutation = await runConfirmedBrokerMutation({
-          actionKey, button, requestSignature: JSON.stringify({ order_id: order.id, ...payload }), statusElement: els.orderActionStatus,
+          actionKey, button, requestSignature: JSON.stringify({ order_id: order.id, ...payload }), getRequestSignature: () => JSON.stringify({ order_id: order.id, ...buildReplaceOrderPayload(order) }), statusElement: els.orderActionStatus,
           confirmation: { title: "Confirm paper order replacement", summary: `Replace ${String(order.side || "").toUpperCase()} ${payload.quantity} ${order.symbol}`, details: { Account: order.external_account_id || state.selectedAccountId, Mode: "Paper", Symbol: order.symbol, Side: String(order.side || "").toUpperCase(), Quantity: String(payload.quantity), Price: payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : formatOrderPrice(order), "Max Risk": payload.limit_price && order.side === "buy" ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD") : "Not bounded in ticket", "Quote Time": matchingQuoteTime(order.symbol) } },
         }, async (idempotencyKey) => fetchJson(`/orders/${encodeURIComponent(order.id)}/replace`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(payload), timeoutMs: 25000 }));
         if (!mutation.executed) return;
