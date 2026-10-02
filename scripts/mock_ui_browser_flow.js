@@ -222,7 +222,8 @@ async function main() {
     const historyDetailResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/mock-spread-closed-0001"));
     await page.locator("#bull-put-history-body tr[data-history-spread-id='mock-spread-closed-0001'] button[data-history-action='detail']").click();
     await historyDetailResponse;
-    await expectText(page.locator("#bull-put-history-body"), "closed");
+    await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "Closed");
+    await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "QQQ260619P467000.US");
     const currentRecoveryDetails = page.locator("#spreads-body details[data-recovery-details]").first();
     const recoveryEligibilityResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"));
     await currentRecoveryDetails.locator("summary").click();
@@ -870,6 +871,13 @@ async function runPostureScenarioAssertions(page, scenario) {
   await selectWorkspace(page, location[0]);
   if (location[1]) {
     await selectStrategyTab(page, location[1]);
+  }
+  if (scenario.startsWith("recover-")) {
+    const eligibility = page.waitForResponse((response) =>
+      response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"),
+    );
+    await page.locator("#spreads-body details[data-recovery-details] > summary").first().click();
+    await eligibility;
   }
   const postureLocator = location[0] === "operations"
     ? page.locator("#account-section")
