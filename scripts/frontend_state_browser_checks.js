@@ -25,6 +25,10 @@ async function refreshClear(page, setRecoveryMode, timeoutMs) {
   await expectText(page.locator("#research-table-body"), "MOCK.US", timeoutMs);
 }
 
+async function readDashboardState(page) {
+  return page.evaluate(() => window.eval("({ generation: state.accountLoadGeneration, selected: state.selectedAccountId, coreHealthy: state.coreDataHealthy })"));
+}
+
 async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode, mutationRequests }) {
   const evidence = {};
   const initialMutationCount = mutationRequests.length;
@@ -53,8 +57,20 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
   };
   await page.route(auxPattern, delayedAuxRoute);
   try {
-    await refreshClear(page, setRecoveryMode, timeoutMs);
+    setRecoveryMode("clear");
+    const beforeAuxRefresh = await readDashboardState(page);
+    await page.click("#refresh-dashboard");
     await auxStartedPromise;
+    await waitFor(
+      async () => {
+        const current = await readDashboardState(page);
+        return current.generation === beforeAuxRefresh.generation + 1
+          && current.selected === PRIMARY_ACCOUNT
+          && current.coreHealthy === true;
+      },
+      timeoutMs,
+      "current-generation core state before auxiliary request release",
+    );
     await waitFor(
       async () => (await page.locator("#orders-body tr").count()) > 0
         && (await page.locator("#research-table-body").innerText()).includes("MOCK.US"),
@@ -81,7 +97,7 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
   await page.click("#open-execution-drawer");
   await page.waitForSelector("#execution-drawer[open]");
   await page.click("button[data-execution-tab='orders']");
-  const manageButton = page.locator("button[data-order-action='manage']").first();
+  const manageButton = page.locator("button[data-order-action='manage']").nth(1);
   await manageButton.waitFor({ state: "visible" });
   const orderId = await manageButton.getAttribute("data-order-id");
   if (!orderId) throw new Error("M6 selected-order fixture did not expose an order id.");
@@ -98,6 +114,7 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
   page.on("request", detailListener);
   try {
     await manageButton.click();
+    await page.click("button[data-execution-tab='orders']");
     await manageButton.click();
     await waitFor(
       () => page.locator("#selected-order-card").innerText().then((text) => text.includes(orderId) || text.includes("UNH") || text.includes("MOCK")),
@@ -182,6 +199,62 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
     A_retry_blocked: true,
     intent_id: "m6-unknown-a",
   };
+
+  const terminalIntentPattern = "**/ops/trading-intents/m6-unknown-a**";
+  const terminalIntentRoute = async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() === "GET" && url.pathname === "/ops/trading-intents/m6-unknown-a") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "m6-unknown-a",
+          external_account_id: PRIMARY_ACCOUNT,
+          mode: "paper",
+          state: "persisted",
+          operation: "submit",
+          action: "m6-late-unknown",
+          strategy_id: "paper_bull_put_v1",
+          entity_id: "m6-entity-a",
+          created_at: "2026-10-02T09:30:00Z",
+          updated_at: "2026-10-02T09:31:00Z",
+        }),
+      });
+      return;
+    }
+    await route.fallback();
+  };
+  await page.route(terminalIntentPattern, terminalIntentRoute);
+  try {
+    await refreshClear(page, setRecoveryMode, timeoutMs);
+    const keyAfterPersistedResolution = await page.evaluate(() => window.sessionStorage.getItem("stocks-tool-idempotency:LBPT10087357:m6-late-unknown"));
+    if (keyAfterPersistedResolution !== null) {
+      throw new Error(`Persisted terminal intent did not clear the original A idempotency key: ${keyAfterPersistedResolution}`);
+    }
+    await page.evaluate(() => {
+      window.__m6MutationCalls = 0;
+      window.__m6ResolvedAPromise = window.runConfirmedBrokerMutation({
+        actionKey: "m6-late-unknown",
+        requestSignature: "m6-a-after-persisted-resolution",
+        confirmation: { title: "M6 A after persisted resolution", summary: "M6 A after persisted resolution", details: {} },
+        statusElement: null,
+      }, async () => { window.__m6MutationCalls += 1; return { ok: true }; });
+    });
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await page.click("#trade-confirm-accept");
+    const resolvedAResult = await page.evaluate(async () => window.__m6ResolvedAPromise);
+    if (resolvedAResult.executed !== true || await page.evaluate(() => window.__m6MutationCalls) !== 1) {
+      throw new Error(`Persisted terminal resolution did not allow a new A fake mutation: ${JSON.stringify(resolvedAResult)}`);
+    }
+    evidence.persisted_terminal_resolution = {
+      authoritative_detail_state: "persisted",
+      original_key_cleared: true,
+      new_A_operation_allowed: true,
+      mutation_calls: 1,
+    };
+  } finally {
+    await page.unroute(terminalIntentPattern, terminalIntentRoute);
+  }
 
   await page.reload({ waitUntil: "load" });
   await page.waitForSelector("#account-select", { state: "attached" });

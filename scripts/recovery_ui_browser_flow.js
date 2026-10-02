@@ -435,6 +435,15 @@ async function main() {
       await fulfillJson(route, { items, next_cursor: nextCursor, has_more: nextCursor !== null, limit });
       return;
     }
+    if (method === "GET" && /^\/orders\/[^/]+$/.test(url.pathname)) {
+      const orderId = decodeURIComponent(url.pathname.split("/").pop());
+      const accountId = url.searchParams.get("external_account_id") || PRIMARY_ACCOUNT;
+      const source = syntheticOrders?.find((order) => order.id === orderId);
+      if (source) {
+        await fulfillJson(route, cloneFixtureAccountFields(source, PRIMARY_ACCOUNT, accountId));
+        return;
+      }
+    }
     if (url.searchParams.get("external_account_id") === ALT_ACCOUNT) {
       const response = await route.fetch({ url: replaceAccountInUrl(request.url(), PRIMARY_ACCOUNT) });
       const contentType = response.headers()["content-type"] || "";
