@@ -204,11 +204,11 @@ async function main() {
     await selectStrategyTab(page, "bull-put");
     await expectText(page.locator("#strategy-section"), "Bull Put Strategy");
     await expectText(page.locator("#strategy-section"), "Bull Put Monitor");
-    const initialEligibilityReads = bullPutReadRequests.filter((request) => request.path.endsWith("/recover-close/eligibility")).length;
+    const initialEligibilityReads = bullPutReadRequests.filter((request) => request.pathname.endsWith("/recover-close/eligibility")).length;
     if (initialEligibilityReads !== 0) {
       throw new Error(`Initial Bull Put load must not issue recovery eligibility N+1 requests: ${initialEligibilityReads}`);
     }
-    const workingRead = bullPutReadRequests.find((request) => request.path === "/strategies/bull-put/working-spreads");
+    const workingRead = bullPutReadRequests.find((request) => request.pathname === "/strategies/bull-put/working-spreads");
     if (!workingRead || !workingRead.search.includes("external_account_id=LBPT10087357") || !workingRead.search.includes("mode=paper")) {
       throw new Error("Bull Put working-spreads read must be scoped to the selected paper account.");
     }
@@ -225,7 +225,7 @@ async function main() {
     const recoveryEligibilityResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"));
     await currentRecoveryDetails.locator("summary").click();
     await recoveryEligibilityResponse;
-    if (bullPutReadRequests.filter((request) => request.path.endsWith("/recover-close/eligibility")).length !== 1) {
+    if (bullPutReadRequests.filter((request) => request.pathname.endsWith("/recover-close/eligibility")).length !== 1) {
       throw new Error("Recovery eligibility must load only after the corresponding current spread is expanded.");
     }
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");

@@ -82,6 +82,8 @@ function createRequestObserver(page, { readPredicate = null, mutationPredicate =
     const evidence = {
       method: request.method(),
       path: `${url.pathname}${url.search}`,
+      pathname: url.pathname,
+      search: url.search,
       headers: request.headers(),
       postData: request.postData(),
       at: Date.now(),
