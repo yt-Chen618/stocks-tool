@@ -4,6 +4,16 @@ Last updated: 2026-10-02
 
 Run the smallest relevant test first, then the broader gates before treating an optimization slice as done.
 
+## Resumable Evidence and Fault Limits
+
+P0, V8 and the 18-scenario mock matrix write an atomic `state.json`, append-only `events.jsonl`, and separate stdout/stderr logs under their evidence directory. Reports retain their existing JSON fields and add run/source/environment identity and child-log references. Each scenario still starts its own mock server and fixture state. Long-running checks refresh liveness every 30 seconds; a quiet but live process is not a failed check.
+
+Resume by rerunning the same command with the same evidence directory after inspecting its recorded owner and child PID/start token. An OS lock and process-identity checks reject duplicate owners. Only explicitly cacheable checks with matching source, environment, command and existing logs can reuse a pass. Volatile environment/database/API checks run again. Source changes invalidate old results; a missing final report or interrupted child is never a pass.
+
+Fault timeouts apply per child, not to the campaign: static/environment checks default to 120 seconds, pytest/PostgreSQL/recovery checks to 600 seconds, and the complete mock matrix to 1,800 seconds. Browser wrappers have a separate 300-second default process deadline; real-refresh deadlines also allow the requested iteration count. Browser-step deadlines remain in effect. Owned process trees are checked by PID/start identity before cleanup, including Linux descendants in separate sessions. Mock-server output goes to diagnostic log files, avoiding unconsumed pipes. Cleanup or identity failures require inspection and cannot justify a successful validation claim.
+
+CI runs on PR updates, `main` pushes and manual dispatch, and checks out the exact PR head. Its concurrency group cancels only an older run for the same PR/ref. Uploaded evidence includes P0, history-query, strategy-query, deterministic Bull Put flow and screenshots. A saved workflow, local pass, or previous-head green run does not prove final remote acceptance.
+
 ## Reproducible Environment Gates
 
 Use the repository-owned setup entry point from a clean checkout. It reads `.python-version` and `.node-version`, installs the locked Python environment from `uv.lock`, installs the project-local browser dependency from `package-lock.json`, downloads Chromium into the repository browser cache, and can start the pinned PostgreSQL service:
