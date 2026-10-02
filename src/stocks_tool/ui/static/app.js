@@ -831,6 +831,15 @@ function recordUnknownMutationLock(accountId, intent) {
   }
 }
 
+function clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey) {
+  if (!idempotencyKey) return;
+  const locks = state.unknownMutationLocks?.[accountId];
+  if (!Array.isArray(locks)) return;
+  state.unknownMutationLocks[accountId] = locks.filter(
+    (lock) => !(lock.idempotency_key === idempotencyKey && (!lock.action_key || lock.action_key === actionKey)),
+  );
+}
+
 function evaluateCurrentTradingSafety(options = {}) {
   const evaluator = window.StocksToolTradingSafety?.evaluateTradingSafety;
   if (typeof evaluator !== "function") {
@@ -979,6 +988,7 @@ async function runConfirmedBrokerMutation(
 
     idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature, accountId, mode);
     const result = await operation(idempotencyKey);
+    clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
     clearIdempotencyKey(actionKey, accountId);
     if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
       return { executed: false, discarded: true, result };
@@ -1000,6 +1010,7 @@ async function runConfirmedBrokerMutation(
     }
     if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
       if (isTerminalMutationError(error)) {
+        clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
         clearIdempotencyKey(actionKey, accountId);
       }
       return { executed: false, discarded: true, error };
@@ -1013,6 +1024,7 @@ async function runConfirmedBrokerMutation(
       );
     }
     if (isTerminalMutationError(error)) {
+      clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
       clearIdempotencyKey(actionKey, accountId);
     }
     throw error;

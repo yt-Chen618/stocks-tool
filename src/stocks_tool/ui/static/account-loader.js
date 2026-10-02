@@ -54,8 +54,8 @@
       const byId = new Map(existing.map((lock) => [lock.id, lock]));
       try {
         const prefix = "stocks-tool-idempotency:";
-        for (let index = 0; index < Number(window.sessionStorage.length || 0); index += 1) {
-          const storageKey = window.sessionStorage.key(index);
+        const storageKeys = Array.from({length: Number(window.sessionStorage.length || 0)}, (_value, index) => window.sessionStorage.key(index)).filter(Boolean);
+        for (const storageKey of storageKeys) {
           if (!storageKey || !storageKey.startsWith(prefix)) continue;
           const remainder = storageKey.slice(prefix.length);
           const scoped = remainder.startsWith(`${accountId}:`);
@@ -71,28 +71,23 @@
           const recordAccount = record?.accountId || signatureAccount(record?.requestSignature);
           if (scoped && recordAccount && recordAccount !== accountId) continue;
           if (!scoped && recordAccount && recordAccount !== accountId) continue;
-          if (!scoped && recordAccount === accountId && record?.key && record?.requestSignature) {
-            const migratedKey = `${prefix}${accountId}:${actionKey}`;
-            record = { ...record, accountId, mode: record.mode || "paper", actionKey };
-            try {
-              window.sessionStorage.setItem(migratedKey, JSON.stringify(record));
-              window.sessionStorage.removeItem(storageKey);
-            } catch (_error) {
-              // Keep the legacy record; the in-memory lock below remains fail closed.
-            }
-          }
-          const lockId = typeof record?.intentId === "string" && record.intentId
-            ? record.intentId
-            : `legacy-idempotency:${storageKey}`;
-          byId.set(lockId, {
-            id: lockId,
+          if (
+            typeof record?.intentId !== "string" ||
+            !record.intentId ||
+            recordAccount !== accountId ||
+            record.mode !== "paper" ||
+            typeof (record.actionKey || actionKey) !== "string" ||
+            !(record.actionKey || actionKey)
+          ) continue;
+          byId.set(record.intentId, {
+            id: record.intentId,
             state: "unknown",
-            source: record?.intentId ? "session-rehydrated" : "legacy-idempotency-record",
+            source: "session-rehydrated",
             external_account_id: accountId,
-            mode: record?.mode || "paper",
-            action_key: record?.actionKey || actionKey,
-            idempotency_key: record?.key || null,
-            request_signature: record?.requestSignature || null,
+            mode: "paper",
+            action_key: record.actionKey || actionKey,
+            idempotency_key: record.key || null,
+            request_signature: record.requestSignature || null,
           });
         }
       } catch (_error) {

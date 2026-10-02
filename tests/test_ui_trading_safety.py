@@ -191,3 +191,42 @@ def test_late_terminal_mutation_clears_original_scope_key() -> None:
     )
     assert result["discarded"] is True
     assert result["keys"] == []
+
+
+def test_legacy_idempotency_record_migrates_only_with_matching_signature() -> None:
+    result = run_node(
+        r'''
+        const fs = require("fs");
+        const vm = require("vm");
+        const storage = new Map();
+        global.window = {
+          crypto: {randomUUID: () => "new-uuid"},
+          sessionStorage: {getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key)},
+          innerWidth: 1440, matchMedia: () => ({matches: false, addEventListener() {}}),
+          StocksToolExecution: {setMobileReadonly() {}}, StocksToolI18n: {TRANSLATIONS: {}}, StocksToolFormatters: {},
+        };
+        global.document = {addEventListener: () => {}, querySelectorAll: () => [], body: {}};
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/state.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/trading-safety.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/app.js", "utf8"));
+        state.selectedAccountId = "A";
+        const signature = JSON.stringify({account: "A", action: "submit"});
+        storage.set("stocks-tool-idempotency:order-submit", JSON.stringify({key: "legacy-key", requestSignature: signature}));
+        const migrated = getOrCreateIdempotencyKey("order-submit", signature, "A", "paper");
+        storage.set("stocks-tool-idempotency:bad-action", "not-json");
+        let malformed = false;
+        try { getOrCreateIdempotencyKey("bad-action", "same", "A", "paper"); } catch (_error) { malformed = true; }
+        storage.set("stocks-tool-idempotency:different", JSON.stringify({key: "legacy-different", requestSignature: JSON.stringify({account: "B"})}));
+        let different = false;
+        try { getOrCreateIdempotencyKey("different", signature, "A", "paper"); } catch (_error) { different = true; }
+        process.stdout.write(JSON.stringify({migrated, hasScoped: storage.has("stocks-tool-idempotency:A:order-submit"), hasLegacy: storage.has("stocks-tool-idempotency:order-submit"), malformed, different, generatedDifferent: storage.has("stocks-tool-idempotency:A:different")}));
+        ''',
+    )
+    assert result == {
+        "migrated": "legacy-key",
+        "hasScoped": True,
+        "hasLegacy": False,
+        "malformed": True,
+        "different": True,
+        "generatedDifferent": False,
+    }

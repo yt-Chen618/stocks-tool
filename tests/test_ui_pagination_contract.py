@@ -264,6 +264,7 @@ def test_unknown_intent_id_survives_reload_and_terminal_detail_clears_key() -> N
         const vm = require("vm");
         const storage = new Map([
           ["stocks-tool-idempotency:A:order-submit", JSON.stringify({key: "ui:order-submit:old", requestSignature: "A-request", accountId: "A", mode: "paper", actionKey: "order-submit", intentId: "intent-a"})],
+          ["stocks-tool-idempotency:A:order-replay", JSON.stringify({key: "ui:order-replay:old", requestSignature: "A-replay", accountId: "A", mode: "paper", actionKey: "order-replay"})],
           ["stocks-tool-idempotency:B:order-submit", JSON.stringify({key: "ui:order-submit:foreign", requestSignature: "B-request", accountId: "B", mode: "paper", actionKey: "order-submit", intentId: "intent-b"})],
         ]);
         global.window = {sessionStorage: {
@@ -296,4 +297,36 @@ def test_unknown_intent_id_survives_reload_and_terminal_detail_clears_key() -> N
     assert result["rehydrated"] == ["intent-a"]
     assert result["cleared"] == ["intent-a"]
     assert result["remaining"] == []
-    assert result["keys"] == ["stocks-tool-idempotency:B:order-submit"]
+    assert result["keys"] == ["stocks-tool-idempotency:A:order-replay", "stocks-tool-idempotency:B:order-submit"]
+
+
+def test_live_pending_key_without_intent_id_does_not_create_stranded_lock() -> None:
+    result = run_node(
+        r'''
+        const fs = require("fs");
+        const vm = require("vm");
+        const storage = new Map([["stocks-tool-idempotency:A:order-submit", JSON.stringify({key: "ui:order-submit:live", requestSignature: "A-request", accountId: "A", mode: "paper", actionKey: "order-submit"})]]);
+        global.window = {sessionStorage: {
+          key: (index) => Array.from(storage.keys())[index] || null,
+          getItem: (key) => storage.get(key) || null,
+          setItem: (key, value) => storage.set(key, value),
+          removeItem: (key) => storage.delete(key),
+        }};
+        Object.defineProperty(window.sessionStorage, "length", {get: () => storage.size});
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/api-client.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/account-loader.js", "utf8"));
+        const state = {selectedAccountId: "A", accountLoadGeneration: 1, accounts: [{external_account_id: "A"}], unknownMutationLocks: {}, terminalUnknownMutationIds: {}};
+        const loader = window.StocksToolAccountLoader.createAccountLoader({
+          state, fetchJson: async () => { throw Object.assign(new Error("not found"), {status: 404}); },
+          decodeCursorPage: window.StocksToolApiClient.decodeCursorPage,
+          createOverlayStatus: () => ({}), formatPanelLoadLabel: (key) => key,
+          renderAccountOptions() {}, renderEmptyState() {}, renderAccountState() {},
+          applyTradingSafetyState() {}, updateSyncButtons() {}, updateOrderTicketAvailability() {}, updatePreOpenButtons() {},
+        });
+        const before = loader.rehydrateUnknownMutationLocks("A");
+        storage.delete("stocks-tool-idempotency:A:order-submit");
+        const after = loader.rehydrateUnknownMutationLocks("A");
+        process.stdout.write(JSON.stringify({before, after, locks: state.unknownMutationLocks.A || []}));
+        ''',
+    )
+    assert result == {"before": [], "after": [], "locks": []}
