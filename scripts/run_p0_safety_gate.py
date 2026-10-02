@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from regression_common import build_report, emit_report
+from regression_common import ObservedRun, build_report, emit_report, read_tail
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,25 +148,27 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
     return specs
 
 
-def run_child(spec: dict[str, Any]) -> dict[str, Any]:
+def run_child(spec: dict[str, Any], observed_run: ObservedRun) -> dict[str, Any]:
     started = time.monotonic()
-    completed = subprocess.run(
-        spec["command"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+    child = observed_run.run_child(
+        {**spec, "cwd": str(ROOT)},
+        timeout_seconds=spec.get("timeout_seconds"),
     )
     return {
         "name": spec["name"],
         "command": spec["command"],
-        "returncode": completed.returncode,
+        "returncode": child["returncode"],
         "duration_seconds": round(time.monotonic() - started, 3),
-        "status": "passed" if completed.returncode == 0 else "failed",
-        "stdout_tail": completed.stdout[-1200:],
-        "stderr_tail": completed.stderr[-1200:],
+        "status": child["status"],
+        "stdout_tail": read_tail(child["stdout_log"]),
+        "stderr_tail": read_tail(child["stderr_log"]),
+        "stdout_log": child["stdout_log"],
+        "stderr_log": child["stderr_log"],
+        "pid": child.get("pid"),
+        "start_identity": child.get("start_identity"),
+        "attempt": child.get("attempt"),
+        "reused": child.get("reused", False),
+        "timed_out": child.get("timed_out", False),
     }
 
 
@@ -175,8 +176,22 @@ def main() -> None:
     args = parse_args()
     evidence_dir = Path(args.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    children = [run_child(spec) for spec in child_specs(args, evidence_dir)]
-    failed = any(child["returncode"] != 0 for child in children)
+    observed_run = ObservedRun(evidence_dir, source_root=ROOT)
+    observed_run.start()
+    children: list[dict[str, Any]] = []
+    failed = False
+    try:
+        for spec in child_specs(args, evidence_dir):
+            child = run_child(spec, observed_run)
+            children.append(child)
+            if child["returncode"] != 0:
+                failed = True
+    except Exception as error:
+        failed = True
+        observed_run.finish("failed", next_action="inspect observability state and child logs", error=str(error))
+        raise
+    else:
+        observed_run.finish("failed" if failed else "passed")
     emit_report(
         build_report(
             script="run_p0_safety_gate.py",
@@ -197,6 +212,7 @@ def main() -> None:
                 "destructive_actions_allowed": False,
                 "running_api_checks_skipped": args.skip_running_api_checks,
                 "children": children,
+                "observability": observed_run.payload(),
             },
         ),
         json_output=args.json_output,
