@@ -492,6 +492,39 @@ async function main() {
     await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
     await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
 
+    const noButtonBusiness = await page.evaluate(async () => {
+      window.__m1MutationCalls = 0;
+      const result = await window.runConfirmedBrokerMutation({
+        actionKey: "m1-recover-close-business",
+        confirmation: { title: "M1 recovery business", summary: "M1 recovery business", details: {} },
+        requestSignature: "recover-business",
+        businessPredicate: () => false,
+        businessBlockedMessage: "Recovery close is no longer eligible. No request was sent.",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return { blocked: result.blocked === true, calls: window.__m1MutationCalls, dialogOpen: Boolean(document.querySelector("#trade-confirm-dialog[open]")) };
+    });
+    if (!noButtonBusiness.blocked || noButtonBusiness.calls !== 0 || noButtonBusiness.dialogOpen) {
+      throw new Error(`No-button business predicate failed: ${JSON.stringify(noButtonBusiness)}`);
+    }
+    const buttonBusiness = await page.evaluate(async () => {
+      const button = document.getElementById("run-strategy-scan");
+      button.dataset.businessDisabled = "true";
+      window.__m1MutationCalls = 0;
+      const result = await window.runConfirmedBrokerMutation({
+        actionKey: "m1-button-business",
+        button,
+        confirmation: { title: "M1 button business", summary: "M1 button business", details: {} },
+        requestSignature: "button-business",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      delete button.dataset.businessDisabled;
+      return { blocked: result.blocked === true, calls: window.__m1MutationCalls, dialogOpen: Boolean(document.querySelector("#trade-confirm-dialog[open]")) };
+    });
+    if (!buttonBusiness.blocked || buttonBusiness.calls !== 0 || buttonBusiness.dialogOpen) {
+      throw new Error(`Button business predicate failed: ${JSON.stringify(buttonBusiness)}`);
+    }
+
     const accountRaceStart = await page.evaluate(() => {
       window.__m1MutationCalls = 0;
       window.__m1AccountRacePromise = window.runConfirmedBrokerMutation({
@@ -525,6 +558,32 @@ async function main() {
     recoveryMode = "clear";
     await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
     await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+
+    const abaRaceStart = await page.evaluate(() => {
+      window.__m1MutationCalls = 0;
+      window.__m1AbaPromise = window.runConfirmedBrokerMutation({
+        actionKey: "m1-a-b-a",
+        confirmation: { title: "M1 A-B-A", summary: "M1 A-B-A", details: {} },
+        requestSignature: "a-b-a",
+        statusElement: null,
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      return true;
+    });
+    if (!abaRaceStart) throw new Error("Could not start A-B-A mutation.");
+    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await page.evaluate(() => {
+      const select = document.getElementById("account-select");
+      select.value = "LBPT10087357-ALT";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      select.value = "LBPT10087357";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await waitFor(() => page.locator("#account-select").inputValue().then((value) => value === PRIMARY_ACCOUNT), timeoutMs, "A-B-A account restore");
+    await page.click("#trade-confirm-accept");
+    const abaResult = await page.evaluate(async () => window.__m1AbaPromise);
+    if (abaResult.executed || abaResult.contextChanged !== true) {
+      throw new Error(`A-B-A confirmation recheck failed: ${JSON.stringify(abaResult)}`);
+    }
 
     const recoveryRaceStart = await page.evaluate(() => {
       window.__m1MutationCalls = 0;
@@ -571,12 +630,8 @@ async function main() {
       throw new Error(`Request-signature confirmation recheck failed: ${JSON.stringify(signatureResult)}`);
     }
 
-    recoveryMode = "clear";
-    await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
-    await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
     await page.evaluate(() => {
       window.__m1MutationCalls = 0;
-      window.__m1Release = null;
       window.__m1FirstPromise = window.runConfirmedBrokerMutation({
         actionKey: "m1-duplicate",
         confirmation: { title: "M1 duplicate", summary: "M1 duplicate", details: {} },
@@ -584,32 +639,33 @@ async function main() {
         statusElement: null,
       }, async () => {
         window.__m1MutationCalls += 1;
-        await new Promise((resolve) => { window.__m1Release = resolve; });
         return { ok: true };
       });
       return true;
     });
     await page.waitForSelector("#trade-confirm-dialog[open]");
-    await page.click("#trade-confirm-accept");
-    await waitFor(() => page.evaluate(() => window.__m1MutationCalls === 1), timeoutMs, "first mutation operation");
-    const duplicateResult = await page.evaluate(async () => window.runConfirmedBrokerMutation({
+    const duplicatePromise = page.evaluate(async () => window.runConfirmedBrokerMutation({
       actionKey: "m1-duplicate",
       confirmation: { title: "M1 duplicate", summary: "M1 duplicate", details: {} },
       requestSignature: "duplicate",
       statusElement: null,
     }, async () => { window.__m1MutationCalls += 1; return { ok: true }; }));
+    await page.click("#trade-confirm-accept");
+    const firstResult = await page.evaluate(async () => window.__m1FirstPromise);
+    const duplicateResult = await duplicatePromise;
     if (duplicateResult.executed || duplicateResult.blocked !== true) {
       throw new Error(`Duplicate mutation was not blocked: ${JSON.stringify(duplicateResult)}`);
     }
-    await page.evaluate(() => window.__m1Release?.());
-    const firstResult = await page.evaluate(async () => window.__m1FirstPromise);
     const duplicateCalls = await page.evaluate(() => window.__m1MutationCalls);
     if (!firstResult.executed || duplicateCalls !== 1) {
       throw new Error(`Duplicate mutation operation count was not exactly one: ${JSON.stringify({ firstResult, duplicateCalls })}`);
     }
     return {
       blockedWithoutButton: true,
+      noButtonBusinessRejected: true,
+      buttonBusinessRejected: true,
       accountChangeRejected: true,
+      abaContextRejected: true,
       recoveryChangeRejected: true,
       signatureChangeRejected: true,
       duplicateOperationCount: duplicateCalls,
