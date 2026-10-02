@@ -977,7 +977,7 @@ async function runConfirmedBrokerMutation(
       return { executed: false, blocked: true, contextChanged: true };
     }
 
-    idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature, accountId);
+    idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature, accountId, mode);
     const result = await operation(idempotencyKey);
     clearIdempotencyKey(actionKey, accountId);
     if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
@@ -996,6 +996,7 @@ async function runConfirmedBrokerMutation(
         action_key: actionKey,
         idempotency_key: idempotencyKey,
       });
+      persistUnknownMutationIntent({ accountId, mode, actionKey, requestSignature, idempotencyKey, intentId });
     }
     if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
       if (isTerminalMutationError(error)) {
@@ -1050,17 +1051,88 @@ function showTradeConfirmation({ title, summary, details }) {
   });
 }
 
-function getOrCreateIdempotencyKey(actionKey, requestSignature, accountId = state.selectedAccountId) {
+function idempotencySignatureAccount(requestSignature) {
+  if (typeof requestSignature !== "string") return null;
+  try {
+    const payload = JSON.parse(requestSignature);
+    return payload?.external_account_id || payload?.account || payload?.accountId || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readIdempotencyRecord(storageKey) {
+  const raw = window.sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Stored idempotency record is invalid; reconcile before retrying: ${error.message}`);
+  }
+  if (!record || typeof record !== "object" || typeof record.key !== "string" || typeof record.requestSignature !== "string") {
+    throw new Error("Stored idempotency record is incomplete; reconcile before retrying.");
+  }
+  return record;
+}
+
+function persistUnknownMutationIntent({ accountId, mode, actionKey, requestSignature, idempotencyKey, intentId }) {
+  if (!intentId || !idempotencyKey) return;
+  const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${accountId}:${actionKey}`;
+  try {
+    const existing = readIdempotencyRecord(storageKey) || {};
+    window.sessionStorage.setItem(storageKey, JSON.stringify({
+      ...existing,
+      key: idempotencyKey,
+      requestSignature,
+      accountId,
+      mode,
+      actionKey,
+      intentId,
+    }));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function getOrCreateIdempotencyKey(actionKey, requestSignature, accountId = state.selectedAccountId, mode = "paper") {
   const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${accountId}:${actionKey}`;
   let existing = null;
   try {
-    existing = JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
+    existing = readIdempotencyRecord(storageKey);
+    if (!existing) {
+      const legacyKey = `${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`;
+      const legacy = window.sessionStorage.getItem(legacyKey) ? readIdempotencyRecord(legacyKey) : null;
+      if (legacy) {
+        const legacyAccount = legacy.accountId || idempotencySignatureAccount(legacy.requestSignature);
+        if (legacyAccount !== accountId || (legacy.mode && legacy.mode !== mode)) {
+          throw new Error("An unscoped idempotency record belongs to an unknown account. Reconcile it before retrying.");
+        }
+        if (legacy.requestSignature !== requestSignature) {
+          throw new Error("A previous request for this action is unresolved. Retry with the same inputs after reconciliation.");
+        }
+        existing = { ...legacy, accountId, mode, actionKey };
+        window.sessionStorage.setItem(storageKey, JSON.stringify(existing));
+        window.sessionStorage.removeItem(legacyKey);
+      }
+    }
   } catch (error) {
     throw new Error(`Session storage is unavailable; broker action blocked: ${error.message}`);
   }
   if (existing?.key) {
+    const signatureAccount = idempotencySignatureAccount(existing.requestSignature);
+    if ((existing.accountId && existing.accountId !== accountId) || (signatureAccount && signatureAccount !== accountId) || (existing.mode && existing.mode !== mode)) {
+      throw new Error("A stored idempotency record belongs to a different account or mode. Reconcile it before retrying.");
+    }
     if (existing.requestSignature !== requestSignature) {
       throw new Error("A previous request for this action is unresolved. Retry with the same inputs after reconciliation.");
+    }
+    if (existing.accountId !== accountId || existing.mode !== mode || existing.actionKey !== actionKey) {
+      try {
+        window.sessionStorage.setItem(storageKey, JSON.stringify({ ...existing, accountId, mode, actionKey }));
+      } catch (error) {
+        throw new Error(`Could not update the idempotency record; broker action blocked: ${error.message}`);
+      }
     }
     return existing.key;
   }
@@ -1071,7 +1143,7 @@ function getOrCreateIdempotencyKey(actionKey, requestSignature, accountId = stat
   const safeAction = String(actionKey).toLowerCase().replace(/[^a-z0-9._:-]/g, "-").slice(0, 32);
   const key = `ui:${safeAction}:${randomId}`;
   try {
-    window.sessionStorage.setItem(storageKey, JSON.stringify({ key, requestSignature }));
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ key, requestSignature, accountId, mode, actionKey }));
   } catch (error) {
     throw new Error(`Could not persist the idempotency key; broker action blocked: ${error.message}`);
   }

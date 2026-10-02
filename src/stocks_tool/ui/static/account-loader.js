@@ -38,6 +38,70 @@
       return Array.isArray(locks) ? locks : [];
     }
 
+    function signatureAccount(value) {
+      if (typeof value !== "string") return null;
+      try {
+        const payload = JSON.parse(value);
+        return payload?.external_account_id || payload?.account || payload?.accountId || null;
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function rehydrateUnknownMutationLocks(accountId) {
+      state.unknownMutationLocks ||= {};
+      const existing = currentAccountUnknownLocks(accountId);
+      const byId = new Map(existing.map((lock) => [lock.id, lock]));
+      try {
+        const prefix = "stocks-tool-idempotency:";
+        for (let index = 0; index < Number(window.sessionStorage.length || 0); index += 1) {
+          const storageKey = window.sessionStorage.key(index);
+          if (!storageKey || !storageKey.startsWith(prefix)) continue;
+          const remainder = storageKey.slice(prefix.length);
+          const scoped = remainder.startsWith(`${accountId}:`);
+          const actionKey = scoped ? remainder.slice(String(accountId).length + 1) : remainder;
+          const possibleAccount = remainder.split(":", 1)[0];
+          if (!scoped && state.accounts?.some((account) => account.external_account_id === possibleAccount)) continue;
+          let record = null;
+          try {
+            record = JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
+          } catch (_error) {
+            record = null;
+          }
+          const recordAccount = record?.accountId || signatureAccount(record?.requestSignature);
+          if (scoped && recordAccount && recordAccount !== accountId) continue;
+          if (!scoped && recordAccount && recordAccount !== accountId) continue;
+          if (!scoped && recordAccount === accountId && record?.key && record?.requestSignature) {
+            const migratedKey = `${prefix}${accountId}:${actionKey}`;
+            record = { ...record, accountId, mode: record.mode || "paper", actionKey };
+            try {
+              window.sessionStorage.setItem(migratedKey, JSON.stringify(record));
+              window.sessionStorage.removeItem(storageKey);
+            } catch (_error) {
+              // Keep the legacy record; the in-memory lock below remains fail closed.
+            }
+          }
+          const lockId = typeof record?.intentId === "string" && record.intentId
+            ? record.intentId
+            : `legacy-idempotency:${storageKey}`;
+          byId.set(lockId, {
+            id: lockId,
+            state: "unknown",
+            source: record?.intentId ? "session-rehydrated" : "legacy-idempotency-record",
+            external_account_id: accountId,
+            mode: record?.mode || "paper",
+            action_key: record?.actionKey || actionKey,
+            idempotency_key: record?.key || null,
+            request_signature: record?.requestSignature || null,
+          });
+        }
+      } catch (_error) {
+        // A storage failure cannot authorize a retry; the existing in-memory lock remains.
+      }
+      state.unknownMutationLocks[accountId] = Array.from(byId.values());
+      return currentAccountUnknownLocks(accountId);
+    }
+
     const TERMINAL_UNKNOWN_STATES = new Set(["persisted", "rejected", "resolved_no_order"]);
 
     async function reconcileUnknownMutationLocks(accountId, loadGeneration) {
@@ -679,6 +743,7 @@
         state.zeroDteLotteryRuntime = null;
       }
       state.accountContextId = selectedAccountId;
+      rehydrateUnknownMutationLocks(selectedAccountId);
       const previousOrder = state.orders.find((order) => order.id === state.selectedOrderId) || null;
       state.activityPages = {
         orders: emptyActivityPage(),
@@ -845,6 +910,7 @@
       loadSpreadEligibility,
       loadSelectedOrderDetails,
       reconcileUnknownMutationLocks,
+      rehydrateUnknownMutationLocks,
       refreshSpread,
       monitorSpread,
       recoverCloseSpread,
