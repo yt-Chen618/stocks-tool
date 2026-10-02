@@ -194,6 +194,10 @@ class CoveredCallLifecycleChildFailure(Protocol):
     def __call__(self, parent_action_intent_id: str | None, exc: Exception) -> None: ...
 
 
+class CoveredCallLifecyclePersistenceFailure(Protocol):
+    def __call__(self, parent_action_intent_id: str | None, exc: Exception) -> None: ...
+
+
 class CoveredCallLifecycleOrderGateway:
     """Submit and refresh Covered Call child orders through the shared ledger."""
 
@@ -537,12 +541,14 @@ class CoveredCallLifecycle:
         recorder: CoveredCallLifecycleRecorder,
         prebroker_phase: Callable[[str | None], AbstractContextManager[None]],
         mark_child_failure: CoveredCallLifecycleChildFailure,
+        mark_persistence_failure: CoveredCallLifecyclePersistenceFailure,
     ) -> None:
         self.policy = policy
         self.orders = orders
         self.recorder = recorder
         self.prebroker_phase = prebroker_phase
         self.mark_child_failure = mark_child_failure
+        self.mark_persistence_failure = mark_persistence_failure
 
     def _submit(
         self,
@@ -560,7 +566,7 @@ class CoveredCallLifecycle:
         try:
             return callback()
         except Exception as exc:
-            self.mark_child_failure(parent_action_intent_id, exc)
+            self.mark_persistence_failure(parent_action_intent_id, exc)
             raise
 
     def execute_open(

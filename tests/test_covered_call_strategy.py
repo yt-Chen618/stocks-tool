@@ -815,6 +815,63 @@ def test_covered_call_execute_requires_approved_proposal_and_submits_option_orde
     assert experiments.updated_status == StrategyProposalStatus.EXECUTED
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [LookupError("persistence lookup failed"), ValueError("persistence payload failed")],
+)
+def test_covered_call_open_persistence_failure_marks_parent_unknown_without_resubmit(
+    failure: Exception,
+) -> None:
+    proposal = StrategyProposal(
+        id="proposal-persist-failure",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Sell covered call on UNH.US",
+        proposed_action="sell_covered_call",
+        rationale="Sell 1 call against 100 shares.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload=build_candidate_payload(),
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(proposal)
+    experiments.create_run = Mock(side_effect=failure)
+    order_service = Mock()
+    order_service.submit_order.return_value = build_roll_order(
+        order_id="open-order-persist-failure",
+        symbol="UNH260626C105000.US",
+        side=OrderSide.SELL,
+    )
+    service = build_service(
+        experiments=experiments,
+        order_service=order_service,
+        adapter=build_adapter(),
+    )
+    configure_parent_action(
+        order_service,
+        action_id="parent-persist-failure",
+        idempotency_key="persist-failure-key-0001",
+        entity_id=proposal.id,
+    )
+
+    with pytest.raises(type(failure), match=str(failure)):
+        service.execute_approved_proposal(
+            proposal.id,
+            request=ExecuteCoveredCallProposalRequest(),
+            idempotency_key="persist-failure-key-0001",
+        )
+
+    order_service.submit_order.assert_called_once()
+    order_service.mark_trade_action_unknown.assert_called_once_with(
+        "parent-persist-failure",
+        str(failure),
+    )
+    order_service.mark_trade_action_rejected.assert_not_called()
+    order_service.complete_trade_action.assert_not_called()
+
+
 def test_covered_call_execute_blocks_cached_underlying_before_submit() -> None:
     proposal = StrategyProposal(
         id="proposal-cached-quote",

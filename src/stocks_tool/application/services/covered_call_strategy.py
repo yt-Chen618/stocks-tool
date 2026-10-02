@@ -429,6 +429,7 @@ class CoveredCallStrategyService:
             ),
             prebroker_phase=self._known_prebroker_phase,
             mark_child_failure=self._mark_public_action_for_child_failure,
+            mark_persistence_failure=self._mark_public_action_unknown,
         )
 
     def _prepare_public_action(

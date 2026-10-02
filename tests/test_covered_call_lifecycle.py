@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 from stocks_tool.application.services.covered_call.lifecycle import (
     CloseAuthorization,
     ContinueRollAuthorization,
@@ -53,7 +54,14 @@ def proposal() -> StrategyProposal:
     )
 
 
-def build_lifecycle(policy: Mock, orders: Mock, recorder: Mock) -> CoveredCallLifecycle:
+def build_lifecycle(
+    policy: Mock,
+    orders: Mock,
+    recorder: Mock,
+    *,
+    mark_child_failure: Mock | None = None,
+    mark_persistence_failure: Mock | None = None,
+) -> CoveredCallLifecycle:
     @contextmanager
     def prebroker(_parent_id):
         yield
@@ -63,7 +71,8 @@ def build_lifecycle(policy: Mock, orders: Mock, recorder: Mock) -> CoveredCallLi
         orders=orders,
         recorder=recorder,
         prebroker_phase=prebroker,
-        mark_child_failure=Mock(),
+        mark_child_failure=mark_child_failure or Mock(),
+        mark_persistence_failure=mark_persistence_failure or Mock(),
     )
 
 
@@ -93,6 +102,36 @@ def test_lifecycle_open_preserves_account_mode_and_contract_quantity() -> None:
     assert call["candidate"].contracts == 2
     assert call["side"] == OrderSide.SELL
     assert call["parent_action_intent_id"] == "parent-1"
+
+
+@pytest.mark.parametrize("failure", [LookupError("run lookup failed"), ValueError("run payload failed")])
+def test_lifecycle_recorder_failure_uses_persistence_failure_seam(failure: Exception) -> None:
+    selected = candidate("UNH261120C330000.US")
+    policy = Mock()
+    policy.authorize_open.return_value = OpenAuthorization(candidate=selected, limit_price=Decimal("2.00"))
+    orders = Mock()
+    orders.submit.return_value = SimpleNamespace(id="sell-1", status=OrderStatus.FILLED)
+    recorder = Mock()
+    recorder.record_open.side_effect = failure
+    mark_child_failure = Mock()
+    mark_persistence_failure = Mock()
+
+    with pytest.raises(type(failure), match=str(failure)):
+        build_lifecycle(
+            policy,
+            orders,
+            recorder,
+            mark_child_failure=mark_child_failure,
+            mark_persistence_failure=mark_persistence_failure,
+        ).execute_open(
+            proposal=proposal(),
+            request=SimpleNamespace(remark="test"),
+            parent_action_intent_id="parent-persist-failure",
+        )
+
+    orders.submit.assert_called_once()
+    mark_child_failure.assert_not_called()
+    mark_persistence_failure.assert_called_once_with("parent-persist-failure", failure)
 
 
 def test_lifecycle_roll_holds_new_sell_until_buyback_fills() -> None:
