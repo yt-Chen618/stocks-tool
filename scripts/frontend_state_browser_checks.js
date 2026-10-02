@@ -8,9 +8,10 @@ const PRIMARY_ACCOUNT = "LBPT10087357";
 const ALT_ACCOUNT = "LBPT10087357-ALT";
 
 async function selectAccount(page, accountId, timeoutMs) {
+  const previousGeneration = await page.evaluate(() => state.accountLoadGeneration);
   await page.selectOption("#account-select", accountId);
   await waitFor(
-    () => page.locator("#account-select").inputValue().then((value) => value === accountId),
+    () => page.evaluate(({ accountId, previousGeneration }) => state.selectedAccountId === accountId && state.accountLoadGeneration > previousGeneration && state.coreDataHealthy, { accountId, previousGeneration }),
     timeoutMs,
     `account selection ${accountId}`,
   );
@@ -20,7 +21,13 @@ async function selectAccount(page, accountId, timeoutMs) {
 
 async function refreshClear(page, setRecoveryMode, timeoutMs) {
   setRecoveryMode("clear");
+  const previousGeneration = await page.evaluate(() => state.accountLoadGeneration);
   await page.click("#refresh-dashboard");
+  await waitFor(
+    () => page.evaluate((generation) => state.accountLoadGeneration > generation && state.coreDataHealthy, previousGeneration),
+    timeoutMs,
+    "new account generation after dashboard refresh",
+  );
   await expectText(page.locator("#operations-recovery-panel"), "无阻塞", timeoutMs);
   await expectText(page.locator("#research-table-body"), "MOCK.US", timeoutMs);
 }
@@ -201,9 +208,11 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
   };
 
   const terminalIntentPattern = "**/ops/trading-intents/m6-unknown-a**";
+  let terminalIntentReads = 0;
   const terminalIntentRoute = async (route) => {
     const url = new URL(route.request().url());
     if (route.request().method() === "GET" && url.pathname === "/ops/trading-intents/m6-unknown-a") {
+      terminalIntentReads += 1;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -227,6 +236,12 @@ async function runFrontendStateBrowserChecks({ page, timeoutMs, setRecoveryMode,
   await page.route(terminalIntentPattern, terminalIntentRoute);
   try {
     await refreshClear(page, setRecoveryMode, timeoutMs);
+    await waitFor(
+      () => page.evaluate(() => window.sessionStorage.getItem("stocks-tool-idempotency:LBPT10087357:m6-late-unknown") === null && !state.unresolvedTradingIntents.some((intent) => intent.id === "m6-unknown-a")),
+      timeoutMs,
+      "exact terminal lookup to clear the A key and local lock",
+    );
+    if (terminalIntentReads === 0) throw new Error("Unknown lock cleared without observing its exact terminal detail read.");
     const keyAfterPersistedResolution = await page.evaluate(() => window.sessionStorage.getItem("stocks-tool-idempotency:LBPT10087357:m6-late-unknown"));
     if (keyAfterPersistedResolution !== null) {
       throw new Error(`Persisted terminal intent did not clear the original A idempotency key: ${keyAfterPersistedResolution}`);
