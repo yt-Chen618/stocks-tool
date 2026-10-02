@@ -59,7 +59,10 @@ def run_browser_flow(
     )
     if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown recovery UI browser failure."
-        raise RegressionError(f"Recovery browser flow {completed.status}: {detail}")
+        error = RegressionError(f"Recovery browser flow {completed.status}: {detail}")
+        error.process_status = completed.status
+        error.process_cleanup = completed.cleanup
+        raise error
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -106,7 +109,7 @@ def main() -> None:
             build_report(
                 script="run_recovery_ui_regression.py",
                 workflow="mock-recovery-ui-dom",
-                status="failed",
+                    status=getattr(error, "process_status", "failed"),
                 mode="mock",
                 target=base_url,
                 summary="Recovery Operations DOM regression failed.",

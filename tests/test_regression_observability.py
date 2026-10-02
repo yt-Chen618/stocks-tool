@@ -16,6 +16,7 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.append(str(SCRIPTS_DIR))
 
+import regression_common as common  # noqa: E402
 from regression_common import (  # noqa: E402
     ObservabilityError,
     ObservedRun,
@@ -312,9 +313,15 @@ def test_process_identity_requires_start_token_to_avoid_pid_reuse() -> None:
 
 def test_bounded_process_timeout_cleans_owned_descendant(tmp_path: Path) -> None:
     pid_file = tmp_path / "descendant.pid"
+    grandchild_code = (
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)"
+        if os.name != "nt"
+        else "import time; time.sleep(30)"
+    )
     child_code = (
         "import subprocess, sys, time; "
-        f"p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        f"spawn_kwargs={{'start_new_session': True}} if sys.platform != 'win32' else {{'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}}; "
+        f"p=subprocess.Popen([sys.executable, '-c', {grandchild_code!r}], **spawn_kwargs); "
         f"open(r'{pid_file}', 'w', encoding='ascii').write(str(p.pid)); "
         "time.sleep(30)"
     )
@@ -357,6 +364,46 @@ def test_bounded_process_records_launch_and_nonzero_exit_faults(tmp_path: Path) 
     assert exited.status == "completed"
     assert exited.returncode == 3
     assert "node-like failure" in exited.stdout
+
+
+def test_bounded_process_preserves_explicit_interrupt_status_and_cleans_tree(tmp_path: Path, monkeypatch) -> None:
+    launch_kwargs = {"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    real_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **launch_kwargs,
+    )
+
+    class InterruptingProcess:
+        pid = real_process.pid
+
+        @staticmethod
+        def communicate(timeout=None):
+            raise KeyboardInterrupt()
+
+        @staticmethod
+        def poll():
+            return real_process.poll()
+
+        @staticmethod
+        def wait(timeout=None):
+            return real_process.wait(timeout=timeout)
+
+    monkeypatch.setattr(common.subprocess, "Popen", lambda *args, **kwargs: InterruptingProcess())
+    monkeypatch.setattr(common, "terminate_owned_process_tree", lambda process: {"attempted": True, "terminated": True, "pid": process.pid})
+    result = common.run_bounded_process(
+        [sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        timeout_seconds=1,
+    )
+    assert result.status == "interrupted"
+    assert result.interrupted is True
+    assert result.cleanup and result.cleanup.get("terminated") is True
+    real_process.terminate()
+    real_process.wait(timeout=5)
+    assert real_process.poll() is not None
 
 
 def test_server_output_is_drained_to_diagnostic_log_without_pipe_deadlock(tmp_path: Path) -> None:

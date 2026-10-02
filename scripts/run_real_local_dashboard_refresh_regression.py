@@ -110,7 +110,10 @@ def run_browser_flow(
     )
     if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(f"Real dashboard browser flow {completed.status}: {detail}")
+        error = RegressionError(f"Real dashboard browser flow {completed.status}: {detail}")
+        error.process_status = completed.status
+        error.process_cleanup = completed.cleanup
+        raise error
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -286,7 +289,7 @@ def main() -> None:
                 build_report(
                     script="run_real_local_dashboard_refresh_regression.py",
                     workflow="real-local-dashboard-refresh-regression",
-                    status="failed",
+                    status=getattr(error, "process_status", "failed"),
                     mode="real-local",
                     target=base_url,
                     summary="Real local dashboard refresh regression failed.",

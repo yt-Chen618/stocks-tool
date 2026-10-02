@@ -239,6 +239,10 @@ async function main() {
     for (const width of [1440, 760]) {
       await page.setViewportSize({ width, height: 1200 });
       await waitResponsiveSettled(page, width);
+      await page.evaluate(() => {
+        window.scrollTo(0, 0);
+        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
       const capturePath = screenshotPath.replace(/\.png$/, `-bull-put-${width}.png`);
       await page.screenshot({ path: capturePath, fullPage: true });
       bullPutScreenshots[width] = capturePath;

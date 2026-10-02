@@ -137,7 +137,10 @@ def run_browser_flow(
     )
     if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(f"Browser flow {completed.status}: {detail}")
+        error = RegressionError(f"Browser flow {completed.status}: {detail}")
+        error.process_status = completed.status
+        error.process_cleanup = completed.cleanup
+        raise error
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -536,7 +539,7 @@ def main() -> None:
             build_report(
                 script="run_mock_ui_order_regression.py",
                 workflow="mock-dashboard-order-regression",
-                status="failed",
+                status=getattr(error, "process_status", "failed"),
                 mode="mock",
                 target=base_url,
                 summary="Mock dashboard regression failed.",

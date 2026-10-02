@@ -1144,6 +1144,51 @@ def _attach_process_identity(process: subprocess.Popen[Any]) -> ProcessIdentity 
     return identity if identity.start_identity else None
 
 
+def _linux_process_table() -> dict[int, dict[str, Any]]:
+    if not sys.platform.startswith("linux"):
+        return {}
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    table: dict[int, dict[str, Any]] = {}
+    for stat_path in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            pid = int(stat_path.parent.name)
+            raw = stat_path.read_text(encoding="utf-8")
+            closing = raw.rfind(")")
+            if closing < 0:
+                continue
+            fields = raw[closing + 2 :].split()
+            if len(fields) <= 19:
+                continue
+            start_identity = f"linux:{boot_id}:{fields[19]}"
+            table[pid] = {
+                "pid": pid,
+                "ppid": int(fields[1]),
+                "state": fields[0],
+                "start_identity": start_identity,
+            }
+        except (OSError, ValueError, IndexError):
+            continue
+    return table
+
+
+def _linux_owned_descendants(root_pid: int) -> list[dict[str, Any]]:
+    table = _linux_process_table()
+    children_by_parent: dict[int, list[dict[str, Any]]] = {}
+    for record in table.values():
+        children_by_parent.setdefault(record["ppid"], []).append(record)
+    found: list[dict[str, Any]] = []
+    pending = list(children_by_parent.get(root_pid, []))
+    while pending:
+        record = pending.pop()
+        found.append(record)
+        pending.extend(children_by_parent.get(record["pid"], []))
+    return found
+
+
+def _identity_is_current(pid: int, expected: str) -> bool:
+    return process_start_identity(pid) == expected
+
+
 def terminate_owned_process_tree(
     process: subprocess.Popen[Any],
     *,
@@ -1153,18 +1198,22 @@ def terminate_owned_process_tree(
 
     expected = getattr(process, "_codex_start_identity", None)
     current = process_start_identity(process.pid)
-    if not expected or current != expected:
+    if not expected or (current != expected and process_start_identity(process.pid, include_exited=True) != expected):
         return {"attempted": False, "reason": "pid_start_identity_mismatch", "pid": process.pid}
 
     if os.name == "nt":
-        completed = subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            completed = subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(1.0, grace_seconds),
+            )
+        except subprocess.TimeoutExpired:
+            return {"attempted": True, "method": "taskkill-tree", "terminated": False, "pid": process.pid, "error": "taskkill timeout"}
         try:
             process.wait(timeout=grace_seconds)
         except subprocess.TimeoutExpired:
@@ -1183,21 +1232,54 @@ def terminate_owned_process_tree(
             "pid": process.pid,
         }
 
-    try:
-        process_group = os.getpgid(process.pid)
-        os.killpg(process_group, signal.SIGTERM)
-    except (OSError, ProcessLookupError) as error:
-        return {"attempted": False, "reason": f"killpg_failed:{type(error).__name__}", "pid": process.pid}
-    try:
-        process.wait(timeout=grace_seconds)
-        return {"attempted": True, "method": "killpg-term", "terminated": True, "pid": process.pid}
-    except subprocess.TimeoutExpired:
+    descendants = _linux_owned_descendants(process.pid)
+    targets = [
+        record
+        for record in descendants
+        if record["state"] not in {"Z", "X", "x"}
+    ]
+    # Descendants can deliberately start their own session, so kill verified
+    # PIDs individually instead of relying only on the root process group.
+    for record in reversed(targets):
+        if _identity_is_current(record["pid"], record["start_identity"]):
+            try:
+                os.kill(record["pid"], signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                return {"attempted": False, "reason": f"descendant_kill_failed:{error}", "pid": process.pid}
+    if _identity_is_current(process.pid, expected):
         try:
-            os.killpg(process_group, signal.SIGKILL)
-            process.wait(timeout=grace_seconds)
-            return {"attempted": True, "method": "killpg-kill", "terminated": True, "pid": process.pid}
-        except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as error:
-            return {"attempted": True, "method": "killpg-kill", "terminated": False, "pid": process.pid, "error": str(error)}
+            os.kill(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        live_targets = [
+            record
+            for record in targets + [{"pid": process.pid, "start_identity": expected}]
+            if _identity_is_current(record["pid"], record["start_identity"])
+        ]
+        if not live_targets:
+            return {"attempted": True, "method": "verified-pid-term", "terminated": True, "pid": process.pid, "descendants": len(targets)}
+        time.sleep(0.05)
+    live_targets = [
+        record
+        for record in targets + [{"pid": process.pid, "start_identity": expected}]
+        if _identity_is_current(record["pid"], record["start_identity"])
+    ]
+    for record in reversed(live_targets):
+        if _identity_is_current(record["pid"], record["start_identity"]):
+            try:
+                os.kill(record["pid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if not any(_identity_is_current(record["pid"], record["start_identity"]) for record in live_targets):
+            return {"attempted": True, "method": "verified-pid-kill", "terminated": True, "pid": process.pid, "descendants": len(targets)}
+        time.sleep(0.05)
+    return {"attempted": True, "method": "verified-pid-kill", "terminated": False, "pid": process.pid, "descendants": len(targets)}
 
 
 def run_bounded_process(
@@ -1274,9 +1356,20 @@ def run_bounded_process(
         )
     except (KeyboardInterrupt, SystemExit):
         cleanup = terminate_owned_process_tree(process)
-        stdout, stderr = process.communicate(timeout=10)
-        raise RuntimeError(
-            f"Browser helper interrupted; process tree cleanup={cleanup}.\n{stderr[-1000:]}"
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except (KeyboardInterrupt, SystemExit):
+            stdout, stderr = "", ""
+        return BoundedProcessResult(
+            command=command,
+            returncode=130,
+            stdout=stdout or "",
+            stderr=stderr or "",
+            status="interrupted",
+            interrupted=True,
+            cleanup=cleanup,
+            pid=process.pid,
+            start_identity=identity.start_identity,
         )
 
 
@@ -1314,16 +1407,19 @@ def start_utf8_process(
     return process
 
 
-def stop_process(process: subprocess.Popen[Any], *, timeout_seconds: float = 5.0) -> None:
+def stop_process(process: subprocess.Popen[Any], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
     if process.poll() is not None:
         handle = getattr(process, "_codex_output_handle", None)
         if handle is not None:
             handle.close()
-        return
-    terminate_owned_process_tree(process, grace_seconds=timeout_seconds)
+        return {"terminated": True, "already_exited": True, "pid": process.pid}
+    cleanup = terminate_owned_process_tree(process, grace_seconds=timeout_seconds)
     handle = getattr(process, "_codex_output_handle", None)
     if handle is not None and process.poll() is not None:
         handle.close()
+    if not cleanup.get("terminated"):
+        raise RuntimeError(f"Owned process tree cleanup failed: {cleanup}")
+    return cleanup
 
 
 def wait_for_http(
