@@ -476,6 +476,8 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         error: str,
         *,
         zero_match: bool = False,
+        reconciliation_coverage_start_at: datetime | None = None,
+        reconciliation_coverage_end_at: datetime | None = None,
     ) -> BrokerOrderIntent:
         intent, action = self._load_pair_for_update(intent_id)
         if intent.state in {
@@ -491,7 +493,37 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
                 action.state = TradingIntentState.UNKNOWN.value
                 action.last_error = error
         now = datetime.now(timezone.utc)
-        if zero_match:
+        coverage_complete = self._coverage_covers_intent(
+            intent,
+            reconciliation_coverage_start_at,
+            reconciliation_coverage_end_at,
+        )
+        if not zero_match or not coverage_complete:
+            # A zero-match chain is consecutive evidence.  Any positive,
+            # ambiguous, or incomplete check invalidates prior no-order proof;
+            # the operator must collect three new complete checks.
+            intent.reconciliation_attempts = 0
+            intent.first_reconciled_at = None
+            intent.last_reconciled_at = None
+            intent.reconciliation_coverage_start_at = None
+            intent.reconciliation_coverage_end_at = None
+        else:
+            # Counts written before coverage evidence was persisted cannot be
+            # used for a manual no-order resolution.  Start a fresh chain on
+            # the first complete check after the migration (or a legacy row).
+            if (
+                intent.reconciliation_coverage_start_at is None
+                or intent.reconciliation_coverage_end_at is None
+            ):
+                intent.reconciliation_attempts = 0
+                intent.first_reconciled_at = None
+                intent.last_reconciled_at = None
+            intent.reconciliation_coverage_start_at = self._as_utc(
+                reconciliation_coverage_start_at
+            )
+            intent.reconciliation_coverage_end_at = self._as_utc(
+                reconciliation_coverage_end_at
+            )
             intent.reconciliation_attempts += 1
             intent.first_reconciled_at = intent.first_reconciled_at or now
             intent.last_reconciled_at = now
@@ -528,6 +560,14 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
             raise ValueError("At least three successful zero-match reconciliations are required.")
         if intent.first_reconciled_at is None or intent.last_reconciled_at is None:
             raise ValueError("Zero-match reconciliation timestamps are incomplete.")
+        if not self._coverage_covers_intent(
+            intent,
+            intent.reconciliation_coverage_start_at,
+            intent.reconciliation_coverage_end_at,
+        ):
+            raise ValueError(
+                "Complete broker-history coverage evidence is required for no-order resolution."
+            )
         if (intent.last_reconciled_at - intent.first_reconciled_at).total_seconds() < 60:
             raise ValueError("Zero-match reconciliations must span at least 60 seconds.")
         if (
@@ -1068,9 +1108,31 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
             reconciliation_attempts=record.reconciliation_attempts,
             first_reconciled_at=record.first_reconciled_at,
             last_reconciled_at=record.last_reconciled_at,
+            reconciliation_coverage_start_at=record.reconciliation_coverage_start_at,
+            reconciliation_coverage_end_at=record.reconciliation_coverage_end_at,
             created_at=record.created_at,
             updated_at=record.updated_at,
         )
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @classmethod
+    def _coverage_covers_intent(
+        cls,
+        intent: OrderIntentRecord,
+        coverage_start_at: datetime | None,
+        coverage_end_at: datetime | None,
+    ) -> bool:
+        if coverage_start_at is None or coverage_end_at is None:
+            return False
+        start_at = cls._as_utc(coverage_start_at)
+        end_at = cls._as_utc(coverage_end_at)
+        created_at = cls._as_utc(intent.created_at)
+        return start_at <= created_at <= end_at
 
     @staticmethod
     def _to_action_domain(record: TradeActionIntentRecord) -> TradeActionIntent:

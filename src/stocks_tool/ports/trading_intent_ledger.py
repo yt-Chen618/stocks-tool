@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, TradingIntentState, TradingOperation
@@ -129,6 +130,8 @@ class TradingIntentLedger(Protocol):
         error: str,
         *,
         zero_match: bool = False,
+        reconciliation_coverage_start_at: datetime | None = None,
+        reconciliation_coverage_end_at: datetime | None = None,
     ) -> BrokerOrderIntent:
         ...
 

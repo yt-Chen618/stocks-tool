@@ -40,11 +40,14 @@ from stocks_tool.ports.broker_gateway import (
 
 
 def build_adapter(**overrides) -> LongbridgeBrokerAdapter:
+    settings_kwargs = {
+        "longbridge_request_timeout_seconds": 1,
+        "longbridge_circuit_breaker_seconds": 30,
+        "longbridge_executor_max_workers": 1,
+    }
+    settings_kwargs.update(overrides)
     settings = Settings(
-        longbridge_request_timeout_seconds=1,
-        longbridge_circuit_breaker_seconds=30,
-        longbridge_executor_max_workers=1,
-        **overrides,
+        **settings_kwargs,
     )
     return LongbridgeBrokerAdapter(settings=settings)
 
@@ -98,6 +101,83 @@ def test_run_sdk_action_times_out_and_opens_circuit() -> None:
         adapter._run_sdk_action("load quote for 'QQQ.US'", lambda: "never-called")
 
     adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_market_data_circuit_is_isolated_by_execution_mode() -> None:
+    adapter = build_adapter()
+    adapter._market_context = Mock(return_value=(object(), {}))
+
+    def fail_connectivity(_context, _sdk):
+        raise RuntimeError("client error (Connect)")
+
+    with pytest.raises(LongbridgeIntegrationError, match="failed to load paper quote"):
+        adapter._run_market_data_action(
+            "load paper quote",
+            ExecutionMode.PAPER,
+            fail_connectivity,
+            operation="quote",
+        )
+
+    assert (
+        adapter._run_market_data_action(
+            "load live quote",
+            ExecutionMode.LIVE,
+            lambda _context, _sdk: "live-ok",
+            operation="quote",
+        )
+        == "live-ok"
+    )
+
+    with pytest.raises(LongbridgeIntegrationError, match="Skipping attempt"):
+        adapter._run_market_data_action(
+            "load paper quote again",
+            ExecutionMode.PAPER,
+            lambda _context, _sdk: "paper-never-called",
+            operation="quote",
+        )
+
+    adapter.close()
+
+
+def test_timed_out_sdk_mutation_is_unknown_and_quarantines_running_future() -> None:
+    adapter = build_adapter(
+        longbridge_executor_max_workers=2,
+        longbridge_circuit_breaker_seconds=1,
+    )
+    object.__setattr__(adapter.settings, "longbridge_request_timeout_seconds", 0.05)
+    started = threading.Event()
+    release = threading.Event()
+    second_started = threading.Event()
+    caller = ThreadPoolExecutor(max_workers=1)
+
+    def slow_mutation():
+        started.set()
+        release.wait(timeout=2)
+        return "late-broker-response"
+
+    try:
+        first = caller.submit(
+            adapter._run_sdk_action,
+            "submit order for 'QQQ.US'",
+            slow_mutation,
+            mutation=True,
+        )
+        assert started.wait(timeout=1)
+        with pytest.raises(LongbridgeMutationOutcomeUnknownError, match="outcome is unknown"):
+            first.result(timeout=2)
+
+        adapter._circuit_open_until_by_key.clear()
+        with pytest.raises(LongbridgeIntegrationError, match="timed-out SDK action is still running"):
+            adapter._run_sdk_action(
+                "submit order for 'QQQ.US' again",
+                lambda: second_started.set(),
+                mutation=True,
+            )
+        assert not second_started.is_set()
+    finally:
+        release.set()
+        caller.shutdown(wait=True, cancel_futures=True)
+        adapter.close()
 
 
 def test_run_sdk_action_opens_circuit_on_connect_failure() -> None:
@@ -495,6 +575,28 @@ def test_history_order_listing_exposes_recovery_remark() -> None:
     assert orders[0].remark == "st:0123456789abcdef operator note"
     assert orders[0].raw_payload["remark"] == "st:0123456789abcdef operator note"
     adapter._executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.parametrize("returned_count", [1000, 1001])
+def test_history_order_listing_rejects_saturated_page_as_incomplete(
+    returned_count: int,
+) -> None:
+    adapter = build_adapter()
+
+    class TradeContext:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def history_orders(self, *, symbol=None, start_at=None, end_at=None):
+            return [object()] * returned_count
+
+    adapter._load_sdk = Mock(return_value={"TradeContext": TradeContext})
+    adapter._build_config = Mock(return_value=object())
+
+    with pytest.raises(LongbridgeIntegrationError, match="history order coverage is incomplete"):
+        adapter.list_history_orders(mode=ExecutionMode.PAPER)
+
+    adapter.close()
 
 
 def test_submit_detail_failure_after_order_id_is_explicitly_unknown() -> None:

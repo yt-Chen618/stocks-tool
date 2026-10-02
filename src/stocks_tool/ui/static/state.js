@@ -49,8 +49,6 @@
       brokerStatus: null,
       latestSnapshot: null,
       selectedOrderId: "",
-      quote: null,
-      quoteStatus: createOverlayStatus("idle", "Load a quote manually to keep the dashboard fast."),
       preOpenAssessment: null,
       preOpenStatus: createOverlayStatus(
         "idle",

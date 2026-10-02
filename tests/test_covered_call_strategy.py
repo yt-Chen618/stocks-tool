@@ -194,6 +194,16 @@ class FakeExperiments:
             runs = [item for item in runs if item.strategy_id == strategy_id]
         return runs[:limit]
 
+    def get_latest_run_for_proposal(self, *, proposal_id, strategy_id, run_types):
+        for run in self.runs:
+            if (
+                run.proposal_id == proposal_id
+                and run.strategy_id == strategy_id
+                and run.run_type in run_types
+            ):
+                return run
+        return None
+
 
 class FakeMarketEvents:
     def __init__(self, events: list[MarketEvent]) -> None:
@@ -317,6 +327,62 @@ def build_candidate_payload(
         "volume": 25,
         "quote_timestamp": "2026-05-29T15:00:00Z",
     }
+
+
+def build_roll_proposal(*, proposal_id: str = "roll-proposal") -> StrategyProposal:
+    return StrategyProposal(
+        id=proposal_id,
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "source_proposal_id": "source-proposal",
+            "roll_from": build_candidate_payload(),
+            "roll_to": build_candidate_payload(
+                call_symbol="UNH260710C110000.US",
+                expiration_date="2026-07-10",
+                call_strike="110",
+                call_bid="1.10",
+                call_ask="1.20",
+                call_mid="1.15",
+                premium_income="110.00",
+            ),
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def build_roll_order(
+    *,
+    order_id: str,
+    symbol: str,
+    side: OrderSide,
+    quantity: int = 1,
+    status: OrderStatus = OrderStatus.FILLED,
+) -> Order:
+    return Order(
+        id=order_id,
+        broker=BrokerName.LONGBRIDGE,
+        external_account_id="LBPT10087357",
+        external_order_id=f"external-{order_id}",
+        symbol=symbol,
+        asset_type=AssetType.OPTION,
+        side=side,
+        quantity=quantity,
+        order_type=OrderType.LIMIT,
+        time_in_force=TimeInForce.DAY,
+        mode=ExecutionMode.PAPER,
+        status=status,
+        limit_price=Decimal("1.10"),
+        created_at=NOW,
+        updated_at=NOW,
+    )
 
 
 def build_strategy_run(
@@ -1815,7 +1881,17 @@ def test_covered_call_roll_continue_submits_sell_after_buyback_refresh_fills() -
         created_at=NOW,
         updated_at=NOW,
     )
-    experiments = FakeExperiments(proposal)
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id="proposal-2",
+                run_type="roll_execution",
+                order_id="buyback-order-1",
+                metrics_payload={"buyback_order_id": "buyback-order-1"},
+            )
+        ],
+    )
     order_service = Mock()
     order_service.refresh_order.return_value = Order(
         id="buyback-order-1",
@@ -1904,7 +1980,20 @@ def test_covered_call_roll_continue_refreshes_existing_sell_order_without_duplic
         created_at=NOW,
         updated_at=NOW,
     )
-    experiments = FakeExperiments(proposal)
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id="proposal-2",
+                run_type="roll_execution",
+                order_id="roll-open-order-1",
+                metrics_payload={
+                    "buyback_order_id": "buyback-order-1",
+                    "sell_order_id": "roll-open-order-1",
+                },
+            )
+        ],
+    )
     order_service = Mock()
     order_service.refresh_order.side_effect = [
         Order(
@@ -1958,6 +2047,223 @@ def test_covered_call_roll_continue_refreshes_existing_sell_order_without_duplic
     assert result.sell_order.id == "roll-open-order-1"
     assert result.reason is not None
     order_service.refresh_order.assert_has_calls([call("buyback-order-1"), call("roll-open-order-1")])
+    order_service.submit_order.assert_not_called()
+    assert experiments.updated_status is None
+
+
+def test_covered_call_roll_continue_rejects_orders_not_linked_to_proposal() -> None:
+    proposal = StrategyProposal(
+        id="proposal-current-roll",
+        strategy_id="covered_call_v1",
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        symbol="UNH.US",
+        title="Roll covered call on UNH.US",
+        proposed_action="roll_covered_call",
+        rationale="Approved roll proposal.",
+        status=StrategyProposalStatus.APPROVED,
+        candidate_payload={
+            "source_proposal_id": "proposal-source",
+            "roll_from": build_candidate_payload(),
+            "roll_to": build_candidate_payload(
+                call_symbol="UNH260710C110000.US",
+                expiration_date="2026-07-10",
+                call_strike="110",
+                call_bid="1.10",
+                call_ask="1.20",
+                call_mid="1.15",
+                premium_income="110.00",
+            ),
+        },
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id=proposal.id,
+                run_type="roll_execution",
+                order_id="proposal-buyback",
+                metrics_payload={
+                    "buyback_order_id": "proposal-buyback",
+                    "sell_order_id": "proposal-sell",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    order_service.refresh_order.side_effect = [
+        Order(
+            id="foreign-buyback",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-foreign-buyback",
+            symbol="UNH260626C105000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.BUY,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("0.55"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+        Order(
+            id="foreign-sell",
+            broker=BrokerName.LONGBRIDGE,
+            external_account_id="LBPT10087357",
+            external_order_id="external-foreign-sell",
+            symbol="UNH260710C110000.US",
+            asset_type=AssetType.OPTION,
+            side=OrderSide.SELL,
+            quantity=1,
+            order_type=OrderType.LIMIT,
+            time_in_force=TimeInForce.DAY,
+            mode=ExecutionMode.PAPER,
+            status=OrderStatus.FILLED,
+            limit_price=Decimal("1.10"),
+            created_at=NOW,
+            updated_at=NOW,
+        ),
+    ]
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(ValueError, match="not linked to covered call roll proposal"):
+        service.continue_roll_proposal(
+            proposal.id,
+            ContinueCoveredCallRollRequest(
+                buyback_order_id="foreign-buyback",
+                sell_order_id="foreign-sell",
+            ),
+        )
+
+    order_service.refresh_order.assert_not_called()
+    assert experiments.updated_status is None
+
+
+def test_covered_call_roll_continue_requires_persisted_run() -> None:
+    proposal = build_roll_proposal(proposal_id="roll-proposal-missing-run")
+    order_service = Mock()
+    service = build_service(
+        experiments=FakeExperiments(proposal),
+        order_service=order_service,
+    )
+
+    with pytest.raises(ValueError, match="no persisted lifecycle run"):
+        service.continue_roll_proposal(
+            proposal.id,
+            ContinueCoveredCallRollRequest(buyback_order_id="buyback-order-1"),
+        )
+
+    order_service.refresh_order.assert_not_called()
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_roll_continue_rejects_foreign_sell_only() -> None:
+    proposal = build_roll_proposal(proposal_id="roll-proposal-foreign-sell")
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id=proposal.id,
+                run_type="roll_execution",
+                order_id="linked-sell",
+                metrics_payload={
+                    "buyback_order_id": "linked-buyback",
+                    "sell_order_id": "linked-sell",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(ValueError, match="Sell order 'foreign-sell'.*not linked"):
+        service.continue_roll_proposal(
+            proposal.id,
+            ContinueCoveredCallRollRequest(
+                buyback_order_id="linked-buyback",
+                sell_order_id="foreign-sell",
+            ),
+        )
+
+    order_service.refresh_order.assert_not_called()
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_roll_continue_rejects_omitted_linked_sell() -> None:
+    proposal = build_roll_proposal(proposal_id="roll-proposal-omitted-sell")
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id=proposal.id,
+                run_type="roll_execution",
+                order_id="linked-sell",
+                metrics_payload={
+                    "buyback_order_id": "linked-buyback",
+                    "sell_order_id": "linked-sell",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(ValueError, match="already has linked sell order"):
+        service.continue_roll_proposal(
+            proposal.id,
+            ContinueCoveredCallRollRequest(buyback_order_id="linked-buyback"),
+        )
+
+    order_service.refresh_order.assert_not_called()
+    order_service.submit_order.assert_not_called()
+
+
+def test_covered_call_roll_continue_rejects_order_quantity_mismatch() -> None:
+    proposal = build_roll_proposal(proposal_id="roll-proposal-quantity")
+    experiments = FakeExperiments(
+        proposal,
+        runs=[
+            build_strategy_run(
+                proposal_id=proposal.id,
+                run_type="roll_execution",
+                order_id="linked-sell",
+                metrics_payload={
+                    "buyback_order_id": "linked-buyback",
+                    "sell_order_id": "linked-sell",
+                },
+            )
+        ],
+    )
+    order_service = Mock()
+    order_service.refresh_order.side_effect = [
+        build_roll_order(
+            order_id="linked-buyback",
+            symbol="UNH260626C105000.US",
+            side=OrderSide.BUY,
+        ),
+        build_roll_order(
+            order_id="linked-sell",
+            symbol="UNH260710C110000.US",
+            side=OrderSide.SELL,
+            quantity=2,
+        ),
+    ]
+    service = build_service(experiments=experiments, order_service=order_service)
+
+    with pytest.raises(ValueError, match="quantity 2 does not match expected contract quantity 1"):
+        service.continue_roll_proposal(
+            proposal.id,
+            ContinueCoveredCallRollRequest(
+                buyback_order_id="linked-buyback",
+                sell_order_id="linked-sell",
+            ),
+        )
+
     order_service.submit_order.assert_not_called()
     assert experiments.updated_status is None
 

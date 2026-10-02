@@ -6,8 +6,6 @@ const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
 const COLLAPSED_MODULES_STORAGE_KEY = "stocks-tool-collapsed-modules";
-const VIEW_MODE_STORAGE_KEY = "stocks-tool-view-mode";
-const DEFAULT_VIEW_MODE = "focus";
 const IDEMPOTENCY_STORAGE_PREFIX = "stocks-tool-idempotency:";
 const MOBILE_TRADING_QUERY = "(max-width: 780px)";
 const {
@@ -54,7 +52,8 @@ let languageFrame = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
-  initializeViewMode();
+  window.StocksToolExecution?.init();
+  window.StocksToolWorkspace?.init();
   enhanceCollapsibleModules();
   wireEvents();
   bindTradingViewportGuard();
@@ -63,12 +62,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   applyLanguage();
   syncTicketOrderFields();
   renderSelectedOrder();
+  window.StocksToolResearch?.init();
+  await window.StocksToolWatchlists?.init();
   await loadDashboard();
 });
 
 function bindElements() {
   els.languageOptions = Array.from(document.querySelectorAll("[data-lang-option]"));
-  els.viewModeOptions = Array.from(document.querySelectorAll("[data-view-mode-option]"));
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
   els.desktopTradingNotice = document.getElementById("desktop-trading-notice");
@@ -115,10 +115,6 @@ function bindElements() {
   els.ordersBody = document.getElementById("orders-body");
   els.positionsBody = document.getElementById("positions-body");
   els.brokerStatus = document.getElementById("broker-status");
-  els.quoteForm = document.getElementById("quote-form");
-  els.quoteSymbol = document.getElementById("quote-symbol");
-  els.loadQuote = document.getElementById("load-quote");
-  els.quoteCard = document.getElementById("quote-card");
   els.loadPreOpenBoard = document.getElementById("load-preopen-board");
   els.loadPreOpenOverlays = document.getElementById("load-preopen-overlays");
   els.savePreOpenBoard = document.getElementById("save-preopen-board");
@@ -171,12 +167,6 @@ function bindElements() {
 }
 
 function wireEvents() {
-  for (const button of els.viewModeOptions) {
-    button.addEventListener("click", () => {
-      setViewMode(button.dataset.viewModeOption || DEFAULT_VIEW_MODE);
-    });
-  }
-
   for (const button of els.languageOptions) {
     button.addEventListener("click", () => {
       setLanguage(button.dataset.langOption || DEFAULT_LANGUAGE);
@@ -185,6 +175,8 @@ function wireEvents() {
 
   els.accountSelect.addEventListener("change", async (event) => {
     state.selectedAccountId = event.target.value;
+    window.StocksToolWorkspace?.updateAccountContext(state.selectedAccountId || "--");
+    void refreshResearchContext();
     resetAdvisorState();
     setStatus(`Loading account ${state.selectedAccountId}...`, "warning");
     const loadResult = await loadAccountData();
@@ -224,30 +216,6 @@ function wireEvents() {
     }
     await syncOrders();
   });
-
-  if (els.quoteForm && els.loadQuote && els.quoteSymbol) {
-    els.quoteForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-    });
-
-    els.loadQuote.addEventListener("click", async (event) => {
-      if (!event.isTrusted) {
-        return;
-      }
-      await loadQuote();
-    });
-
-    els.quoteSymbol.addEventListener("keydown", async (event) => {
-      if (event.key !== "Enter") {
-        return;
-      }
-      if (!event.isTrusted) {
-        return;
-      }
-      event.preventDefault();
-      await loadQuote();
-    });
-  }
 
   els.loadPreOpenBoard.addEventListener("click", async () => {
     await loadPreOpenAssessment({
@@ -439,36 +407,10 @@ function wireEvents() {
   });
 }
 
-function initializeViewMode() {
-  let stored = DEFAULT_VIEW_MODE;
-  try {
-    stored = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY) || DEFAULT_VIEW_MODE;
-  } catch {
-    stored = DEFAULT_VIEW_MODE;
-  }
-  setViewMode(stored, { persist: false });
-}
-
-function setViewMode(viewMode, { persist = true } = {}) {
-  const normalized = viewMode === "all" ? "all" : DEFAULT_VIEW_MODE;
-  document.body.dataset.viewMode = normalized;
-  for (const button of els.viewModeOptions || []) {
-    const active = button.dataset.viewModeOption === normalized;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  }
-  if (!persist) {
-    return;
-  }
-  try {
-    window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, normalized);
-  } catch {
-    // View mode still applies for this page load when storage is unavailable.
-  }
-}
-
 function enhanceCollapsibleModules() {
-  const modules = Array.from(document.querySelectorAll(".band, .panel"));
+  const modules = Array.from(document.querySelectorAll(".band, .panel")).filter(
+    (module) => !module.closest("#execution-drawer") && !module.matches("[data-workspace-panel]")
+  );
   const collapsedModules = readCollapsedModules();
 
   modules.forEach((module, index) => {
@@ -596,7 +538,6 @@ function renderAllForLanguage() {
   renderOrders();
   renderPositions();
   renderSelectedOrder();
-  renderQuote();
   syncTicketOrderFields();
   const selectedOrder = getSelectedOrder();
   if (selectedOrder && !els.replaceOrderForm.classList.contains("hidden")) {
@@ -709,9 +650,6 @@ function translateText(text, dictionary) {
   const dynamicRules = [
     [/^Refreshing covered-call lifecycle for (.+)\.\.\.$/, "正在刷新 $1 的备兑看涨生命周期..."],
     [/^Covered-call lifecycle refreshed: (.+)\.$/, "备兑看涨生命周期已刷新：$1。"],
-    [/^Refreshing ([A-Z0-9.]+) quote\.\.\.$/, "正在刷新 $1 行情..."],
-    [/^Quote refreshed successfully\.$/, "行情刷新成功。"],
-    [/^Quote refreshed (.+)\.$/, "行情已于 $1 刷新。"],
     [/^Live macro board refreshed (.+)\.$/, "实时宏观板已于 $1 刷新。"],
     [/^Showing the latest stored macro board captured (.+)\.$/, "正在显示 $1 捕获的最新存档宏观板。"],
     [/^Latest stored run for (.+)\.$/, "最新存储运行对应 $1。"],
@@ -815,6 +753,7 @@ function applyTradingSafetyState() {
   const mobileBlocked = isMobileTradingViewport();
   const coreBlocked = !state.coreDataHealthy;
   const intentBlocked = (state.unresolvedTradingIntents || []).length > 0;
+  window.StocksToolExecution?.setMobileReadonly(mobileBlocked);
   document.querySelectorAll("button[data-broker-mutation='true']").forEach((button) => {
     const pending = state.pendingActionKeys.has(button.dataset.actionKey || "");
     const businessDisabled = button.dataset.businessDisabled === "true";
@@ -1062,6 +1001,8 @@ async function loadDashboard() {
   setStatus("Loading dashboard...", "warning");
   try {
     await refreshAccounts();
+    window.StocksToolWorkspace?.updateAccountContext(state.selectedAccountId || "--");
+    void refreshResearchContext();
     const loadResult = await loadAccountData();
     if (loadResult.discarded) {
       return;
@@ -1085,9 +1026,30 @@ async function loadDashboard() {
     } else {
       setStatus("Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.", "success");
     }
+    window.StocksToolWorkspace?.updateDataTime(state.latestSnapshot?.captured_at || new Date());
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load dashboard.", "error");
+  }
+}
+
+async function refreshResearchContext() {
+  if (typeof window.StocksToolResearch?.refresh !== "function") {
+    return false;
+  }
+  try {
+    const refreshed = await window.StocksToolResearch.refresh({
+      externalAccountId: state.selectedAccountId || "",
+      watchlistId: window.StocksToolWatchlists?.getSelectedId?.() || "",
+    });
+    const generatedAt = window.StocksToolResearch.getState?.().generatedAt;
+    if (refreshed && generatedAt) {
+      window.StocksToolWorkspace?.updateDataTime(generatedAt);
+    }
+    return refreshed;
+  } catch (error) {
+    console.error(error);
+    return false;
   }
 }
 
@@ -1308,58 +1270,12 @@ async function loadRecoverCloseEligibility(spreads) {
 }
 
 function prepareMarketOverlayPanels() {
-  if (els.quoteCard && !state.quote) {
-    state.quoteStatus = buildOverlayStatus("idle", "Load a quote manually to keep the dashboard fast.");
-    renderQuote();
-  }
   if (!state.preOpenAssessment) {
     state.preOpenStatus = buildOverlayStatus(
       "idle",
       "Macro board is available on demand so option strategy requests stay first."
     );
     renderPreOpenAssessment();
-  }
-}
-
-async function loadQuote(options = {}) {
-  if (!els.quoteSymbol || !els.quoteCard) {
-    return;
-  }
-  const { timeoutMs = BROKER_REQUEST_TIMEOUT_MS } = options;
-  const symbol = els.quoteSymbol.value.trim().toUpperCase();
-  if (!symbol) {
-    state.quote = null;
-    state.quoteStatus = buildOverlayStatus("idle", "Enter a symbol.");
-    renderQuote();
-    return;
-  }
-
-  const hasMatchingQuote = state.quote && state.quote.symbol === symbol;
-  if (!hasMatchingQuote) {
-    state.quote = null;
-  }
-  state.quoteStatus = buildOverlayStatus("loading", `Refreshing ${symbol} quote...`);
-  renderQuote();
-
-  try {
-    state.quote = await fetchJson(
-      `/brokers/longbridge/quote?symbol=${encodeURIComponent(symbol)}&mode=paper`,
-      { timeoutMs }
-    );
-    state.quoteStatus = buildOverlayStatus("live", overlayLiveDetail("Quote", state.quote.timestamp));
-    renderQuote();
-  } catch (error) {
-    console.error(error);
-    const hasStaleQuote = state.quote && state.quote.symbol === symbol;
-    if (!hasStaleQuote) {
-      state.quote = null;
-    }
-    state.quoteStatus = classifyOverlayFailure(error, {
-      label: "quote",
-      stale: hasStaleQuote,
-      staleAt: state.quote?.timestamp,
-    });
-    renderQuote();
   }
 }
 
@@ -1911,7 +1827,7 @@ async function reconcileCoveredCallLifecycle(button = null) {
       button.removeAttribute("aria-busy");
       button.disabled = false;
     }
-    applyBrokerMutationSafetyLocks();
+    applyTradingSafetyState();
   }
 }
 
@@ -2739,7 +2655,7 @@ function renderReconciliationStatus() {
   els.reconciliationStrip.innerHTML = cards
     .map(
       (card) => `
-        <article class="reconciliation-card" data-view-priority="${escapeHtml(card.priority || "primary")}">
+        <article class="reconciliation-card">
           <div class="reconciliation-head">
             <span class="metric-label">${escapeHtml(card.label)}</span>
             <span class="pill ${escapeHtml(card.tone)}">${escapeHtml(card.badge)}</span>
@@ -4320,67 +4236,6 @@ function renderPositions() {
     .join("");
 }
 
-function renderQuote() {
-  if (!els.quoteCard || !els.quoteSymbol) {
-    return;
-  }
-  const quote = state.quote;
-  const overlay = state.quoteStatus;
-  const symbol = quote?.symbol || els.quoteSymbol.value.trim().toUpperCase();
-  if (!quote) {
-    if (overlay.kind === "idle") {
-      els.quoteCard.className = "quote-card empty";
-      els.quoteCard.textContent = overlay.detail || "No quote loaded.";
-      return;
-    }
-
-    els.quoteCard.className = "quote-card";
-    els.quoteCard.innerHTML = `
-      <div class="overlay-status-row">
-        <div class="overlay-status-copy">
-          <span class="section-kicker">${escapeHtml(symbol || "Quick Quote")}</span>
-          <strong>${escapeHtml(overlayStatusLabel(overlay.kind))}</strong>
-        </div>
-        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-      </div>
-      <p class="overlay-detail">${escapeHtml(overlay.detail || "Quote refresh is waiting for the next response.")}</p>
-      ${renderOverlayReason(overlay)}
-    `;
-    return;
-  }
-
-  const lastDone = Number(quote.last_done);
-  const prevClose = Number(quote.prev_close);
-  const diff = lastDone - prevClose;
-  const pct = prevClose === 0 ? 0 : (diff / prevClose) * 100;
-  const changeClass = diff >= 0 ? "positive" : "negative";
-  const changePrefix = diff >= 0 ? "+" : "";
-
-  els.quoteCard.className = "quote-card";
-  els.quoteCard.innerHTML = `
-    <div class="overlay-status-row">
-      <div class="overlay-status-copy">
-        <span class="section-kicker">${escapeHtml(quote.symbol)}</span>
-        <div class="quote-price">
-          <strong>${formatNumber(quote.last_done)}</strong>
-          <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} / ${changePrefix}${pct.toFixed(2)}%</span>
-        </div>
-      </div>
-      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-    </div>
-    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Quote", quote.timestamp))}</p>
-    ${renderOverlayReason(overlay)}
-    <div class="quote-meta">
-      <div><span>Open</span><strong>${formatNumber(quote.open)}</strong></div>
-      <div><span>Prev Close</span><strong>${formatNumber(quote.prev_close)}</strong></div>
-      <div><span>High</span><strong>${formatNumber(quote.high)}</strong></div>
-      <div><span>Low</span><strong>${formatNumber(quote.low)}</strong></div>
-      <div><span>Volume</span><strong>${Number(quote.volume).toLocaleString()}</strong></div>
-      <div><span>Timestamp</span><strong>${escapeHtml(formatDateTime(quote.timestamp))}</strong></div>
-    </div>
-  `;
-}
-
 function renderPreOpenAssessment() {
   const assessment = state.preOpenAssessment;
   const overlay = state.preOpenStatus;
@@ -5014,7 +4869,11 @@ function setSelectedOrder(orderId, shouldScroll = false) {
   renderSelectedOrder();
 
   if (shouldScroll) {
-    els.selectedOrderCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    window.StocksToolWorkspace?.openExecutionDrawer({ tab: "detail" });
+    window.requestAnimationFrame(() => {
+      els.selectedOrderCard.scrollIntoView({ behavior: "auto", block: "nearest" });
+      els.selectedOrderCard.focus({ preventScroll: true });
+    });
   }
 }
 
@@ -5439,10 +5298,15 @@ function isReplaceableOrder(order) {
 }
 
 function matchingQuoteTime(symbol) {
-  if (!state.quote || String(state.quote.symbol || "").toUpperCase() !== String(symbol || "").toUpperCase()) {
+  const researchState = window.StocksToolResearch?.getState?.();
+  const researchRow = researchState?.rows?.find(
+    (row) => String(row?.symbol || "").toUpperCase() === String(symbol || "").toUpperCase()
+  );
+  const timestamp = researchRow?.quote?.timestamp || researchRow?.quote?.updated_at;
+  if (!timestamp) {
     return "Not loaded";
   }
-  return formatDateTime(state.quote.timestamp);
+  return `${formatDateTime(timestamp)} (research context only)`;
 }
 
 function formatOrderPrice(order) {

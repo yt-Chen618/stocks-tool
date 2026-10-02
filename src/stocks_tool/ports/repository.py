@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
@@ -40,12 +41,20 @@ from stocks_tool.domain.models import (
     StrategyRun,
     StrategySignal,
     TradePlan,
+    UpdateWatchlistItemRequest,
+    UpdateWatchlistRequest,
     Watchlist,
 )
 
 
 class ConcurrentSpreadUpdateError(RuntimeError):
     pass
+
+
+class WatchlistItemConflictError(ValueError):
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        super().__init__(f"Watchlist already contains symbol {symbol}.")
 
 
 class TradePlanRepository(ABC):
@@ -72,7 +81,32 @@ class WatchlistRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_watchlist(self, watchlist_id: str) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_item(self, watchlist_id: str, request: AddWatchlistItemRequest) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_watchlist(
+        self,
+        watchlist_id: str,
+        request: UpdateWatchlistRequest,
+    ) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_item(
+        self,
+        watchlist_id: str,
+        item_id: str,
+        request: UpdateWatchlistItemRequest,
+    ) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_item(self, watchlist_id: str, item_id: str) -> bool:
         raise NotImplementedError
 
 
@@ -86,10 +120,11 @@ class MarketEventRepository(ABC):
         self,
         *,
         symbol: str | None = None,
+        symbols: list[str] | None = None,
         event_type: MarketEventType | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[MarketEvent]:
         raise NotImplementedError
 
@@ -180,6 +215,17 @@ class OrderRepository(ABC):
         external_account_id: str | None = None,
         status: OrderStatus | None = None,
     ) -> list[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_working_orders(
+        self,
+        external_account_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+        statuses: Collection[OrderStatus],
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -442,6 +488,16 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_latest_run_for_proposal(
+        self,
+        *,
+        proposal_id: str,
+        strategy_id: str,
+        run_types: set[str],
+    ) -> StrategyRun | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         raise NotImplementedError
 
@@ -471,6 +527,21 @@ class StrategyExperimentRepository(ABC):
 
     @abstractmethod
     def create_advisor_run(self, request: CreateStrategyAdvisorRunRequest) -> StrategyAdvisorRun:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_advisor_intake(
+        self,
+        *,
+        external_account_id: str,
+        source: str,
+        mode: ExecutionMode,
+        advisor_run_id: str | None,
+        proposal_requests: list[CreateStrategyProposalRequest],
+        review_requests: list[CreateStrategyReviewRequest],
+        response_payload: dict,
+        recorded_at: datetime,
+    ) -> tuple[list[StrategyProposal], list[StrategyReview], StrategyAdvisorRun | None]:
         raise NotImplementedError
 
     @abstractmethod

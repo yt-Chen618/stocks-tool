@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from stocks_tool.domain.enums import (
     AssetType,
@@ -497,6 +497,8 @@ class BrokerOrderIntent(BaseModel):
     reconciliation_attempts: int = 0
     first_reconciled_at: datetime | None = None
     last_reconciled_at: datetime | None = None
+    reconciliation_coverage_start_at: datetime | None = None
+    reconciliation_coverage_end_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -1030,15 +1032,32 @@ class Watchlist(BaseModel):
 
 
 class CreateWatchlistRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=120)
     description: str | None = None
     is_default: bool = False
 
 
+class UpdateWatchlistRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    is_default: bool | None = None
+
+
 class AddWatchlistItemRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=32)
     asset_type: AssetType
     notes: str | None = None
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
+
+class UpdateWatchlistItemRequest(BaseModel):
+    notes: str | None
 
 
 class BrokerAccount(BaseModel):
@@ -1112,6 +1131,72 @@ class HistoricalPriceBar(BaseModel):
     volume: int
     turnover: Decimal
     raw_payload: dict | None = None
+
+
+class ResearchUniverseRow(BaseModel):
+    symbol: str
+    asset_type: AssetType | None = None
+    sources: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    position_quantity: Decimal | None = None
+    position_market_value: Decimal | None = None
+    quote: SecurityQuoteSnapshot | None = None
+    next_event: MarketEvent | None = None
+    strategy_states: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchUniverseResponse(BaseModel):
+    mode: ExecutionMode
+    external_account_id: str | None = None
+    watchlist_id: str | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data_quality: Literal["live", "degraded", "partial", "unavailable", "empty"]
+    rows: list[ResearchUniverseRow] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchTechnicalSnapshot(BaseModel):
+    symbol: str
+    status: Literal["ok", "partial", "unavailable"]
+    warning: str | None = None
+    latest_bar_at: datetime | None = None
+    return_20d_pct: float | None = None
+    return_60d_pct: float | None = None
+    sma20: Decimal | None = None
+    sma50: Decimal | None = None
+    close_above_sma20: bool | None = None
+    sma20_above_sma50: bool | None = None
+    realized_volatility_20d_pct: float | None = None
+    average_volume_20d: float | None = None
+    average_turnover_20d: Decimal | None = None
+
+
+class ResearchTechnicalsResponse(BaseModel):
+    mode: ExecutionMode
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    results: list[ResearchTechnicalSnapshot] = Field(default_factory=list)
+
+
+class ResearchHistoryPoint(BaseModel):
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    turnover: Decimal
+    sma20: Decimal | None = None
+    sma50: Decimal | None = None
+
+
+class ResearchHistoryResponse(BaseModel):
+    symbol: str
+    range: str
+    mode: ExecutionMode
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    bars: list[ResearchHistoryPoint] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class OptionChainEntry(BaseModel):

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import MarketEventRecord
@@ -33,20 +33,29 @@ class SQLAlchemyMarketEventRepository(MarketEventRepository):
         self,
         *,
         symbol: str | None = None,
+        symbols: list[str] | None = None,
         event_type: MarketEventType | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[MarketEvent]:
-        query = select(MarketEventRecord).order_by(MarketEventRecord.scheduled_at.asc()).limit(limit)
+        query = select(MarketEventRecord).order_by(MarketEventRecord.scheduled_at.asc())
         if symbol is not None:
             query = query.where(MarketEventRecord.symbol == symbol.strip().upper())
+        if symbols is not None:
+            normalized_symbols = {value.strip().upper() for value in symbols if value.strip()}
+            symbol_filters = [MarketEventRecord.symbol.is_(None)]
+            if normalized_symbols:
+                symbol_filters.append(MarketEventRecord.symbol.in_(normalized_symbols))
+            query = query.where(or_(*symbol_filters))
         if event_type is not None:
             query = query.where(MarketEventRecord.event_type == event_type.value)
         if start is not None:
             query = query.where(MarketEventRecord.scheduled_at >= start)
         if end is not None:
             query = query.where(MarketEventRecord.scheduled_at <= end)
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_domain(record) for record in self.session.execute(query).scalars().all()]
 
     @staticmethod

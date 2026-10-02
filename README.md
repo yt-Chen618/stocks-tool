@@ -12,6 +12,8 @@ The project is intentionally scoped around:
 
 It does not attempt live autonomous trading in the current phase.
 
+The October 2026 correction pass requires `alembic upgrade head` to revision `20261002_0017`. It hardens unknown-order history evidence, covered-call order linkage, scheduler leases, and atomic Advisor recording; it also corrects imported option metadata, research event completeness, and watchlist input handling. See `docs/runtime-operations.md` for the migration and recovery rules. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+
 ## Current status
 
 This repository currently contains:
@@ -32,6 +34,25 @@ This repository currently contains:
 - an order-linked journal and review workflow for trade notes
 - a PostgreSQL-ready database layer with SQLAlchemy and Alembic
 - current architecture, route inventory, runtime operations, lifecycle, regression, operator runbook, release-slice, and optimization design docs under `docs/`
+
+### 2026-08-10 research workstation change
+
+`/` and `/app` now render the same fixed, paper-first research workstation. The old `Focus` / `All` dashboard toggle and the unused `Quick Quote` surface are removed; this is not a second frontend or a new build service.
+
+- The five persistent workspaces are Research Desk (the default), Strategy Lab, Macro & Events, Portfolio, and Operations. A 224px dark sidebar can collapse to 64px; the fixed top bar keeps the selected account, Paper posture, data time, global status, language switch, refresh, and the explicit Execution entry point visible.
+- Research Desk is a shared-symbol context: it combines the selected/default watchlist, latest positions for the selected account, configured Bull Put and Zero-DTE pools, active Bull Put spread state, local events, and batched quotes. The screener draws quotes/account context first, then loads technicals progressively; it does not wait for daily bars before showing the table.
+- The screener supplies fixed Overview, Momentum, and Strategy column groups, sorting, sticky headers, source/event/position/strategy filters, and a synchronized chart selection. Table/chart choice, filters, sorting, selected symbol, chart range, column group, workspace, sidebar state, language, and collapsible-module state persist locally. Current keys are `stocks-tool-workspace`, `stocks-tool-sidebar-collapsed`, `stocks-tool-research-state`, `stocks-tool-language`, and `stocks-tool-collapsed-modules`; per-action idempotency keys remain session-scoped under `stocks-tool-idempotency:`.
+- Chart view uses the bundled standalone TradingView Lightweight Charts `5.2.0` asset, including its attribution logo. It is served locally from `src/stocks_tool/ui/static/vendor/`, with the upstream license and NOTICE/attribution record beside it; no chart CDN is required at runtime.
+- The native `dialog` execution drawer is 640px on desktop and contains Ticket, Orders, Order Detail, and Journal tabs. Research may prefill only a symbol; it must not infer side, quantity, order type, or price. The existing confirmation dialog, API idempotency/replay behavior, unknown-outcome locks, and strategy safety gates remain the authority for broker writes. At `<=780px`, the drawer stays available for read-only review while broker-writing controls remain disabled.
+- Watchlist management retains create and add-item behavior and now supports renaming, description/default changes, editing item notes, and confirmed item removal. This release deliberately does not delete whole lists, reorder items, or introduce groups.
+
+#### Research read APIs
+
+The three Research Workstation read routes below are paper-mode only (`mode=paper`): they are read models and must not be used as broker-order authorization evidence. The pre-existing `/research/rank` route is a separate research contract.
+
+- `GET /research/universe?external_account_id=...&watchlist_id=...&mode=paper` returns uppercase-deduplicated rows with every source label retained, batch quote, position summary, next event in the next 30 days, strategy states, per-row warnings, overall data quality, and response warnings. It uses the explicit watchlist when supplied or the default list otherwise, then merges positions and strategy pools. More than 50 unique symbols returns `422` with `research_universe_limit_exceeded`; it never silently truncates. Missing selected lists return `404 research_watchlist_not_found`.
+- `GET /research/technicals?symbols=AAPL.US&symbols=MSFT.US&mode=paper` accepts repeated and comma-separated values, with at most 10 expanded nonblank symbol tokens per request. The UI sequences repeated-parameter batches and keeps technical-dependent filters disabled until all batches finish, so row ordering does not jump. Each item independently returns `ok`, `partial`, or `unavailable` plus a warning. Calculations read 66 daily bars: 20/60-day returns, SMA20/SMA50, close-vs-SMA20 and SMA20-vs-SMA50 flags, 20-day annualized realized volatility, and prior-20-complete-session average volume/turnover. A failed symbol does not fail its batch.
+- `GET /research/symbols/{symbol}/history?range=3m|6m|1y&mode=paper` reads 66/132/252 daily bars, returns OHLCV, turnover, and point-in-time SMA20/SMA50, and reports `short_history` or `daily_bars_unavailable` warnings without treating degraded/cached data as trade permission.
 
 ## Repository layout
 
@@ -90,8 +111,12 @@ LONGBRIDGE_ACCESS_TOKEN=...
 Then open:
 
 - `GET /`
+- `GET /app`
 - `GET /health`
 - `POST /research/rank`
+- `GET /research/universe?external_account_id=LBPT10087357&mode=paper`
+- `GET /research/technicals?symbols=QQQ.US&mode=paper`
+- `GET /research/symbols/QQQ.US/history?range=6m&mode=paper`
 - `POST /plans/draft`
 - `POST /plans/validate`
 - `GET /brokers/profiles`
@@ -103,6 +128,12 @@ Then open:
 - `POST /market-events`
 - `POST /market-events/import`
 - `POST /market-events/import/provider`
+- `GET /watchlists`
+- `POST /watchlists`
+- `POST /watchlists/{watchlist_id}/items`
+- `PATCH /watchlists/{watchlist_id}`
+- `PATCH /watchlists/{watchlist_id}/items/{item_id}`
+- `DELETE /watchlists/{watchlist_id}/items/{item_id}`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/pre-open-risk`
@@ -209,7 +240,7 @@ The bull put spread workflow is currently paper-only:
 - pre-open run persistence: the strategy now stores one structured pre-open assessment per target U.S. session date, auto-journals the captured read, and records opening follow-through at `09:30 / 09:45 / 10:00 ET`
 - holiday handling: the pre-open assessment now distinguishes normal Mondays from exchange holidays, so `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26 09:30 ET`
 - dashboard: the `/` workbench now shows a real-time macro board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, optional reference-put liquidity summaries, optional deeper option-chain analysis with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus a separate stored opening follow-through review for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
-- dashboard load behavior: account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run render first; Longbridge-backed `Quick Quote` and the real-time macro board are manual so `/` stays usable even when broker quote calls are slow
+- historical dashboard load behavior: before the 2026-08-10 research workstation, account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run rendered first while `Quick Quote` and the real-time macro board were manual. `Quick Quote` is now removed; Research Desk renders its batch quote/account context first and fills daily-bar technicals progressively.
 - dashboard strategy-first behavior: `/` now loads bull put runtime, spreads, orders, executions, journals, and stored pre-open runs first; `Load Live Macro` uses the fast macro path, `Load Option Overlays` fetches slower option-chain layers on demand, and `Save Current Board` persists the current live/partial macro read for follow-through review
 - bull put readiness: `GET /strategies/bull-put/readiness` performs a read-only opening readiness check across account configuration, runtime controls, entry window, candidate preview, capacity, and next action before any paper order is submitted
 - bull put execution lock: previews return a `candidate_token`; execute requests can include that token plus `minimum_net_credit` so a manual submit cannot silently switch to a different spread candidate
@@ -239,11 +270,11 @@ The bull put spread workflow is currently paper-only:
 - Longbridge circuit isolation: account/order failures and market-data failures now use separate circuit-breaker buckets, so a failed account sync does not automatically block quote-backed dashboard panels
 - scheduler safety order: each account cycle reconciles unresolved intents, synchronizes orders, synchronizes account/positions, advances existing strategy lifecycles, and only then evaluates new entries; a failed prerequisite blocks downstream broker mutations
 - pre-open board resilience: `/strategies/pre-open-risk` now falls back to the latest stored pre-open run when transient Longbridge failures hit, returns a partial board when only some proxies are unavailable, and degrades to a structured unavailable board when no live or stored pre-open snapshot exists yet
-- homepage quote behavior: the dashboard no longer auto-loads `Quick Quote` on first paint, so the default `UNH.US` lookup does not open the shared Longbridge circuit before the pre-open board has a chance to refresh
+- historical homepage quote behavior: the retired `Quick Quote` panel stopped auto-loading `UNH.US` on first paint. The panel is removed in the research workstation; quote reads now come through the shared research-universe read model.
 - pre-open proxy fetch path: the pre-open board now loads its proxy symbols through one batched Longbridge quote request instead of five sequential quote calls, and the dashboard skips slow option overlays by default so fresh macro proxy data can render first
 - overlay timeout margin: the homepage now gives `pre-open-risk` slightly more time than the underlying Longbridge fail-fast window, so the first degraded render lands as structured `Unavailable` instead of a client-side `Timed Out`
 - dashboard asset versioning: `/` now serves versioned `app.css` and `app.js` URLs so browser tabs pick up the latest frontend after a reload instead of sticking to stale cached static assets
-- focused dashboard hierarchy: the workbench starts in a persisted `Focus` view that keeps account risk, Bull Put runtime/monitoring, holdings, and execution visible while hiding secondary reconciliation, Zero-DTE, event, experiment, and macro detail. `All` restores every panel without changing data loading or trading controls.
+- historical focused dashboard hierarchy: the prior persisted `Focus` / `All` switch is superseded by the five-workspace shell described above. Its old local-storage key is intentionally no longer read or written.
 
 ## Regression scripts
 
@@ -289,7 +320,7 @@ Available workflows:
 - `mock-ui`: starts the in-memory mock dashboard backend and drives a headless browser through the real-time macro board, save-current-board action, stored opening follow-through review card, option-chain analysis, strategy controls, strategy review, spread monitor, filled-order execution summary, journal submit, and submit / replace / cancel without touching the real paper account
 - `real-paper`: by default prints a dry-run plan based on the latest quote; add `--execute` to actually send the paper order through the local API
 - `real-preopen-board`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, clicks `Load Live Macro`, and verifies the response is live fast-path data for the expected U.S. session date instead of a stored fallback
-- `real-ui-refresh`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, reloads it repeatedly, and reports dashboard-ready plus overlay-settled timings for the warm real instance
+- `real-ui-refresh`: drives a headless browser against an already running local dashboard on `127.0.0.1:8000`, reloads it repeatedly, and reports core dashboard, research-universe table, selected chart, and technical-settled timings. Warm core/table checks retain the 3-second target, warm overlays retain the 7-second target, and warm cached charts use a 2-second target; the first real Longbridge connection is reported as a cold measurement and does not alter any broker safety gate.
 - `unattended-paper`: arms, inspects, or resumes the local paper unattended workflow. `arm` disables new Bull Put entries while keeping existing spread monitoring and lifecycle reconciliation under the running FastAPI scheduler; Zero-DTE auto-order cannot be enabled in P0; `status` prints a morning/evening summary covering paper-first controls, Covered Call posture, Bull Put runtime and linked lifecycle orders, executions, journals, and the Zero-DTE execution lock; `resume` re-enables the Bull Put runtime flag while the release kill switch remains authoritative. Optional `--notification-channel dry-run|console|file` emits a local notification payload; file notifications include `run_id` and size-based JSONL rotation; email/push/SMS are reserved but not active.
 - `scheduler-on-long-gate`: starts a temporary scheduler-enabled API on an available local port, then runs `real-ui-refresh`, `unattended-paper status --notification-channel dry-run`, `bull-put-real-paper`, and `bull-put-recovery-drill` against the same process; the report includes scheduler lease/backoff evidence
 

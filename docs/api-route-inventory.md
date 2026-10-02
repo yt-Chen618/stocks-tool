@@ -1,18 +1,22 @@
 # API Route Inventory
 
-Last updated: 2026-06-16
+Last updated: 2026-08-10
 
 This inventory groups public routes by bounded context. Paths are part of the compatibility surface for the dashboard and regression scripts.
 
 ## UI and Health
 
 - `GET /`
+- `GET /app`
 - `GET /health`
 - `GET /docs`
 
 ## Research and Plans
 
 - `POST /research/rank`
+- `GET /research/universe`
+- `GET /research/technicals`
+- `GET /research/symbols/{symbol}/history`
 - `POST /plans/draft`
 - `POST /plans/validate`
 
@@ -50,6 +54,22 @@ Every broker-mutation route requires a 16-128 character ASCII `Idempotency-Key` 
 - `POST /market-events/import/provider`
 - `GET /watchlists`
 - `POST /watchlists`
+- `POST /watchlists/{watchlist_id}/items`
+- `PATCH /watchlists/{watchlist_id}`
+- `PATCH /watchlists/{watchlist_id}/items/{item_id}`
+- `DELETE /watchlists/{watchlist_id}/items/{item_id}`
+
+### Research Workstation Read Contracts
+
+All three workspace reads require `mode=paper` (the default) and are strictly read-only. They do not provide quote authorization for a broker mutation.
+
+- `GET /research/universe` accepts optional `external_account_id` and `watchlist_id`. It merges the requested/default watchlist, latest positions, configured Bull Put and Zero-DTE pools, and active Bull Put spread state by uppercase symbol, preserving all source labels. Rows carry a batch quote, position fields, next event within 30 days, strategy state, warnings, and aggregate `data_quality`. The maximum is 50 unique symbols; an overflow returns `422 research_universe_limit_exceeded` with `limit` and `count`, rather than truncating. A requested missing list returns `404 research_watchlist_not_found`.
+- `GET /research/technicals` takes repeated and/or comma-separated `symbols` query parameters, with a hard maximum of 10 expanded nonblank symbol tokens per request. More than 10 returns `422 research_technicals_limit_exceeded`; blank input returns `422 research_symbols_required`. The service normalizes symbols before calculation. Every returned symbol is independent: `status` is `ok`, `partial`, or `unavailable` and includes a warning when appropriate. It reads 66 daily bars to calculate 20/60-day returns, SMA20/SMA50, two trend booleans, 20-day annualized realized volatility, and average volume/turnover over the preceding 20 complete sessions.
+- `GET /research/symbols/{symbol}/history` accepts `range=3m|6m|1y` and reads 66/132/252 daily bars. Each point contains OHLCV, turnover, SMA20, and SMA50. It returns `short_history` or `daily_bars_unavailable` warning codes instead of authorizing any downstream trading action.
+
+The watchlist update routes keep list deletion, drag ordering, and grouping out of scope. `PATCH /watchlists/{watchlist_id}` updates name, description, and/or default selection; `PATCH /watchlists/{watchlist_id}/items/{item_id}` updates item notes; deleting an item returns `204` after the client-side confirmation step.
+
+Adding a watchlist item trims and uppercases its symbol, rejects blank/overlong input with `422`, and returns `409` for a duplicate (including a legacy whitespace/case variant). Historical rows are not rewritten. Research skips blank legacy symbols and reports normalization/duplicate warnings. Event lookup filters the universe symbols plus global events before reading the full 30-day window, so unrelated events cannot consume a global 500-row limit.
 
 ## Strategy Runtime
 
@@ -138,3 +158,7 @@ Only Preview is executable in P0. The execute route, `force=true` scan, and atte
 - `POST /ops/trading-intents/{intent_id}/resolve-no-order`
 - `GET /ops/trade-actions`
 - `GET /ops/trade-actions/{action_intent_id}`
+
+No-order resolution requires explicit paper confirmation and three complete zero-match reconciliations spanning at least 60 seconds. Migration `20261002_0017` adds the persisted coverage evidence required by this check; legacy counts alone do not qualify. Incomplete history reads or conflicting broker identity evidence keep the intent unresolved.
+
+Advisor Record Output is atomic across its local ledger and audit writes. With `advisor_run_id`, matching retries return the linked proposal/review records; mismatched payloads or run ownership return `409`. Covered-call roll continuation validates that both order IDs belong to the current proposal's latest roll run and that quantities match the proposal; an existing linked sell ID cannot be omitted to request a new sell.

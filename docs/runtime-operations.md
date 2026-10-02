@@ -1,6 +1,6 @@
 # Runtime Operations
 
-Last updated: 2026-07-11
+Last updated: 2026-10-02
 
 ## Local Startup
 
@@ -92,6 +92,16 @@ Use `GET /strategies/controls?external_account_id=LBPT10087357` for the static p
 `PaperMandate` and `OperatorStatusCheck` also expose optional `reason_codes` / `reason_code`, `reason_detail`, and `severity` fields. The backend reason-code catalog is the canonical short explanation source used by the dashboard and `scripts\run_unattended_paper.py` for states such as `manual_pause`, `kill_switch`, `scheduler_backoff`, `manual_action_required`, `advisor_pending_record`, and broker degradation. Use `GET /ops/reason-codes` to inspect that catalog directly.
 
 ## Lifecycle Data Hygiene
+
+Apply migration `20261002_0017` before running the corrected order-reconciliation code. It adds nullable history-coverage timestamps to `order_intents`; it does not delete or rewrite order history. Back up the database before upgrading. A rollback to older application code must keep these additive columns, because removing them also removes the new reconciliation evidence.
+
+Unknown-order reconciliation requests history from the earliest unresolved intent's creation time through the current check and reads known cancel/replace targets by their exact broker order ID. A manual `resolve-no-order` requires three consecutive complete zero-match checks over at least 60 seconds with persisted coverage of the intent. Historical counts without coverage evidence do not qualify: the first new complete check starts a fresh count. Failed/incomplete reads or contradictory broker identity evidence invalidate the previous zero-match chain.
+
+The [Longbridge history-orders API](https://open.longbridge.com/docs/trade/order/history_orders) returns at most 1,000 orders per query. The current Python SDK returns only an order list, without `has_more`; a response at that cap is therefore rejected as incomplete, and the intent remains unresolved. Do not bypass this guard by resolving from a truncated list.
+
+If an SDK operation times out after its worker has started, its outcome is not known. The adapter temporarily rejects further account/order SDK work until that worker finishes, while paper/live market-data circuits remain independent. Do not retry a timed-out mutation with a new idempotency key. Reconcile its original intent when the SDK becomes available again; an indefinitely blocked native call requires operator investigation and a controlled process restart, not automatic replacement threads or resubmission.
+
+Covered-call roll continuation requires the order IDs linked to the latest roll run for that proposal. If a successor sell already exists, supply that ID; omitting it does not authorize a second sell. Wrong proposal linkage or contract quantity is rejected before advancing the lifecycle.
 
 Bull put lifecycle summaries are normalized in `bull_put_spreads` after migration `20260615_0013` is applied:
 

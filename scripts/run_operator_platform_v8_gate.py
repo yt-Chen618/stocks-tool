@@ -37,13 +37,10 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         for path in sorted((ROOT / "scripts").glob("*.py"))
         if path.name not in {"__init__.py"}
     ]
+    static_dir = ROOT / "src" / "stocks_tool" / "ui" / "static"
     dashboard_js_paths = [
-        "lifecycle-warning.js",
-        "api-client.js",
-        "formatters.js",
-        "i18n.js",
-        "state.js",
-        "app.js",
+        path.relative_to(static_dir).as_posix()
+        for path in sorted(static_dir.rglob("*.js"))
     ]
     dashboard_node_specs = [
         {

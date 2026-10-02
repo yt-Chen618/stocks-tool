@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.staticfiles import StaticFiles
 
 from mock_dashboard_fixtures import (
@@ -19,6 +19,9 @@ from mock_dashboard_fixtures import (
     build_mock_configuration,
     build_mock_paper_mandate,
     build_mock_quote,
+    build_mock_research_history,
+    build_mock_research_technicals,
+    build_mock_research_universe,
     build_mock_watchlists,
     format_price,
     iso_now,
@@ -64,6 +67,8 @@ class MockDashboardState:
         self._order_counter = 1000
         self._journal_counter = 2000
         self._spread_counter = 3000
+        self._watchlist_counter = 1
+        self._watchlist_item_counter = 2
         self._market_events_request_count = 0
         self._orders_request_count = 0
         self._broker_accounts_request_count = 0
@@ -2216,6 +2221,20 @@ class MockDashboardState:
         }
 
 
+def _find_mock_watchlist(state: MockDashboardState, watchlist_id: str) -> dict[str, Any]:
+    watchlist = next((item for item in state.watchlists if item["id"] == watchlist_id), None)
+    if watchlist is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock watchlist not found.")
+    return watchlist
+
+
+def _find_mock_watchlist_item(watchlist: dict[str, Any], item_id: str) -> dict[str, Any]:
+    item = next((candidate for candidate in watchlist["items"] if candidate["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock watchlist item not found.")
+    return item
+
+
 def create_app(*, scenario: str = "normal") -> FastAPI:
     state = MockDashboardState(scenario=scenario)
     app = FastAPI(title="Mock Stocks Tool Dashboard", docs_url="/docs", redoc_url=None)
@@ -2251,6 +2270,96 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     @app.get("/watchlists")
     def watchlists() -> list[dict[str, Any]]:
         return deepcopy(state.watchlists)
+
+    @app.post("/watchlists")
+    def create_watchlist(payload: dict[str, Any]) -> dict[str, Any]:
+        state._watchlist_counter += 1
+        if payload.get("is_default"):
+            for existing in state.watchlists:
+                existing["is_default"] = False
+        watchlist = {
+            "id": f"mock-watchlist-{state._watchlist_counter}",
+            "name": payload.get("name") or f"mock-list-{state._watchlist_counter}",
+            "description": payload.get("description"),
+            "is_default": bool(payload.get("is_default")),
+            "items": [],
+        }
+        state.watchlists.insert(0, watchlist)
+        return deepcopy(watchlist)
+
+    @app.patch("/watchlists/{watchlist_id}")
+    def update_watchlist(watchlist_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        if payload.get("is_default"):
+            for existing in state.watchlists:
+                existing["is_default"] = existing["id"] == watchlist_id
+        for field in ("name", "description", "is_default"):
+            if field in payload:
+                watchlist[field] = payload[field]
+        return deepcopy(watchlist)
+
+    @app.post("/watchlists/{watchlist_id}/items")
+    def add_watchlist_item(watchlist_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        symbol = str(payload.get("symbol") or "").upper()
+        if any(item["symbol"] == symbol for item in watchlist["items"]):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Mock symbol already exists.")
+        state._watchlist_item_counter += 1
+        watchlist["items"].append(
+            {
+                "id": f"mock-watchlist-item-{state._watchlist_item_counter}",
+                "symbol": symbol,
+                "asset_type": payload.get("asset_type") or "stock",
+                "notes": payload.get("notes"),
+            }
+        )
+        return deepcopy(watchlist)
+
+    @app.patch("/watchlists/{watchlist_id}/items/{item_id}")
+    def update_watchlist_item(watchlist_id: str, item_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        item = _find_mock_watchlist_item(watchlist, item_id)
+        if "notes" in payload:
+            item["notes"] = payload["notes"]
+        return deepcopy(watchlist)
+
+    @app.delete("/watchlists/{watchlist_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_watchlist_item(watchlist_id: str, item_id: str) -> Response:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        item = _find_mock_watchlist_item(watchlist, item_id)
+        watchlist["items"].remove(item)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/research/universe")
+    def research_universe(
+        external_account_id: str | None = Query(default=None),
+        watchlist_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        if mode != "paper":
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Mock research is paper-only.")
+        return build_mock_research_universe(
+            external_account_id or state.account_id,
+            watchlist_id or state.watchlists[0]["id"],
+        )
+
+    @app.get("/research/technicals")
+    def research_technicals(symbols: list[str] = Query(...)) -> dict[str, Any]:
+        if not symbols or len(symbols) > 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Mock technical batches require between 1 and 10 symbols.",
+            )
+        return build_mock_research_technicals(symbols)
+
+    @app.get("/research/symbols/{symbol}/history")
+    def research_history(
+        symbol: str,
+        range: str = Query(default="3m"),
+    ) -> dict[str, Any]:
+        if range not in {"3m", "6m", "1y"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported mock range.")
+        return build_mock_research_history(symbol, range)
 
     @app.get("/brokers/longbridge/configuration")
     def longbridge_configuration() -> dict[str, Any]:

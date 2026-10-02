@@ -11,6 +11,15 @@ from regression_common import build_report, emit_report
 ROOT = Path(__file__).resolve().parents[1]
 
 SLICE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("local_configuration", (".codex/",)),
+    (
+        "research_workstation",
+        (
+            "src/stocks_tool/api/routes/research.py",
+            "src/stocks_tool/api/routes/watchlists.py",
+            "src/stocks_tool/application/services/research_workspace.py",
+        ),
+    ),
     (
         "generated_cleanup",
         (
@@ -76,6 +85,7 @@ SLICE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "docs/",
             "README.md",
             "CODEX.md",
+            "AGENTS.md",
             ".env.example",
             "tests/",
         ),

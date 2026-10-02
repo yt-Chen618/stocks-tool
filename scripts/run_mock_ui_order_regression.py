@@ -363,6 +363,13 @@ def main() -> None:
 
             dashboard = client.get("/")
             dashboard.raise_for_status()
+            assert 'data-workspace="research"' in dashboard.text
+            assert dashboard.text.count("data-workspace-option=") == 5
+            assert 'id="research-section"' in dashboard.text
+            assert 'id="research-table-body"' in dashboard.text
+            assert 'id="research-chart-container"' in dashboard.text
+            assert 'id="execution-drawer"' in dashboard.text
+            assert dashboard.text.count("data-execution-tab=") == 4
             assert "Strategy Center" in dashboard.text
             assert "Holdings Overview" in dashboard.text
             assert "Real-time Macro Board" in dashboard.text
@@ -386,9 +393,20 @@ def main() -> None:
             assert "Execution Summary" in dashboard.text
             assert "Review Workflow" in dashboard.text
             assert "Orders" in dashboard.text
-            assert "Watchlists" not in dashboard.text
+            assert "Manage Watchlist" in dashboard.text
             assert "Longbridge Status" not in dashboard.text
             assert "Quick Quote" not in dashboard.text
+            assert "data-view-mode-option" not in dashboard.text
+            for asset in (
+                "workspace.css",
+                "vendor/lightweight-charts-5.2.0.standalone.production.js",
+                "chart-view.js",
+                "research-view.js",
+                "watchlist-view.js",
+                "execution-drawer.js",
+                "workspace-shell.js",
+            ):
+                assert f"/static/{asset}?v=" in dashboard.text
 
             app_js = client.get("/static/app.js")
             app_js.raise_for_status()
@@ -441,10 +459,64 @@ def main() -> None:
                 "renderSelectedJournal()",
             ):
                 assert marker in app_js.text, f"Missing dashboard app marker: {marker}"
+            assert "stocks-tool-view-mode" not in app_js.text
+
+            module_markers = {
+                "/static/workspace-shell.js": (
+                    'const DEFAULT_WORKSPACE = "research"',
+                    "selectWorkspace",
+                    "openExecutionDrawer",
+                ),
+                "/static/execution-drawer.js": (
+                    "window.StocksToolExecution",
+                    "dataset.executionTab",
+                    "setMobileReadonly",
+                    "showModal",
+                ),
+                "/static/research-view.js": (
+                    'const STORAGE_KEY = "stocks-tool-research-state"',
+                    "/research/universe",
+                    "/research/technicals",
+                    "/history?range=",
+                    "prepareSelectedOrder",
+                ),
+                "/static/watchlist-view.js": (
+                    'apiFetch("/watchlists")',
+                    'method: "PATCH"',
+                    'method: "DELETE"',
+                ),
+                "/static/chart-view.js": (
+                    "window.LightweightCharts",
+                    "attributionLogo: true",
+                    "CandlestickSeries",
+                ),
+            }
+            for module_path, markers in module_markers.items():
+                module_response = client.get(module_path)
+                module_response.raise_for_status()
+                for marker in markers:
+                    assert marker in module_response.text, f"Missing marker {marker!r} in {module_path}"
 
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
             assert accounts[0]["auto_reconcile_enabled"] is True
+            research_universe = require_ok(
+                client.get(
+                    "/research/universe",
+                    params={
+                        "external_account_id": "LBPT10087357",
+                        "watchlist_id": "mock-watchlist-1",
+                        "mode": "paper",
+                    },
+                )
+            )
+            assert [row["symbol"] for row in research_universe["rows"]] == ["MOCK.US", "QQQ.US"]
+            research_technicals = require_ok(
+                client.get("/research/technicals", params=[("symbols", "MOCK.US"), ("symbols", "QQQ.US")])
+            )
+            assert len(research_technicals["results"]) == 2
+            research_history = require_ok(client.get("/research/symbols/MOCK.US/history", params={"range": "3m"}))
+            assert len(research_history["bars"]) == 66
             pre_open = require_ok(client.get("/strategies/pre-open-risk"))
             assert pre_open["preferred_vehicle"] == "QQQ"
             assert pre_open["plain_put_view"] == "reasonable"
@@ -531,6 +603,10 @@ def main() -> None:
                             "pre_open_seed": True,
                             "pre_open_run_seed": True,
                             "app_js_markers": True,
+                            "workspace_module_markers": True,
+                            "research_universe_seed": True,
+                            "research_technicals_seed": True,
+                            "research_history_seed": True,
                             "account_seed": True,
                             "snapshot_seed": True,
                             "runtime_seed": True,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 import re
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,7 @@ class ParsedUsOptionSymbol:
     underlying_symbol: str
     expiration_date: date
     right: str
+    strike: Decimal
 
 
 def parse_us_option_symbol(symbol: str) -> ParsedUsOptionSymbol | None:
@@ -39,6 +41,7 @@ def parse_us_option_symbol(symbol: str) -> ParsedUsOptionSymbol | None:
         underlying_symbol=f"{match.group('underlying').upper()}.US",
         expiration_date=expiration_date,
         right=match.group("right").upper(),
+        strike=Decimal(match.group("strike")) / Decimal("1000"),
     )
 
 

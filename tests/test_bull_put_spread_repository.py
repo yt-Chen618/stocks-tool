@@ -98,3 +98,18 @@ def test_bull_put_spread_repository_preserves_explicit_lifecycle_fields_without_
     assert record.latest_monitor_should_close is True
     assert record.latest_close_order_status == "canceled"
     assert record.next_monitor_after == NOW
+
+
+def test_bull_put_spread_repository_rolls_back_list_failure() -> None:
+    session = Mock()
+    session.execute.side_effect = RuntimeError("spread read unavailable")
+    repository = SQLAlchemyBullPutSpreadRepository(session)
+
+    try:
+        repository.list_spreads(external_account_id="LBPT10087357", status=SpreadStatus.OPEN)
+    except RuntimeError as exc:
+        assert str(exc) == "spread read unavailable"
+    else:
+        raise AssertionError("Expected list_spreads to re-raise the database failure.")
+
+    session.rollback.assert_called_once()

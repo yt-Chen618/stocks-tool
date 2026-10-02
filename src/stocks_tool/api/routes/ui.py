@@ -18,11 +18,18 @@ def _asset_url(filename: str) -> str:
 @router.get("/app", response_class=HTMLResponse)
 def render_dashboard() -> HTMLResponse:
     app_css_url = _asset_url("app.css")
+    workspace_css_url = _asset_url("workspace.css")
     lifecycle_warning_js_url = _asset_url("lifecycle-warning.js")
     api_client_js_url = _asset_url("api-client.js")
     formatters_js_url = _asset_url("formatters.js")
     i18n_js_url = _asset_url("i18n.js")
     state_js_url = _asset_url("state.js")
+    chart_vendor_js_url = _asset_url("vendor/lightweight-charts-5.2.0.standalone.production.js")
+    chart_view_js_url = _asset_url("chart-view.js")
+    research_view_js_url = _asset_url("research-view.js")
+    watchlist_view_js_url = _asset_url("watchlist-view.js")
+    execution_drawer_js_url = _asset_url("execution-drawer.js")
+    workspace_shell_js_url = _asset_url("workspace-shell.js")
     app_js_url = _asset_url("app.js")
     return HTMLResponse(
         dedent(
@@ -34,58 +41,149 @@ def render_dashboard() -> HTMLResponse:
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>Stocks Tool Workbench</title>
                 <link rel="stylesheet" href="{app_css_url}" />
+                <link rel="stylesheet" href="{workspace_css_url}" />
               </head>
-              <body data-view-mode="focus">
-                <div class="shell">
-                  <header class="topbar">
-                    <div class="brand">
+              <body data-workspace="research" data-sidebar-collapsed="false">
+                <div id="app-shell" class="workbench-shell">
+                  <aside id="workspace-sidebar" class="workspace-sidebar" aria-label="Research workspaces">
+                    <div class="sidebar-brand">
                       <div class="brand-mark">ST</div>
-                      <div class="brand-copy">
-                        <span class="eyebrow">Paper Trading Desk</span>
-                        <h1>Stocks Tool Workbench</h1>
+                      <div class="sidebar-brand-copy">
+                        <span class="eyebrow">Paper Research</span>
+                        <strong>Stocks Tool</strong>
                       </div>
+                      <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Collapse sidebar" aria-controls="workspace-nav" aria-expanded="true">
+                        <span aria-hidden="true">&#8249;</span>
+                      </button>
                     </div>
+                    <nav id="workspace-nav" class="workspace-nav" aria-label="Workbench sections" role="tablist" aria-orientation="vertical">
+                      <button id="research-workspace-tab" type="button" role="tab" data-workspace-option="research" aria-label="Research Desk" aria-controls="research-section" aria-selected="true"><span class="nav-glyph" aria-hidden="true">R</span><span class="sidebar-label">Research Desk</span></button>
+                      <button id="strategy-workspace-tab" type="button" role="tab" data-workspace-option="strategy" aria-label="Strategy Lab" aria-controls="strategy-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">S</span><span class="sidebar-label">Strategy Lab</span></button>
+                      <button id="macro-workspace-tab" type="button" role="tab" data-workspace-option="macro" aria-label="Macro and Events" aria-controls="macro-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">M</span><span class="sidebar-label">Macro &amp; Events</span></button>
+                      <button id="portfolio-workspace-tab" type="button" role="tab" data-workspace-option="portfolio" aria-label="Portfolio" aria-controls="portfolio-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">P</span><span class="sidebar-label">Portfolio</span></button>
+                      <button id="operations-workspace-tab" type="button" role="tab" data-workspace-option="operations" aria-label="Operations" aria-controls="account-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">O</span><span class="sidebar-label">Operations</span></button>
+                    </nav>
+                    <div class="sidebar-foot"><span class="mode-pill">Paper First</span><span class="sidebar-label">LBPT10087357</span></div>
+                  </aside>
+
+                  <div class="workbench-main">
+                  <header class="workspace-topbar">
+                    <div class="topbar-context" aria-label="Account and market data context">
+                      <span class="context-item"><span>Account</span><strong id="topbar-account-context">LBPT10087357</strong></span>
+                      <span class="mode-pill">Paper</span>
+                      <span class="context-item"><span>Data</span><time id="topbar-data-time">Waiting</time></span>
+                    </div>
+                    <div id="status-banner" class="status-banner topbar-status" role="status" aria-live="polite" aria-atomic="true">Ready</div>
                     <div class="topbar-actions">
-                      <div class="view-switch" aria-label="Information density">
-                        <button class="view-option" type="button" data-view-mode-option="focus" aria-pressed="true">Focus</button>
-                        <button class="view-option" type="button" data-view-mode-option="all" aria-pressed="false">All</button>
-                      </div>
                       <div class="language-switch" aria-label="Language">
                         <button class="lang-option" type="button" data-lang-option="zh">中文</button>
                         <button class="lang-option" type="button" data-lang-option="en">EN</button>
                       </div>
-                      <span class="mode-pill">Paper</span>
+                      <button id="refresh-dashboard" class="icon-button" type="button" aria-label="Refresh dashboard">Refresh</button>
                       <a class="action-link" href="/docs">API Docs</a>
+                      <button id="open-execution-drawer" class="icon-button accent" type="button" aria-haspopup="dialog" aria-controls="execution-drawer" aria-expanded="false">Execution</button>
                     </div>
                   </header>
 
-                  <nav class="workspace-nav" aria-label="Workbench sections">
-                    <a href="#account-section">Account</a>
-                    <a href="#strategy-section">Strategy</a>
-                    <a href="#portfolio-section">Portfolio</a>
-                    <a href="#execution-section">Execution</a>
-                  </nav>
-
-                  <div id="desktop-trading-notice" class="desktop-trading-notice" role="note">
-                    Broker-writing actions are disabled on screens 780px wide or smaller. Use the desktop workbench to trade.
-                  </div>
-
                   <main class="workspace">
-                    <section id="account-section" class="band account-band">
+                    <div id="desktop-trading-notice" class="desktop-trading-notice" role="note">
+                      Broker-writing actions are disabled on screens 780px wide or smaller. The execution drawer remains available for read-only review.
+                    </div>
+                    <section id="research-section" class="band research-band" data-workspace-panel="research" role="tabpanel" aria-labelledby="research-workspace-tab">
+                      <div class="band-header research-header">
+                        <div>
+                          <span class="section-kicker">Shared Symbol Context</span>
+                          <h1>Research Desk</h1>
+                          <p class="section-summary">Quotes and account context render first; technicals fill in progressively without blocking the table.</p>
+                        </div>
+                        <div class="segmented-control" role="tablist" aria-label="Research view">
+                          <button id="research-table-tab" type="button" role="tab" data-research-view="table" aria-selected="true" aria-controls="research-table-view">Screener</button>
+                          <button id="research-chart-tab" type="button" role="tab" data-research-view="chart" aria-selected="false" aria-controls="research-chart-view">Chart</button>
+                        </div>
+                      </div>
+
+                      <div class="research-toolbar" aria-label="Research controls">
+                        <label class="field research-search-field"><span>Symbol Search</span><input id="research-search" type="search" autocomplete="off" placeholder="Search symbol" /></label>
+                        <label class="field"><span>Watchlist</span><select id="research-watchlist-select"><option value="">Default universe</option></select></label>
+                        <button id="manage-watchlist-button" class="icon-button" type="button" aria-haspopup="dialog" aria-controls="watchlist-dialog">Manage Watchlist</button>
+                        <label class="field"><span>Source</span><select id="research-source-filter"><option value="">All Sources</option></select></label>
+                        <label class="field"><span>Event Window</span><select id="research-event-filter"><option value="">Any Event Window</option><option value="7">Next 7 Days</option><option value="30">Next 30 Days</option><option value="none">No Upcoming Event</option></select></label>
+                        <label class="field compact-field"><span>Position</span><select id="research-held-filter"><option value="">All</option><option value="held">Held</option><option value="not-held">Not Held</option></select></label>
+                        <label class="field compact-field"><span>Strategy</span><select id="research-strategy-filter"><option value="">All</option><option value="active">Active</option><option value="none">None</option></select></label>
+                      </div>
+
+                      <details class="research-filters">
+                        <summary>Technical Filters</summary>
+                        <div class="research-filter-grid">
+                          <label class="field"><span>Min Day Change %</span><input id="research-min-day-change" type="number" step="0.1" /></label>
+                          <label class="field"><span>Min 20D Return %</span><input id="research-min-return20" type="number" step="0.1" data-technical-filter /></label>
+                          <label class="field"><span>Min 60D Return %</span><input id="research-min-return60" type="number" step="0.1" data-technical-filter /></label>
+                          <label class="field"><span>Max 20D Volatility %</span><input id="research-max-volatility" type="number" min="0" step="0.1" data-technical-filter /></label>
+                          <label class="field"><span>Min Avg Turnover</span><input id="research-min-turnover" type="number" min="0" step="1000" data-technical-filter /></label>
+                          <label class="check-field"><input id="research-trend-close-sma20" type="checkbox" data-technical-filter /><span>Close above SMA20</span></label>
+                          <label class="check-field"><input id="research-trend-sma20-sma50" type="checkbox" data-technical-filter /><span>SMA20 above SMA50</span></label>
+                          <button id="research-reset-filters" class="icon-button" type="button">Reset Filters</button>
+                        </div>
+                      </details>
+
+                      <div class="research-table-controls">
+                        <div class="segmented-control" role="group" aria-label="Research column group">
+                          <button type="button" data-research-columns="overview" aria-pressed="true">Overview</button>
+                          <button type="button" data-research-columns="momentum" aria-pressed="false">Momentum</button>
+                          <button type="button" data-research-columns="strategy" aria-pressed="false">Strategy</button>
+                        </div>
+                        <div class="research-load-state"><span id="research-progress" role="status" aria-live="polite">Waiting for universe</span><span id="research-status" role="status" aria-live="polite"></span></div>
+                      </div>
+
+                      <div id="research-table-view" class="research-view" role="tabpanel" aria-labelledby="research-table-tab">
+                        <div class="table-shell research-table-shell">
+                          <table class="data-table research-table">
+                            <thead>
+                              <tr>
+                                <th><button type="button" data-research-sort="symbol">Symbol</button></th>
+                                <th data-column-group="overview"><button type="button" data-research-sort="quote.last">Last</button></th>
+                                <th data-column-group="overview"><button type="button" data-research-sort="quote.change_pct">Day %</button></th>
+                                <th data-column-group="overview">Sources</th>
+                                <th data-column-group="overview"><button type="button" data-research-sort="position_market_value">Position</button></th>
+                                <th data-column-group="momentum"><button type="button" data-research-sort="return_20d_pct">20D</button></th>
+                                <th data-column-group="momentum"><button type="button" data-research-sort="return_60d_pct">60D</button></th>
+                                <th data-column-group="momentum"><button type="button" data-research-sort="realized_volatility_20d_pct">Vol 20D</button></th>
+                                <th data-column-group="momentum"><button type="button" data-research-sort="average_turnover_20d">Avg Turnover</button></th>
+                                <th data-column-group="momentum">Trend</th>
+                                <th data-column-group="strategy"><button type="button" data-research-sort="next_event">Next Event</button></th>
+                                <th data-column-group="strategy">Strategy State</th>
+                                <th class="research-action-cell">Action</th>
+                              </tr>
+                            </thead>
+                            <tbody id="research-table-body"><tr><td colspan="13" class="empty-row">Loading research universe...</td></tr></tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      <div id="research-chart-view" class="research-view research-chart-view" role="tabpanel" aria-labelledby="research-chart-tab" hidden>
+                        <aside class="research-symbol-rail" aria-label="Research symbols"><div id="research-symbol-list" role="listbox"></div></aside>
+                        <section class="research-chart-workspace">
+                          <div class="chart-toolbar">
+                            <div class="segmented-control" role="group" aria-label="Chart range"><button type="button" data-chart-range="3m" aria-pressed="false">3M</button><button type="button" data-chart-range="6m" aria-pressed="true">6M</button><button type="button" data-chart-range="1y" aria-pressed="false">1Y</button></div>
+                            <button id="research-prepare-order" class="icon-button accent" type="button">Prepare Order</button>
+                          </div>
+                          <div id="research-chart-container" class="research-chart" aria-label="Daily candlestick chart"></div>
+                          <div id="research-chart-summary" class="chart-summary" role="status" aria-live="polite">Select a symbol to load history.</div>
+                          <div class="research-evidence-grid">
+                            <article><span class="section-kicker">Events</span><div id="research-selected-events">No event selected.</div></article>
+                            <article><span class="section-kicker">Strategy Evidence</span><div id="research-selected-strategies">No strategy selected.</div></article>
+                            <article><span class="section-kicker">Watchlist Notes</span><div id="research-selected-notes">No notes.</div></article>
+                          </div>
+                        </section>
+                      </div>
+                    </section>
+
+                    <section id="account-section" class="band account-band" data-workspace-panel="operations" role="tabpanel" aria-labelledby="operations-workspace-tab" hidden>
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Account</span>
                           <h2>Account Control</h2>
                         </div>
-                        <button id="refresh-dashboard" class="icon-button" type="button">
-                          <span class="icon" aria-hidden="true">
-                            <svg viewBox="0 0 24 24" focusable="false">
-                              <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-                              <path d="M21 3v6h-6"/>
-                            </svg>
-                          </span>
-                          <span>Refresh</span>
-                        </button>
                       </div>
 
                       <div class="controls-grid">
@@ -165,19 +263,24 @@ def render_dashboard() -> HTMLResponse:
                         </article>
                       </div>
 
-                      <div id="status-banner" class="status-banner" role="status" aria-live="polite" aria-atomic="true">Ready</div>
                     </section>
 
-                    <section id="strategy-section" class="band strategy-band">
+                    <section id="strategy-section" class="band strategy-band" data-workspace-panel="strategy" role="tabpanel" aria-labelledby="strategy-workspace-tab" hidden>
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Strategy</span>
                           <h2>Strategy Center</h2>
                         </div>
+                        <div class="segmented-control strategy-tabs" role="tablist" aria-label="Strategy category">
+                          <button type="button" role="tab" data-strategy-tab="bull-put" aria-selected="true">Bull Put</button>
+                          <button type="button" role="tab" data-strategy-tab="covered-call" aria-selected="false">Covered Call</button>
+                          <button type="button" role="tab" data-strategy-tab="zero-dte" aria-selected="false">Zero-DTE</button>
+                          <button type="button" role="tab" data-strategy-tab="experiments" aria-selected="false">Experiments / Advisor</button>
+                        </div>
                       </div>
 
                       <div class="strategy-layout">
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-strategy-category="bull-put">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Bull Put</span>
@@ -272,7 +375,7 @@ def render_dashboard() -> HTMLResponse:
                             </div>
                           </form>
 
-                          <div class="strategy-notes-grid" data-view-priority="secondary">
+                          <div class="strategy-notes-grid">
                             <article class="strategy-note-card">
                               <div class="form-header">
                                 <span class="section-kicker">Last Skip</span>
@@ -303,7 +406,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2" data-view-priority="secondary">
+                        <section class="panel panel-span-2" data-strategy-category="zero-dte" hidden>
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Zero-DTE</span>
@@ -385,7 +488,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2" data-view-priority="secondary">
+                        <section class="panel panel-span-2" data-workspace-relocate="macro">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Risk Calendar</span>
@@ -405,14 +508,14 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2" data-view-priority="secondary">
+                        <section class="panel panel-span-2" data-strategy-category="covered-call experiments" hidden>
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Experiment</span>
                               <h2>Strategy Experiment Bench</h2>
                             </div>
                           </div>
-                          <div id="strategy-experiment-strip" class="mini-metric-strip strategy-summary-strip">
+                          <div id="strategy-experiment-strip" class="mini-metric-strip strategy-summary-strip" data-strategy-subcategory="experiments">
                             <article class="mini-metric-tile">
                               <span class="metric-label">Active Proposals</span>
                               <strong class="mini-metric-value">--</strong>
@@ -435,7 +538,7 @@ def render_dashboard() -> HTMLResponse:
                             </article>
                           </div>
                           <div class="strategy-notes-grid experiment-grid">
-                            <article class="strategy-note-card">
+                            <article class="strategy-note-card" data-strategy-subcategory="covered-call">
                               <div class="form-header">
                                 <span class="section-kicker">Covered Calls</span>
                                 <h3>Activity History</h3>
@@ -445,7 +548,7 @@ def render_dashboard() -> HTMLResponse:
                                 No covered-call activity yet.
                               </div>
                             </article>
-                            <article class="strategy-note-card">
+                            <article class="strategy-note-card" data-strategy-subcategory="experiments">
                               <div class="form-header">
                                 <span class="section-kicker">Proposals</span>
                                 <h3>Strategy Proposals</h3>
@@ -454,7 +557,7 @@ def render_dashboard() -> HTMLResponse:
                                 No strategy experiment proposals yet.
                               </div>
                             </article>
-                            <article class="strategy-note-card">
+                            <article class="strategy-note-card" data-strategy-subcategory="experiments">
                               <div class="form-header">
                                 <span class="section-kicker">Runs</span>
                                 <h3>Strategy Runs</h3>
@@ -463,7 +566,7 @@ def render_dashboard() -> HTMLResponse:
                                 No strategy runs recorded yet.
                               </div>
                             </article>
-                            <article class="strategy-note-card">
+                            <article class="strategy-note-card" data-strategy-subcategory="experiments">
                               <div class="form-header">
                                 <span class="section-kicker">Signals</span>
                                 <h3>Signal Feed</h3>
@@ -472,7 +575,7 @@ def render_dashboard() -> HTMLResponse:
                                 No strategy signals recorded yet.
                               </div>
                             </article>
-                            <article class="strategy-note-card">
+                            <article class="strategy-note-card" data-strategy-subcategory="experiments">
                               <div class="form-header">
                                 <span class="section-kicker">Reviews</span>
                                 <h3>Review Feed</h3>
@@ -481,7 +584,7 @@ def render_dashboard() -> HTMLResponse:
                                 No strategy reviews recorded yet.
                               </div>
                             </article>
-                            <article class="strategy-note-card advisor-note-card">
+                            <article class="strategy-note-card advisor-note-card" data-strategy-subcategory="experiments">
                               <div class="form-header">
                                 <span class="section-kicker">Advisor</span>
                                 <h3>DeepSeek Dry Run</h3>
@@ -498,7 +601,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2">
+                        <section class="panel panel-span-2" data-strategy-category="bull-put">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Spreads</span>
@@ -548,7 +651,7 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
-                        <section class="panel panel-span-2" data-view-priority="secondary">
+                        <section class="panel panel-span-2" data-workspace-relocate="macro">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Live Macro</span>
@@ -641,7 +744,15 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
-                    <section id="portfolio-section" class="band portfolio-band">
+                    <section id="macro-section" class="band macro-band" data-workspace-panel="macro" role="tabpanel" aria-labelledby="macro-workspace-tab" hidden>
+                      <div class="band-header">
+                        <div><span class="section-kicker">On Demand</span><h2>Macro &amp; Event Board</h2></div>
+                        <p class="section-summary">Market events and option overlays load only when requested.</p>
+                      </div>
+                      <div id="macro-workspace-grid" class="strategy-layout"></div>
+                    </section>
+
+                    <section id="portfolio-section" class="band portfolio-band" data-workspace-panel="portfolio" role="tabpanel" aria-labelledby="portfolio-workspace-tab" hidden>
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Portfolio</span>
@@ -686,7 +797,22 @@ def render_dashboard() -> HTMLResponse:
                       </div>
                     </section>
 
-                    <section id="execution-section" class="band execution-band">
+                  </main>
+
+                  <dialog id="execution-drawer" class="execution-drawer" aria-labelledby="execution-drawer-title">
+                    <div class="execution-drawer-shell">
+                      <header class="execution-drawer-header">
+                        <div><span class="section-kicker">Paper First</span><h2 id="execution-drawer-title">Execution Desk</h2></div>
+                        <button id="close-execution-drawer" class="icon-button" type="button" aria-label="Close execution drawer">Close</button>
+                      </header>
+                      <div class="execution-mobile-readonly" role="note">Read-only on screens 780px wide or smaller. Broker-writing controls remain locked.</div>
+                      <div class="segmented-control execution-tabs" role="tablist" aria-label="Execution views">
+                        <button type="button" data-execution-tab="ticket" aria-selected="true">Ticket</button>
+                        <button type="button" data-execution-tab="orders" aria-selected="false">Orders</button>
+                        <button type="button" data-execution-tab="detail" aria-selected="false">Order Detail</button>
+                        <button type="button" data-execution-tab="journal" aria-selected="false">Journal</button>
+                      </div>
+                    <section id="execution-section" class="execution-band">
                       <div class="band-header">
                         <div>
                           <span class="section-kicker">Execution</span>
@@ -694,7 +820,7 @@ def render_dashboard() -> HTMLResponse:
                         </div>
                       </div>
                       <div class="trade-grid">
-                        <section class="panel">
+                        <section class="panel" data-execution-panel="ticket">
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Ticket</span>
@@ -765,14 +891,14 @@ def render_dashboard() -> HTMLResponse:
                           </form>
                         </section>
 
-                        <section class="panel">
+                        <section class="panel" data-execution-panel="detail journal" hidden>
                           <div class="panel-header">
                             <div>
                               <span class="section-kicker">Workflow</span>
                               <h2>Selected Order</h2>
                             </div>
                           </div>
-                          <div id="selected-order-card" class="selected-order empty">
+                          <div id="selected-order-card" class="selected-order empty" tabindex="-1">
                             Select an order from the table to manage it.
                           </div>
                           <section class="selected-order-execution-shell">
@@ -870,7 +996,7 @@ def render_dashboard() -> HTMLResponse:
                         </section>
                       </div>
 
-                      <section class="panel orders-panel">
+                      <section class="panel orders-panel" data-execution-panel="orders" hidden>
                         <div class="panel-header">
                           <div>
                             <span class="section-kicker">Orders</span>
@@ -897,8 +1023,38 @@ def render_dashboard() -> HTMLResponse:
                         </div>
                       </section>
                     </section>
-                  </main>
+                    </div>
+                  </dialog>
+                  </div>
                 </div>
+
+                <dialog id="watchlist-dialog" class="watchlist-dialog" aria-labelledby="watchlist-dialog-title">
+                  <div class="watchlist-dialog-shell">
+                    <header class="execution-drawer-header">
+                      <div><span class="section-kicker">Research Universe</span><h2 id="watchlist-dialog-title">Manage Watchlist</h2></div>
+                      <button id="close-watchlist-dialog" class="icon-button" type="button">Close</button>
+                    </header>
+                    <form id="watchlist-form" class="ticket-form">
+                      <div class="ticket-grid">
+                        <label class="field"><span>Name</span><input id="watchlist-name" type="text" maxlength="120" required /></label>
+                        <label class="field field-span-2"><span>Description</span><input id="watchlist-description" type="text" maxlength="500" /></label>
+                        <label class="check-field"><input id="watchlist-default" type="checkbox" /><span>Default watchlist</span></label>
+                      </div>
+                      <div class="form-foot"><span class="form-hint">Default changes affect research context only.</span><button id="watchlist-save" class="icon-button accent" type="submit">Save Watchlist</button></div>
+                    </form>
+                    <form id="watchlist-item-form" class="ticket-form">
+                      <div class="ticket-grid">
+                        <label class="field"><span>Symbol</span><input id="watchlist-symbol" type="text" maxlength="32" placeholder="AAPL.US" required /></label>
+                        <label class="field"><span>Type</span><select id="watchlist-asset-type"><option value="stock">Stock</option><option value="etf">ETF</option><option value="option">Option</option></select></label>
+                        <label class="field field-span-2"><span>Notes</span><input id="watchlist-notes" type="text" maxlength="1000" /></label>
+                      </div>
+                      <div class="form-foot"><span class="form-hint">Symbols are normalized to uppercase.</span><button id="watchlist-add-item" class="icon-button" type="submit">Add Symbol</button></div>
+                    </form>
+                    <div class="table-shell watchlist-items-shell">
+                      <table class="data-table"><thead><tr><th>Symbol</th><th>Type</th><th>Notes</th><th>Actions</th></tr></thead><tbody id="watchlist-items-body"><tr><td colspan="4" class="empty-row">Select a watchlist.</td></tr></tbody></table>
+                    </div>
+                  </div>
+                </dialog>
 
                 <dialog id="trade-confirm-dialog" class="trade-confirm-dialog" aria-labelledby="trade-confirm-title">
                   <form method="dialog" class="trade-confirm-shell">
@@ -924,6 +1080,12 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{formatters_js_url}" defer></script>
                 <script src="{i18n_js_url}" defer></script>
                 <script src="{state_js_url}" defer></script>
+                <script src="{chart_vendor_js_url}" defer></script>
+                <script src="{chart_view_js_url}" defer></script>
+                <script src="{research_view_js_url}" defer></script>
+                <script src="{watchlist_view_js_url}" defer></script>
+                <script src="{execution_drawer_js_url}" defer></script>
+                <script src="{workspace_shell_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>
               </body>
             </html>

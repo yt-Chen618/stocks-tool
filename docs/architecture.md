@@ -1,6 +1,6 @@
 # Architecture
 
-Last updated: 2026-06-16
+Last updated: 2026-10-02
 
 ## Product Boundary
 
@@ -56,7 +56,9 @@ Swagger remains at `/docs`. The dashboard remains at `/`.
 | Advisor | DeepSeek dry-run, advisor context, audit, local intake | `application/services/strategy_experiments.py`, `strategy_advisor_intake.py` |
 | Broker Profile | broker capability, credential, and paper guard read model | `adapters/brokers/longbridge.py`, `api/routes/brokers.py` |
 | Operator Audit | cross-module explanation events and unattended posture | `application/services/operator_status.py`, `/ops/*` |
-| Dashboard | native browser workbench without a build step | `src/stocks_tool/ui/static/` |
+| Research Workspace | deduplicated symbol/read-model context, progressive technicals, chart history | `application/services/research_workspace.py`, `api/routes/research.py` |
+| Watchlists | persisted list/default/item-note management for research context | `api/routes/watchlists.py`, watchlist repository |
+| Dashboard | native browser workstation without a build step | `src/stocks_tool/ui/static/` |
 | Regression/Ops | smoke scripts, JSON artifacts, unattended status | `scripts/`, `docs/regression-matrix.md` |
 
 ## API Router Map
@@ -72,6 +74,27 @@ The root app includes routers from `src/stocks_tool/api/routes`. Strategy routes
 - `/strategies/bull-put/*`
 
 Route paths are a compatibility surface. Internal route modules may change, but dashboard and regression scripts should not need URL changes for refactors.
+
+## Research Workstation Shell
+
+`GET /` and `GET /app` render the same fixed shell. The default Research Desk shares a symbol context with Strategy Lab, Macro & Events, Portfolio, and Operations; it is not a draggable dashboard and it does not introduce React, Vue, a separate build service, or runtime CDN dependencies.
+
+The native static modules divide browser responsibilities as follows:
+
+- `workspace-shell.js`: five-workspace navigation, sidebar persistence, and workspace/strategy ARIA tabs.
+- `execution-drawer.js`: native execution `dialog`, Ticket/Orders/Detail/Journal tabs, focus restoration, and mobile read-only form state.
+- `research-view.js`: universe fetch, sequential technical batches, table/chart selection, filter/sort persistence, and explicit symbol-only handoff to the ticket.
+- `chart-view.js`: local candlestick, volume, SMA20, and SMA50 rendering through the bundled Lightweight Charts asset.
+- `watchlist-view.js`: selected/default list context plus create, update, note edit, and confirmed item removal.
+- `app.js`: startup and existing account, strategy, order, confirmation, and safety coordination.
+
+The top bar shows account, Paper posture, data time, global status, language, refresh, and the explicit Execution entry point. The 224px sidebar persists its 64px collapsed state. The retired `Focus` / `All` toggle and `stocks-tool-view-mode` storage key are not part of the current UI contract; the workstation uses `stocks-tool-workspace` and `stocks-tool-sidebar-collapsed`. Research-specific selection, filters, sort, view, column group, and chart range use `stocks-tool-research-state`. Existing language, collapsed-module, and session idempotency storage remain compatible.
+
+Research Desk never blocks its initial table on technical bars. `/research/universe` provides the initial quote/account/event/strategy context; `/research/technicals` is requested sequentially in frontend batches of at most 10 and technical filters remain disabled until all batches complete. The history endpoint reads the existing Longbridge daily-bar path and its cache, but cached or degraded market data is display evidence only and never a trading authorization input.
+
+The chart dependency is TradingView Lightweight Charts `5.2.0`, committed as a standalone local asset in `ui/static/vendor/`, with its license and third-party notice. The chart enables the vendor attribution logo and makes no runtime CDN request.
+
+Execution is an explicit 640px native dialog with Ticket, Orders, Order Detail, and Journal tabs. Research can set the ticket symbol only; the operator must still choose direction, quantity, type, and price. This presentation change does not bypass confirmation, `Idempotency-Key` handling, duplicate/unknown-outcome locks, paper guards, or Zero-DTE preview-only policy. On viewports `<=780px`, broker-writing controls remain disabled while the dialog can be used for read-only inspection.
 
 ## Vibe-Trading Inspired Read Models
 
@@ -95,6 +118,12 @@ New audit events are forward-only rows in `strategy_audit_events` after migratio
 Migration `20260711_0016` adds `trade_action_intents` for public/scheduler action idempotency and 1:N child `order_intents` for individual broker mutations. Standalone order actions still receive a one-child parent so all writes share the same recovery model. A broker call is made only after its child intent is durable. Unknown outcomes remain blocked and are reconciled from broker order history using the deterministic `st:<16-hex>` remark marker; callers must not retry with a new key. The trading-ledger module owns the local order, execution-summary, audit, and intent transaction so a local audit failure cannot be reported as a safe-to-retry broker failure.
 
 Public broker-mutation routes require `Idempotency-Key`. Replaying the same payload returns the original status/body; reusing a key for another payload or retrying an unresolved outcome returns a structured `409`. Read-only child intent state is exposed under `/ops/trading-intents`; parent multi-leg action state is exposed under `/ops/trade-actions`.
+
+Migration `20261002_0017` persists the start/end of complete broker-history reads. Old zero-match counts without that evidence cannot authorize a no-order resolution. History is requested from the earliest unresolved intent rather than a fixed lookback, and a saturated broker response fails closed. Imported or refreshed U.S. option orders derive contract metadata from the shared option-symbol parser.
+
+Advisor response recording uses one repository transaction for proposals, reviews, policy signals, durable audit events, and the advisor run state. A run row lock serializes simultaneous Record Output requests; matching retries return the existing downstream records, while mismatched payloads or run ownership are rejected. Other strategy CRUD commands do not provide an alternate non-atomic advisor intake path.
+
+Scheduler task acquisition errors skip the task instead of granting a lease. Concurrent first creation of a lease state row is retried after rollback, then evaluated against the committed owner. The scheduling interval decision uses a broker/account/mode/status-scoped existence query rather than materializing order history.
 
 ## Manual Recovery Boundary
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -46,12 +46,129 @@ def build_mock_watchlists(symbol: str = MOCK_SYMBOL) -> list[dict[str, Any]]:
         {
             "id": "mock-watchlist-1",
             "name": "core-us",
+            "description": "Mock research universe",
+            "is_default": True,
             "items": [
-                {"symbol": symbol, "asset_type": "stock", "notes": "ui regression seed"},
-                {"symbol": "UNH.US", "asset_type": "stock", "notes": "real paper validation symbol"},
+                {
+                    "id": "mock-watchlist-item-1",
+                    "symbol": symbol,
+                    "asset_type": "stock",
+                    "notes": "ui regression seed",
+                },
+                {
+                    "id": "mock-watchlist-item-2",
+                    "symbol": "UNH.US",
+                    "asset_type": "stock",
+                    "notes": "real paper validation symbol",
+                },
             ],
         }
     ]
+
+
+def build_mock_research_universe(
+    account_id: str = MOCK_ACCOUNT_ID,
+    watchlist_id: str = "mock-watchlist-1",
+) -> dict[str, Any]:
+    mock_quote = build_mock_quote(MOCK_SYMBOL)
+    mock_quote["data_quality"] = "live"
+    qqq_quote = build_mock_quote("QQQ.US")
+    qqq_quote.update({"last_done": "510.00", "prev_close": "505.00", "open": "506.00", "data_quality": "live"})
+    return {
+        "mode": "paper",
+        "external_account_id": account_id,
+        "watchlist_id": watchlist_id,
+        "generated_at": iso_now(),
+        "data_quality": "live",
+        "rows": [
+            {
+                "symbol": MOCK_SYMBOL,
+                "asset_type": "stock",
+                "sources": ["watchlist", "position"],
+                "notes": "ui regression seed",
+                "position_quantity": "10",
+                "position_market_value": "4000.00",
+                "quote": mock_quote,
+                "next_event": {
+                    "event_type": "earnings",
+                    "title": "Mock earnings window",
+                    "scheduled_at": "2026-06-12T20:00:00Z",
+                },
+                "strategy_states": ["covered_call_active"],
+                "warnings": [],
+            },
+            {
+                "symbol": "QQQ.US",
+                "asset_type": "etf",
+                "sources": ["bull_put_pool", "zero_dte_pool"],
+                "notes": "strategy research seed",
+                "position_quantity": None,
+                "position_market_value": None,
+                "quote": qqq_quote,
+                "next_event": None,
+                "strategy_states": ["bull_put_ready", "zero_dte_preview_only"],
+                "warnings": [],
+            },
+        ],
+        "warnings": [],
+    }
+
+
+def build_mock_research_technicals(symbols: list[str]) -> dict[str, Any]:
+    results = []
+    for index, symbol in enumerate(symbols):
+        results.append(
+            {
+                "symbol": symbol.upper(),
+                "status": "ok",
+                "warning": None,
+                "latest_bar_at": "2026-06-10T20:00:00Z",
+                "return_20d_pct": 4.2 - index,
+                "return_60d_pct": 9.8 - index,
+                "sma20": str(395 + index * 100),
+                "sma50": str(388 + index * 100),
+                "close_above_sma20": True,
+                "sma20_above_sma50": True,
+                "realized_volatility_20d_pct": 22.4 + index,
+                "average_volume_20d": 1_250_000 + index * 100_000,
+                "average_turnover_20d": str(500_000_000 + index * 50_000_000),
+            }
+        )
+    return {"mode": "paper", "generated_at": iso_now(), "results": results}
+
+
+def build_mock_research_history(symbol: str, range_value: str) -> dict[str, Any]:
+    count = {"3m": 66, "6m": 132, "1y": 252}[range_value]
+    start = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    bars = []
+    closes: list[float] = []
+    for index in range(count):
+        close = 380.0 + index * 0.35
+        closes.append(close)
+        sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
+        sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
+        timestamp = start + timedelta(days=index)
+        bars.append(
+            {
+                "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+                "open": f"{close - 0.8:.2f}",
+                "high": f"{close + 1.2:.2f}",
+                "low": f"{close - 1.5:.2f}",
+                "close": f"{close:.2f}",
+                "volume": 1_000_000 + index * 1_000,
+                "turnover": f"{close * (1_000_000 + index * 1_000):.2f}",
+                "sma20": f"{sma20:.2f}" if sma20 is not None else None,
+                "sma50": f"{sma50:.2f}" if sma50 is not None else None,
+            }
+        )
+    return {
+        "symbol": symbol.upper(),
+        "range": range_value,
+        "mode": "paper",
+        "generated_at": iso_now(),
+        "bars": bars,
+        "warnings": [],
+    }
 
 
 def build_mock_configuration() -> dict[str, bool]:

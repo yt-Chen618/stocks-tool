@@ -1,10 +1,15 @@
+import hashlib
+import json
+from collections import Counter
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import (
     BrokerAccountRecord,
+    StrategyAuditEventRecord,
     StrategyAdvisorRunRecord,
     StrategyProposalRecord,
     StrategyReviewRecord,
@@ -12,6 +17,7 @@ from stocks_tool.db.models import (
     StrategySignalRecord,
 )
 from stocks_tool.domain.enums import (
+    ExecutionMode,
     StrategyProposalStatus,
     StrategyAdvisorRunStatus,
     StrategyReviewStatus,
@@ -19,6 +25,7 @@ from stocks_tool.domain.enums import (
     StrategySignalType,
 )
 from stocks_tool.domain.models import (
+    CreateStrategyAuditEventRequest,
     CreateStrategyProposalRequest,
     CreateStrategyAdvisorRunRequest,
     CreateStrategyReviewRequest,
@@ -30,6 +37,9 @@ from stocks_tool.domain.models import (
     StrategyRun,
     StrategySignal,
 )
+from stocks_tool.repositories.sqlalchemy_strategy_audit_event_repository import (
+    SQLAlchemyStrategyAuditEventRepository,
+)
 from stocks_tool.ports.repository import StrategyExperimentRepository
 
 
@@ -38,26 +48,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         self.session = session
 
     def create_proposal(self, request: CreateStrategyProposalRequest) -> StrategyProposal:
-        proposal = StrategyProposal(
-            strategy_id=request.strategy_id.strip(),
-            external_account_id=request.external_account_id.strip(),
-            mode=request.mode,
-            symbol=request.symbol.strip().upper() if request.symbol else None,
-            title=request.title.strip(),
-            proposed_action=request.proposed_action.strip(),
-            thesis=request.thesis.strip() if request.thesis else None,
-            rationale=request.rationale.strip(),
-            confidence=request.confidence,
-            expected_max_loss=request.expected_max_loss,
-            expected_max_profit=request.expected_max_profit,
-            approval_required=request.approval_required,
-            expires_at=request.expires_at,
-            source=request.source.strip() if request.source else None,
-            source_run_id=request.source_run_id,
-            candidate_payload=request.candidate_payload,
-            risk_payload=request.risk_payload,
-            checks=[check.strip() for check in request.checks if check.strip()],
-        )
+        proposal = self._proposal_from_request(request)
         record = StrategyProposalRecord(id=proposal.id)
         self.session.add(record)
         self._apply_proposal(record, proposal)
@@ -158,6 +149,27 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyRunRecord.strategy_id == strategy_id)
         return [self._to_run(record) for record in self.session.execute(query).scalars().all()]
 
+    def get_latest_run_for_proposal(
+        self,
+        *,
+        proposal_id: str,
+        strategy_id: str,
+        run_types: set[str],
+    ) -> StrategyRun | None:
+        """Return the latest matching run for one proposal exactly."""
+        query = (
+            select(StrategyRunRecord)
+            .where(
+                StrategyRunRecord.proposal_id == proposal_id,
+                StrategyRunRecord.strategy_id == strategy_id,
+                StrategyRunRecord.run_type.in_(sorted(run_types)),
+            )
+            .order_by(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc())
+            .limit(1)
+        )
+        record = self.session.execute(query).scalar_one_or_none()
+        return self._to_run(record) if record is not None else None
+
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         signal = StrategySignal(
             strategy_id=request.strategy_id.strip(),
@@ -200,23 +212,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         return [self._to_signal(record) for record in self.session.execute(query).scalars().all()]
 
     def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:
-        review = StrategyReview(
-            strategy_id=request.strategy_id.strip(),
-            external_account_id=request.external_account_id.strip(),
-            mode=request.mode,
-            review_type=request.review_type.strip(),
-            status=request.status,
-            summary=request.summary.strip(),
-            recommendation=request.recommendation.strip() if request.recommendation else None,
-            parameter_name=request.parameter_name.strip() if request.parameter_name else None,
-            current_value=request.current_value.strip() if request.current_value else None,
-            suggested_value=request.suggested_value.strip() if request.suggested_value else None,
-            run_id=request.run_id,
-            proposal_id=request.proposal_id,
-            journal_entry_id=request.journal_entry_id,
-            metrics_payload=request.metrics_payload,
-            reviewed_at=request.reviewed_at or datetime.now(timezone.utc),
-        )
+        review = self._review_from_request(request)
         record = StrategyReviewRecord(id=review.id)
         self.session.add(record)
         self._apply_review(record, review)
@@ -275,6 +271,406 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         self.session.commit()
         self.session.refresh(record)
         return self._to_advisor_run(record)
+
+    def record_advisor_intake(
+        self,
+        *,
+        external_account_id: str,
+        source: str,
+        mode: ExecutionMode,
+        advisor_run_id: str | None,
+        proposal_requests: list[CreateStrategyProposalRequest],
+        review_requests: list[CreateStrategyReviewRequest],
+        response_payload: dict,
+        recorded_at: datetime,
+    ) -> tuple[list[StrategyProposal], list[StrategyReview], StrategyAdvisorRun | None]:
+        """Persist one advisor response and its policy evidence atomically.
+
+        The normal create methods intentionally remain small CRUD commands for
+        the other strategy workflows.  Advisor recording needs a stronger
+        boundary: the run is locked, all downstream records are inserted, and
+        the run is marked recorded only by one transaction.  The fingerprint
+        is kept in the existing JSON response payload so this does not require
+        a schema migration.
+        """
+        if self.session.new or self.session.dirty or self.session.deleted:
+            raise RuntimeError(
+                "Advisor intake requires a clean SQLAlchemy session before its atomic write boundary."
+            )
+        if self.session.in_transaction():
+            # The intake service reads its context before entering this write
+            # boundary.  Those reads have opened an implicit transaction; no
+            # writes are allowed to cross into the batch transaction.
+            self.session.rollback()
+
+        fingerprint = self._advisor_response_fingerprint(response_payload)
+        proposal_records: list[StrategyProposalRecord] = []
+        review_records: list[StrategyReviewRecord] = []
+        proposal_models: list[StrategyProposal] = []
+
+        try:
+            with self.session.begin():
+                advisor_run_record = None
+                if advisor_run_id is not None:
+                    advisor_run_record = self.session.execute(
+                        select(StrategyAdvisorRunRecord)
+                        .where(StrategyAdvisorRunRecord.id == advisor_run_id)
+                        .with_for_update()
+                    ).scalar_one_or_none()
+                    if advisor_run_record is None:
+                        raise LookupError(f"Advisor run '{advisor_run_id}' was not found.")
+                    self._validate_advisor_run_for_intake(
+                        advisor_run_record,
+                        external_account_id=external_account_id,
+                        source=source,
+                        mode=mode,
+                        fingerprint=fingerprint,
+                    )
+
+                    if advisor_run_record.status == StrategyAdvisorRunStatus.RECORDED.value:
+                        expected_proposal_count = self._advisor_record_count(
+                            response_payload,
+                            "proposals",
+                            fallback=advisor_run_record.proposal_count,
+                        )
+                        expected_review_count = self._advisor_record_count(
+                            response_payload,
+                            "reviews",
+                            fallback=advisor_run_record.review_count,
+                        )
+                        expected_proposal_strategies = self._advisor_record_strategies(
+                            response_payload,
+                            "proposals",
+                        )
+                        expected_review_strategies = self._advisor_record_strategies(
+                            response_payload,
+                            "reviews",
+                        )
+                        proposals = self._existing_advisor_proposals(
+                            advisor_run_id,
+                            external_account_id=external_account_id,
+                            mode=mode,
+                        )
+                        reviews = self._existing_advisor_reviews(
+                            advisor_run_id,
+                            external_account_id=external_account_id,
+                            mode=mode,
+                            strategy_ids=expected_review_strategies,
+                        )
+                        self._assert_replay_records_complete(
+                            advisor_run_id,
+                            records=proposals,
+                            expected_count=expected_proposal_count,
+                            expected_strategies=expected_proposal_strategies,
+                            record_type="proposal",
+                        )
+                        self._assert_replay_records_complete(
+                            advisor_run_id,
+                            records=reviews,
+                            expected_count=expected_review_count,
+                            expected_strategies=expected_review_strategies,
+                            record_type="review",
+                        )
+                        return (
+                            proposals,
+                            reviews,
+                            self._to_advisor_run(advisor_run_record),
+                        )
+
+                for request in proposal_requests:
+                    proposal = self._proposal_from_request(request)
+                    record = StrategyProposalRecord(id=proposal.id)
+                    self.session.add(record)
+                    self._apply_proposal(record, proposal)
+                    proposal_records.append(record)
+                    proposal_models.append(proposal)
+
+                for request in review_requests:
+                    review = self._review_from_request(request)
+                    record = StrategyReviewRecord(id=review.id)
+                    self.session.add(record)
+                    self._apply_review(record, review)
+                    review_records.append(record)
+
+                # proposal/review records use server-side timestamps.  Flush
+                # before creating linked policy evidence and before converting
+                # the records back to domain models.
+                self.session.flush()
+
+                audit_repository = SQLAlchemyStrategyAuditEventRepository(self.session)
+                for proposal in proposal_models:
+                    signal = self._advisor_policy_signal(
+                        proposal,
+                        advisor_run_id=advisor_run_id,
+                    )
+                    signal_record = StrategySignalRecord(id=signal.id)
+                    self.session.add(signal_record)
+                    self._apply_signal(signal_record, signal)
+                    audit_request = CreateStrategyAuditEventRequest(
+                        external_account_id=proposal.external_account_id,
+                        mode=proposal.mode,
+                        actor="advisor",
+                        source="strategy_policy",
+                        strategy=proposal.strategy_id,
+                        action="advisor_proposal_recorded",
+                        proposal_id=proposal.id,
+                        run_id=advisor_run_id,
+                        summary="Advisor-sourced strategy proposal recorded as read-only advice.",
+                        detail="Local deterministic checks and manual approval are still required before execution.",
+                        payload={
+                            "signal_id": signal.id,
+                            "advisor_source": self._normalized_source(proposal.source),
+                            "llm_direct_execution_allowed": False,
+                            "approval_required": proposal.approval_required,
+                        },
+                    )
+                    audit_record = StrategyAuditEventRecord(id=audit_request.id or str(uuid4()))
+                    self.session.add(audit_record)
+                    audit_repository._apply_request(audit_record, audit_request)
+
+                advisor_run = None
+                if advisor_run_record is not None:
+                    advisor_run_record.status = StrategyAdvisorRunStatus.RECORDED.value
+                    advisor_run_record.recorded_at = recorded_at
+                    advisor_run_record.proposal_count = len(proposal_records)
+                    advisor_run_record.review_count = len(review_records)
+                    advisor_run_record.response_payload = self._with_advisor_fingerprint(
+                        response_payload,
+                        fingerprint,
+                    )
+                    run_audit_request = CreateStrategyAuditEventRequest(
+                        external_account_id=external_account_id,
+                        mode=mode,
+                        actor="advisor",
+                        source=source,
+                        strategy="strategy_advisor",
+                        action="advisor_run_card_recorded",
+                        run_id=advisor_run_id,
+                        summary=(
+                            f"Advisor run recorded with {len(proposal_records)} proposal(s) "
+                            f"and {len(review_records)} review(s)."
+                        ),
+                        payload={
+                            "status": StrategyAdvisorRunStatus.RECORDED.value,
+                            "proposal_count": len(proposal_records),
+                            "review_count": len(review_records),
+                        },
+                    )
+                    run_audit_record = StrategyAuditEventRecord(
+                        id=run_audit_request.id or str(uuid4())
+                    )
+                    self.session.add(run_audit_record)
+                    audit_repository._apply_request(run_audit_record, run_audit_request)
+
+                self.session.flush()
+
+                proposals = [self._to_proposal(record) for record in proposal_records]
+                reviews = [self._to_review(record) for record in review_records]
+                if advisor_run_record is not None:
+                    advisor_run = self._to_advisor_run(advisor_run_record)
+                return proposals, reviews, advisor_run
+        except Exception:
+            self.session.rollback()
+            raise
+
+    @staticmethod
+    def _proposal_from_request(request: CreateStrategyProposalRequest) -> StrategyProposal:
+        return StrategyProposal(
+            strategy_id=request.strategy_id.strip(),
+            external_account_id=request.external_account_id.strip(),
+            mode=request.mode,
+            symbol=request.symbol.strip().upper() if request.symbol else None,
+            title=request.title.strip(),
+            proposed_action=request.proposed_action.strip(),
+            thesis=request.thesis.strip() if request.thesis else None,
+            rationale=request.rationale.strip(),
+            confidence=request.confidence,
+            expected_max_loss=request.expected_max_loss,
+            expected_max_profit=request.expected_max_profit,
+            approval_required=request.approval_required,
+            expires_at=request.expires_at,
+            source=request.source.strip() if request.source else None,
+            source_run_id=request.source_run_id,
+            candidate_payload=request.candidate_payload,
+            risk_payload=request.risk_payload,
+            checks=[check.strip() for check in request.checks if check.strip()],
+        )
+
+    @staticmethod
+    def _review_from_request(request: CreateStrategyReviewRequest) -> StrategyReview:
+        return StrategyReview(
+            strategy_id=request.strategy_id.strip(),
+            external_account_id=request.external_account_id.strip(),
+            mode=request.mode,
+            review_type=request.review_type.strip(),
+            status=request.status,
+            summary=request.summary.strip(),
+            recommendation=request.recommendation.strip() if request.recommendation else None,
+            parameter_name=request.parameter_name.strip() if request.parameter_name else None,
+            current_value=request.current_value.strip() if request.current_value else None,
+            suggested_value=request.suggested_value.strip() if request.suggested_value else None,
+            run_id=request.run_id,
+            proposal_id=request.proposal_id,
+            journal_entry_id=request.journal_entry_id,
+            metrics_payload=request.metrics_payload,
+            reviewed_at=request.reviewed_at or datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _advisor_policy_signal(
+        proposal: StrategyProposal,
+        *,
+        advisor_run_id: str | None,
+    ) -> StrategySignal:
+        return StrategySignal(
+            strategy_id=proposal.strategy_id,
+            external_account_id=proposal.external_account_id,
+            mode=proposal.mode,
+            signal_type=StrategySignalType.REVIEW,
+            symbol=proposal.symbol,
+            run_id=advisor_run_id,
+            proposal_id=proposal.id,
+            summary="Advisor-sourced strategy proposal recorded as read-only advice.",
+            detail="Local deterministic checks and manual approval are still required before execution.",
+            source="strategy_policy",
+            signal_payload={
+                "audit_event": "advisor_proposal_recorded",
+                "advisor_source": proposal.source.strip().lower() if proposal.source else None,
+                "advisor_run_id": advisor_run_id,
+                "llm_direct_execution_allowed": False,
+                "approval_required": proposal.approval_required,
+                "proposed_action": proposal.proposed_action,
+                "checks": proposal.checks,
+            },
+        )
+
+    @staticmethod
+    def _normalized_source(source: str | None) -> str | None:
+        return source.strip().lower() if source is not None else None
+
+    @classmethod
+    def _advisor_response_fingerprint(cls, response_payload: dict) -> str:
+        payload = dict(response_payload)
+        payload.pop("_recording_fingerprint", None)
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _with_advisor_fingerprint(response_payload: dict, fingerprint: str) -> dict:
+        payload = dict(response_payload)
+        payload["_recording_fingerprint"] = fingerprint
+        return payload
+
+    def _validate_advisor_run_for_intake(
+        self,
+        record: StrategyAdvisorRunRecord,
+        *,
+        external_account_id: str,
+        source: str,
+        mode: ExecutionMode,
+        fingerprint: str,
+    ) -> None:
+        if record.external_account_id != external_account_id:
+            raise ValueError("Advisor run belongs to a different broker account.")
+        if record.source.strip().lower() != source.strip().lower():
+            raise ValueError("Advisor run source does not match the response source.")
+        if record.execution_mode != mode.value:
+            raise ValueError("Advisor run mode does not match the response mode.")
+        if record.status not in {
+            StrategyAdvisorRunStatus.SUCCEEDED.value,
+            StrategyAdvisorRunStatus.RECORDED.value,
+        }:
+            raise ValueError(
+                f"Advisor run '{record.id}' cannot record a response from state '{record.status}'."
+            )
+
+        stored_payload = dict(record.response_payload or {})
+        stored_fingerprint = stored_payload.get("_recording_fingerprint")
+        if stored_fingerprint is None and stored_payload:
+            stored_fingerprint = self._advisor_response_fingerprint(stored_payload)
+        if stored_fingerprint is not None and stored_fingerprint != fingerprint:
+            raise ValueError(
+                f"Advisor run '{record.id}' was already associated with a different response payload."
+            )
+
+    @staticmethod
+    def _advisor_record_count(payload: dict, key: str, *, fallback: int) -> int:
+        records = payload.get(key)
+        return len(records) if isinstance(records, list) else fallback
+
+    @staticmethod
+    def _advisor_record_strategies(payload: dict, key: str) -> Counter[str]:
+        records = payload.get(key)
+        if not isinstance(records, list):
+            return Counter()
+        return Counter(
+            str(record.get("strategy_id"))
+            for record in records
+            if isinstance(record, dict) and record.get("strategy_id")
+        )
+
+    @staticmethod
+    def _assert_replay_records_complete(
+        advisor_run_id: str,
+        *,
+        records: list[StrategyProposal] | list[StrategyReview],
+        expected_count: int,
+        expected_strategies: Counter[str],
+        record_type: str,
+    ) -> None:
+        actual_strategies = Counter(record.strategy_id for record in records)
+        if len(records) != expected_count or (
+            expected_strategies and actual_strategies != expected_strategies
+        ):
+            raise ValueError(
+                f"Advisor run '{advisor_run_id}' replay could not recover its complete "
+                f"{record_type} set (expected {expected_count}, found {len(records)})."
+            )
+
+    def _existing_advisor_proposals(
+        self,
+        advisor_run_id: str,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+    ) -> list[StrategyProposal]:
+        query = (
+            select(StrategyProposalRecord)
+            .where(
+                StrategyProposalRecord.source_run_id == advisor_run_id,
+                StrategyProposalRecord.external_account_id == external_account_id,
+                StrategyProposalRecord.execution_mode == mode.value,
+            )
+            .order_by(StrategyProposalRecord.created_at.asc(), StrategyProposalRecord.id.asc())
+        )
+        return [self._to_proposal(record) for record in self.session.execute(query).scalars().all()]
+
+    def _existing_advisor_reviews(
+        self,
+        advisor_run_id: str,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        strategy_ids: Counter[str],
+    ) -> list[StrategyReview]:
+        query = (
+            select(StrategyReviewRecord)
+            .where(
+                StrategyReviewRecord.external_account_id == external_account_id,
+                StrategyReviewRecord.execution_mode == mode.value,
+            )
+            .order_by(StrategyReviewRecord.created_at.asc(), StrategyReviewRecord.id.asc())
+        )
+        records: list[StrategyReview] = []
+        for record in self.session.execute(query).scalars().all():
+            metadata = record.metrics_payload if isinstance(record.metrics_payload, dict) else {}
+            linked_run_id = record.run_id or metadata.get("advisor_run_id")
+            if linked_run_id != advisor_run_id:
+                continue
+            if strategy_ids and record.strategy_id not in strategy_ids:
+                continue
+            records.append(self._to_review(record))
+        return records
 
     def update_advisor_run_response_payload(
         self,

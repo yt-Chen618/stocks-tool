@@ -39,8 +39,12 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
             query = query.where(BullPutSpreadRecord.external_account_id == external_account_id)
         if status is not None:
             query = query.where(BullPutSpreadRecord.status == status.value)
-        records = self.session.execute(query).scalars().all()
-        return [self._to_domain(record) for record in records]
+        try:
+            records = self.session.execute(query).scalars().all()
+            return [self._to_domain(record) for record in records]
+        except Exception:
+            self.session.rollback()
+            raise
 
     def update_spread(
         self,

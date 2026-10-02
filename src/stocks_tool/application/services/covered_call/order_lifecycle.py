@@ -67,6 +67,11 @@ def validate_roll_buyback_order(
         raise ValueError("Roll buyback order does not match the current short call symbol.")
     if buyback_order.side != OrderSide.BUY:
         raise ValueError("Roll buyback order must be a buy-to-close order.")
+    _validate_contract_quantity(
+        order=buyback_order,
+        expected_contracts=roll_from.contracts,
+        description="Roll buyback order",
+    )
 
 
 def validate_roll_sell_order(
@@ -83,6 +88,11 @@ def validate_roll_sell_order(
         raise ValueError("Roll sell order does not match the new short call symbol.")
     if sell_order.side != OrderSide.SELL:
         raise ValueError("Roll sell order must be a sell-to-open order.")
+    _validate_contract_quantity(
+        order=sell_order,
+        expected_contracts=roll_to.contracts,
+        description="Roll sell order",
+    )
 
 
 def validate_open_sell_order(
@@ -99,6 +109,11 @@ def validate_open_sell_order(
         raise ValueError("Covered call sell order does not match the proposed short call symbol.")
     if sell_order.side != OrderSide.SELL:
         raise ValueError("Covered call sell order must be a sell-to-open order.")
+    _validate_contract_quantity(
+        order=sell_order,
+        expected_contracts=candidate.contracts,
+        description="Covered call sell order",
+    )
 
 
 def validate_close_order(
@@ -115,6 +130,24 @@ def validate_close_order(
         raise ValueError("Covered call close order does not match the current short call symbol.")
     if close_order.side != OrderSide.BUY:
         raise ValueError("Covered call close order must be a buy-to-close order.")
+    _validate_contract_quantity(
+        order=close_order,
+        expected_contracts=candidate.contracts,
+        description="Covered call close order",
+    )
+
+
+def _validate_contract_quantity(
+    *,
+    order: Order,
+    expected_contracts: int,
+    description: str,
+) -> None:
+    if order.quantity != expected_contracts:
+        raise ValueError(
+            f"{description} quantity {order.quantity} does not match expected "
+            f"contract quantity {expected_contracts}."
+        )
 
 
 def order_filled(order: Order | None) -> bool:
@@ -130,6 +163,21 @@ def latest_runs_by_proposal(runs: list[object], run_types: set[str]) -> dict[str
             continue
         latest[proposal_id] = run
     return latest
+
+
+def roll_order_ids_from_run(run: object) -> tuple[str | None, str | None]:
+    """Return the persisted buyback and sell order ids for one roll run."""
+    metrics = getattr(run, "metrics_payload", None)
+    metrics = metrics if isinstance(metrics, dict) else {}
+    buyback_order_id = metrics.get("buyback_order_id")
+    sell_order_id = metrics.get("sell_order_id")
+    buyback_order_id = str(buyback_order_id) if buyback_order_id else None
+    sell_order_id = str(sell_order_id) if sell_order_id else None
+    run_order_id = getattr(run, "order_id", None)
+    run_order_id = str(run_order_id) if run_order_id else None
+    if buyback_order_id is None and sell_order_id is None:
+        buyback_order_id = run_order_id
+    return buyback_order_id, sell_order_id
 
 
 def optional_decimal(value) -> Decimal | None:

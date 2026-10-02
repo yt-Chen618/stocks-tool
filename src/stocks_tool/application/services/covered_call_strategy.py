@@ -27,6 +27,7 @@ from stocks_tool.application.services.covered_call.order_lifecycle import (
     order_filled as covered_call_order_filled,
     order_timing_payload as covered_call_order_timing_payload,
     reference_time as covered_call_reference_time,
+    roll_order_ids_from_run as covered_call_roll_order_ids_from_run,
     validate_close_order as validate_covered_call_close_order,
     validate_open_sell_order as validate_covered_call_open_sell_order,
     validate_roll_buyback_order as validate_covered_call_roll_buyback_order,
@@ -1268,6 +1269,11 @@ class CoveredCallStrategyService:
             roll_from, roll_to = self._parse_roll_payload(
                 proposal.candidate_payload,
                 proposal_id=proposal_id,
+            )
+            self._validate_roll_order_provenance(
+                proposal=proposal,
+                buyback_order_id=request.buyback_order_id,
+                sell_order_id=request.sell_order_id,
             )
             buyback_order = self.order_service.refresh_order(request.buyback_order_id)
             self._validate_roll_buyback_order(
@@ -2605,6 +2611,42 @@ class CoveredCallStrategyService:
             proposal=proposal,
             roll_from=roll_from,
         )
+
+    def _validate_roll_order_provenance(
+        self,
+        *,
+        proposal: StrategyProposal,
+        buyback_order_id: str,
+        sell_order_id: str | None,
+    ) -> None:
+        latest_roll_run = self.experiments.get_latest_run_for_proposal(
+            proposal_id=proposal.id,
+            strategy_id=self.strategy_id,
+            run_types={"roll_execution", "roll_continuation"},
+        )
+        if latest_roll_run is None:
+            raise ValueError(
+                f"Covered call roll proposal '{proposal.id}' has no persisted lifecycle run "
+                "to establish order provenance."
+            )
+        linked_buyback_order_id, linked_sell_order_id = covered_call_roll_order_ids_from_run(
+            latest_roll_run
+        )
+        if linked_sell_order_id is not None and sell_order_id is None:
+            raise ValueError(
+                f"Covered call roll proposal '{proposal.id}' already has linked sell order "
+                f"'{linked_sell_order_id}'; provide that order id for continuation."
+            )
+        if buyback_order_id != linked_buyback_order_id:
+            raise ValueError(
+                f"Buyback order '{buyback_order_id}' is not linked to covered call roll proposal "
+                f"'{proposal.id}'."
+            )
+        if sell_order_id is not None and sell_order_id != linked_sell_order_id:
+            raise ValueError(
+                f"Sell order '{sell_order_id}' is not linked to covered call roll proposal "
+                f"'{proposal.id}'."
+            )
 
     def _validate_roll_sell_order(
         self,

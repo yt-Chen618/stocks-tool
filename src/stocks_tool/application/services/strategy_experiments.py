@@ -365,6 +365,20 @@ class StrategyExperimentService:
             limit=limit,
         )
 
+    def get_latest_run_for_proposal(
+        self,
+        *,
+        proposal_id: str,
+        strategy_id: str,
+        run_types: set[str],
+    ) -> StrategyRun | None:
+        """Read one exact proposal-linked run for lifecycle decisions."""
+        return self.experiments.get_latest_run_for_proposal(
+            proposal_id=proposal_id,
+            strategy_id=strategy_id,
+            run_types=run_types,
+        )
+
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         self._ensure_account(request.external_account_id)
         return self.experiments.create_signal(request)
@@ -387,6 +401,36 @@ class StrategyExperimentService:
     def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:
         self._ensure_account(request.external_account_id)
         return self.experiments.create_review(request)
+
+    def record_advisor_response(
+        self,
+        *,
+        external_account_id: str,
+        source: str,
+        mode: ExecutionMode,
+        advisor_run_id: str | None,
+        proposal_requests: list[CreateStrategyProposalRequest],
+        review_requests: list[CreateStrategyReviewRequest],
+        response_payload: dict,
+        recorded_at: datetime,
+    ) -> tuple[list[StrategyProposal], list[StrategyReview], StrategyAdvisorRun | None]:
+        """Record advisor downstream rows through one repository transaction."""
+        self._ensure_account(external_account_id)
+        if mode != ExecutionMode.PAPER:
+            raise ValueError("Advisor responses can only be recorded in paper mode.")
+        normalized_source = source.strip().lower()
+        if normalized_source not in self.advisor_sources:
+            raise ValueError(f"Advisor source '{source}' is not recognized.")
+        return self.experiments.record_advisor_intake(
+            external_account_id=external_account_id,
+            source=normalized_source,
+            mode=mode,
+            advisor_run_id=advisor_run_id,
+            proposal_requests=proposal_requests,
+            review_requests=review_requests,
+            response_payload=response_payload,
+            recorded_at=recorded_at,
+        )
 
     def list_reviews(
         self,

@@ -184,7 +184,12 @@ def record_strategy_advisor_response(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = str(exc)
+        status_code = 409 if any(
+            phrase in detail
+            for phrase in ("different response payload", "replay could not recover")
+        ) else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 def _advisor_run_request_from_payload(

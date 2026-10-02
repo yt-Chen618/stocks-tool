@@ -1,7 +1,8 @@
+from collections.abc import Collection
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session, selectinload
 
 from stocks_tool.db.models import BrokerAccountRecord, OrderRecord
@@ -83,6 +84,31 @@ class SQLAlchemyOrderRepository(OrderRepository):
             query = query.where(OrderRecord.status == status.value)
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
+
+    def has_working_orders(
+        self,
+        external_account_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+        statuses: Collection[OrderStatus],
+    ) -> bool:
+        """Check for a matching order without materializing the order history."""
+        matching_orders = (
+            select(OrderRecord.id)
+            .join(BrokerAccountRecord, OrderRecord.broker_account_id == BrokerAccountRecord.id)
+            .where(BrokerAccountRecord.external_account_id == external_account_id)
+        )
+        matching_orders = matching_orders.where(
+            BrokerAccountRecord.broker == broker.value,
+            OrderRecord.execution_mode == mode.value,
+        )
+        status_values = [value.value for value in statuses]
+        if not status_values:
+            return False
+        matching_orders = matching_orders.where(OrderRecord.status.in_(status_values))
+        query = select(exists(matching_orders))
+        return bool(self.session.execute(query).scalar_one())
 
     def update_order(self, order: Order) -> Order:
         record = self.session.get(OrderRecord, order.id)

@@ -52,6 +52,15 @@ def compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
 
 
 NOW = datetime(2026, 7, 11, 14, 30, tzinfo=timezone.utc)
+COVERAGE_START = datetime(2000, 1, 1, tzinfo=timezone.utc)
+COVERAGE_END = datetime(2100, 1, 1, tzinfo=timezone.utc)
+
+
+def coverage_kwargs() -> dict[str, datetime]:
+    return {
+        "reconciliation_coverage_start_at": COVERAGE_START,
+        "reconciliation_coverage_end_at": COVERAGE_END,
+    }
 
 
 @pytest.fixture
@@ -355,12 +364,16 @@ def test_no_order_resolution_requires_three_zero_matches_spanning_sixty_seconds(
         prepared.intent.id,
         "zero matches",
         zero_match=True,
+        reconciliation_coverage_start_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        reconciliation_coverage_end_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
     )
     FakeDateTime.current = NOW + timedelta(seconds=30)
     ledger.record_reconciliation_attempt(
         prepared.intent.id,
         "zero matches",
         zero_match=True,
+        reconciliation_coverage_start_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        reconciliation_coverage_end_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
     )
     with pytest.raises(ValueError, match="three successful"):
         ledger.resolve_no_order(prepared.intent.id, actor="local_operator")
@@ -370,6 +383,8 @@ def test_no_order_resolution_requires_three_zero_matches_spanning_sixty_seconds(
         prepared.intent.id,
         "zero matches",
         zero_match=True,
+        reconciliation_coverage_start_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        reconciliation_coverage_end_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
     )
     resolved = ledger.resolve_no_order(
         prepared.intent.id,
@@ -380,6 +395,74 @@ def test_no_order_resolution_requires_three_zero_matches_spanning_sixty_seconds(
     assert resolved.state == TradingIntentState.RESOLVED_NO_ORDER
     assert resolved.reconciliation_attempts == 3
     assert resolved.response_payload["actor"] == "local_operator"
+
+
+def test_no_order_resolution_rejects_legacy_zero_match_counts_without_coverage(
+    session: Session,
+) -> None:
+    ledger = SQLAlchemyTradingIntentLedger(session)
+    prepared = prepare(ledger, key="strategy-order-key-legacy-coverage")
+    ledger.mark_submitting(prepared.intent.id)
+    record = session.get(OrderIntentRecord, prepared.intent.id)
+    assert record is not None
+    record.reconciliation_attempts = 3
+    record.first_reconciled_at = NOW
+    record.last_reconciled_at = NOW + timedelta(seconds=61)
+    session.commit()
+
+    with pytest.raises(ValueError, match="coverage"):
+        ledger.resolve_no_order(prepared.intent.id, actor="local_operator")
+
+    ledger.record_reconciliation_attempt(
+        prepared.intent.id,
+        "complete history still shows zero matches",
+        zero_match=True,
+        **coverage_kwargs(),
+    )
+    refreshed = ledger.get_intent(prepared.intent.id)
+    assert refreshed is not None
+    assert refreshed.reconciliation_attempts == 1
+
+
+def test_non_zero_reconciliation_invalidates_prior_no_order_evidence(
+    session: Session,
+    monkeypatch,
+) -> None:
+    import stocks_tool.repositories.sqlalchemy_trading_intent_ledger as ledger_module
+
+    ledger = SQLAlchemyTradingIntentLedger(session)
+    prepared = prepare(ledger, key="strategy-order-key-invalidated-evidence")
+    ledger.mark_submitting(prepared.intent.id)
+
+    class FakeDateTime(datetime):
+        current = NOW
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(ledger_module, "datetime", FakeDateTime)
+    for offset in (0, 30, 61):
+        FakeDateTime.current = NOW + timedelta(seconds=offset)
+        ledger.record_reconciliation_attempt(
+            prepared.intent.id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
+
+    ledger.record_reconciliation_attempt(
+        prepared.intent.id,
+        "broker marker fingerprint conflict",
+        zero_match=False,
+    )
+    invalidated = ledger.get_intent(prepared.intent.id)
+    assert invalidated is not None
+    assert invalidated.reconciliation_attempts == 0
+    assert invalidated.reconciliation_coverage_start_at is None
+    assert invalidated.reconciliation_coverage_end_at is None
+    with pytest.raises(ValueError, match="three successful"):
+        ledger.resolve_no_order(prepared.intent.id, actor="local_operator")
 
 
 def test_resolved_no_order_is_terminal_and_known_external_id_cannot_be_resolved(
@@ -402,7 +485,12 @@ def test_resolved_no_order_is_terminal_and_known_external_id_cannot_be_resolved(
     monkeypatch.setattr(ledger_module, "datetime", FakeDateTime)
     for offset in (0, 30, 61):
         FakeDateTime.current = NOW + timedelta(seconds=offset)
-        ledger.record_reconciliation_attempt(prepared.intent.id, "zero matches", zero_match=True)
+        ledger.record_reconciliation_attempt(
+            prepared.intent.id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
     resolved = ledger.resolve_no_order(prepared.intent.id, actor="local_operator")
     after_failure = ledger.record_reconciliation_attempt(
         resolved.id,
@@ -416,7 +504,12 @@ def test_resolved_no_order_is_terminal_and_known_external_id_cannot_be_resolved(
     ledger.mark_broker_acknowledged(second.intent.id, remote_snapshot())
     for offset in (0, 30, 61):
         FakeDateTime.current = NOW + timedelta(seconds=offset)
-        ledger.record_reconciliation_attempt(second.intent.id, "zero matches", zero_match=True)
+        ledger.record_reconciliation_attempt(
+            second.intent.id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
     with pytest.raises(ValueError, match="external order id"):
         ledger.resolve_no_order(second.intent.id, actor="local_operator")
 
@@ -469,6 +562,7 @@ def test_existing_order_mutation_can_be_manually_resolved_when_effect_is_not_obs
             prepared.intent.id,
             "target mutation not observed",
             zero_match=True,
+            **coverage_kwargs(),
         )
 
     resolved = ledger.resolve_no_order(
@@ -505,6 +599,7 @@ def test_resolved_no_order_rejects_late_broker_result_and_emits_critical_audit(
             prepared.intent.id,
             "zero matches",
             zero_match=True,
+            **coverage_kwargs(),
         )
     resolved = ledger.resolve_no_order(
         prepared.intent.id,
@@ -601,7 +696,12 @@ def test_composite_parent_converges_after_all_children_resolve_no_order(
 
     for offset in (0, 30, 61):
         FakeDateTime.current = NOW + timedelta(seconds=offset)
-        ledger.record_reconciliation_attempt(children[0].id, "zero matches", zero_match=True)
+        ledger.record_reconciliation_attempt(
+            children[0].id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
     ledger.resolve_no_order(children[0].id, actor="local_operator", note="long absent")
 
     waiting_parent = ledger.get_action(parent.intent.id)
@@ -614,7 +714,12 @@ def test_composite_parent_converges_after_all_children_resolve_no_order(
 
     for offset in (120, 150, 181):
         FakeDateTime.current = NOW + timedelta(seconds=offset)
-        ledger.record_reconciliation_attempt(children[1].id, "zero matches", zero_match=True)
+        ledger.record_reconciliation_attempt(
+            children[1].id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
     ledger.resolve_no_order(children[1].id, actor="local_operator", note="short absent")
 
     settled_parent = ledger.get_action(parent.intent.id)
@@ -692,7 +797,12 @@ def test_composite_parent_converges_when_sibling_persists_after_no_order_resolut
     monkeypatch.setattr(ledger_module, "datetime", FakeDateTime)
     for offset in (0, 30, 61):
         FakeDateTime.current = NOW + timedelta(seconds=offset)
-        ledger.record_reconciliation_attempt(children[0].id, "zero matches", zero_match=True)
+        ledger.record_reconciliation_attempt(
+            children[0].id,
+            "zero matches",
+            zero_match=True,
+            **coverage_kwargs(),
+        )
     ledger.resolve_no_order(children[0].id, actor="local_operator", note="long absent")
 
     assert ledger.get_action(parent.intent.id).state == TradingIntentState.UNKNOWN

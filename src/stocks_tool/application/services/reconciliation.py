@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 from stocks_tool.adapters.brokers.longbridge import (
@@ -95,6 +96,8 @@ WORKING_ORDER_STATUSES = {
     OrderStatus.SUBMITTED,
     OrderStatus.PARTIALLY_FILLED,
 }
+
+_SCHEDULER_LEASE_UNAVAILABLE = object()
 
 MONITORABLE_SPREAD_STATUSES = (
     SpreadStatus.OPEN,
@@ -220,8 +223,12 @@ class ReconciliationCoordinator:
                     ),
                 )
 
-                account_orders = orders.list_orders(external_account_id=broker_account.external_account_id)
-                has_working_orders = any(order.status in WORKING_ORDER_STATUSES for order in account_orders)
+                has_working_orders = orders.has_working_orders(
+                    external_account_id=broker_account.external_account_id,
+                    broker=broker_account.broker,
+                    mode=ExecutionMode.PAPER,
+                    statuses=WORKING_ORDER_STATUSES,
+                )
                 orders_interval = (
                     self.settings.reconciliation_working_orders_interval_seconds
                     if has_working_orders
@@ -305,12 +312,15 @@ class ReconciliationCoordinator:
                 if self.settings.bull_put_strategy.enabled:
                     if self.settings.bull_put_strategy.auto_monitor_enabled:
                         if bull_put_cycle_ready:
-                            self._monitor_due_spreads(
+                            monitor_ready = self._monitor_due_spreads(
                                 external_account_id=broker_account.external_account_id,
                                 spreads=spreads,
                                 strategy_service=strategy_service,
                                 now=now,
                             )
+                            if not monitor_ready:
+                                bull_put_cycle_ready = False
+                                new_entry_cycle_ready = False
                         else:
                             self._emit_sync_blocked_spread_risk_alert(
                                 external_account_id=broker_account.external_account_id,
@@ -533,6 +543,14 @@ class ReconciliationCoordinator:
             task_label=task_label,
             now=now,
         )
+        if active_lease is _SCHEDULER_LEASE_UNAVAILABLE:
+            self._record_scheduler_lease_unavailable(
+                external_account_id=external_account_id,
+                task_key=task_key,
+                task_label=task_label,
+                now=now,
+            )
+            return False
         if active_lease is not None:
             self._record_scheduler_job_run(
                 external_account_id=external_account_id,
@@ -633,7 +651,7 @@ class ReconciliationCoordinator:
         spreads: SQLAlchemyBullPutSpreadRepository,
         strategy_service: BullPutStrategyService,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         task_key = "bull-put-monitor"
         if self._is_task_backoff_active(
             external_account_id=external_account_id,
@@ -661,13 +679,21 @@ class ReconciliationCoordinator:
                 ),
                 detail="Skipped because task backoff is active.",
             )
-            return
+            return False
         active_lease = self._try_acquire_task_lease(
             external_account_id=external_account_id,
             task_key=task_key,
             task_label="bull put monitor",
             now=now,
         )
+        if active_lease is _SCHEDULER_LEASE_UNAVAILABLE:
+            self._record_scheduler_lease_unavailable(
+                external_account_id=external_account_id,
+                task_key=task_key,
+                task_label="bull put monitor",
+                now=now,
+            )
+            return False
         if active_lease is not None:
             self._record_scheduler_job_run(
                 external_account_id=external_account_id,
@@ -686,9 +712,9 @@ class ReconciliationCoordinator:
                 },
                 update_task_state=False,
             )
-            return
+            return False
         try:
-            self._monitor_due_spreads_unlocked(
+            return self._monitor_due_spreads_unlocked(
                 external_account_id=external_account_id,
                 spreads=spreads,
                 strategy_service=strategy_service,
@@ -759,17 +785,62 @@ class ReconciliationCoordinator:
         spreads: SQLAlchemyBullPutSpreadRepository,
         strategy_service: BullPutStrategyService,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         task_key = "bull-put-monitor"
 
         executed_monitor = False
         monitored_count = 0
         failed_count = 0
         for status in MONITORABLE_SPREAD_STATUSES:
-            account_spreads = spreads.list_spreads(
-                external_account_id=external_account_id,
-                status=status,
-            )
+            try:
+                account_spreads = spreads.list_spreads(
+                    external_account_id=external_account_id,
+                    status=status,
+                )
+            except Exception as exc:
+                if self._should_backoff_for_failure(exc):
+                    delay_seconds = self._record_task_backoff(
+                        external_account_id=external_account_id,
+                        task_key=task_key,
+                        now=now,
+                    )
+                    state = self._automatic_task_backoffs.get((external_account_id, task_key))
+                    self._record_scheduler_job_run(
+                        external_account_id=external_account_id,
+                        task_key=task_key,
+                        task_label="bull put monitor",
+                        status=SchedulerJobRunStatus.BACKOFF,
+                        started_at=now,
+                        completed_at=datetime.now(timezone.utc),
+                        next_attempt_at=state.next_attempt_at if state is not None else None,
+                        backoff_seconds=delay_seconds,
+                        consecutive_failures=state.consecutive_failures if state is not None else 1,
+                        error_message=str(exc),
+                        detail=f"Transient failure while loading bull put spreads for status {status.value}.",
+                        raw_payload={"status": status.value},
+                    )
+                else:
+                    self._clear_task_backoff(
+                        external_account_id=external_account_id,
+                        task_key=task_key,
+                    )
+                    self._record_scheduler_job_run(
+                        external_account_id=external_account_id,
+                        task_key=task_key,
+                        task_label="bull put monitor",
+                        status=SchedulerJobRunStatus.FAILED,
+                        started_at=now,
+                        completed_at=datetime.now(timezone.utc),
+                        error_message=str(exc),
+                        detail=f"Failed to load bull put spreads for status {status.value}.",
+                        raw_payload={"status": status.value},
+                    )
+                logger.exception(
+                    "Automatic bull put monitoring could not load spreads for %s with status %s",
+                    external_account_id,
+                    status.value,
+                )
+                return False
             for spread in account_spreads:
                 if not self._is_due(
                     spread.last_synced_at,
@@ -809,7 +880,7 @@ class ReconciliationCoordinator:
                             delay_seconds,
                             exc,
                         )
-                        return
+                        return False
                     self._clear_task_backoff(
                         external_account_id=external_account_id,
                         task_key=task_key,
@@ -841,7 +912,7 @@ class ReconciliationCoordinator:
                     "failed_spreads": failed_count,
                 },
             )
-            return
+            return True
         if failed_count:
             completed_at = datetime.now(timezone.utc)
             self._record_scheduler_job_run(
@@ -854,7 +925,7 @@ class ReconciliationCoordinator:
                 detail=f"{failed_count} bull put spread monitor attempt(s) failed.",
                 raw_payload={"failed_spreads": failed_count},
             )
-            return
+            return False
         self._record_scheduler_job_run(
             external_account_id=external_account_id,
             task_key=task_key,
@@ -864,6 +935,7 @@ class ReconciliationCoordinator:
             completed_at=now,
             detail="No monitorable bull put spread was due.",
         )
+        return True
 
     def _run_covered_call_proposal_scan(
         self,
@@ -1167,6 +1239,26 @@ class ReconciliationCoordinator:
         except Exception as exc:
             logger.debug("Failed to record scheduler job run for %s: %s", task_key, exc)
 
+    def _record_scheduler_lease_unavailable(
+        self,
+        *,
+        external_account_id: str,
+        task_key: str,
+        task_label: str,
+        now: datetime,
+    ) -> None:
+        self._record_scheduler_job_run(
+            external_account_id=external_account_id,
+            task_key=task_key,
+            task_label=task_label,
+            status=SchedulerJobRunStatus.SKIPPED,
+            started_at=now,
+            completed_at=now,
+            detail="Skipped because scheduler task lease could not be acquired.",
+            raw_payload={"lease_status": "unavailable"},
+            update_task_state=False,
+        )
+
     def _try_acquire_task_lease(
         self,
         *,
@@ -1174,7 +1266,7 @@ class ReconciliationCoordinator:
         task_key: str,
         task_label: str,
         now: datetime,
-    ) -> SchedulerTaskState | None:
+    ) -> SchedulerTaskState | None | object:
         if self._scheduler_task_states is None:
             return None
         try:
@@ -1187,8 +1279,12 @@ class ReconciliationCoordinator:
                 now=now,
             )
         except Exception as exc:
-            logger.debug("Failed to acquire scheduler task lease for %s: %s", task_key, exc)
-            return None
+            logger.warning(
+                "Failed to acquire scheduler task lease for %s; task will be skipped: %s",
+                task_key,
+                exc,
+            )
+            return _SCHEDULER_LEASE_UNAVAILABLE
         if lease.lease_owner == self._scheduler_lease_owner:
             return None
         return lease
@@ -1286,6 +1382,8 @@ class ReconciliationCoordinator:
 
     @staticmethod
     def _should_backoff_for_failure(exc: Exception) -> bool:
+        if isinstance(exc, SQLAlchemyError):
+            return True
         if not isinstance(exc, LongbridgeIntegrationError):
             return False
         message = str(exc).lower()

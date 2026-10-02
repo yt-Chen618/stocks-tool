@@ -329,6 +329,12 @@ class OrderIntentRecord(TimestampMixin, Base):
     reconciliation_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     first_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    reconciliation_coverage_start_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    reconciliation_coverage_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
 
     broker_account: Mapped[BrokerAccountRecord | None] = relationship()
     trade_action: Mapped[TradeActionIntentRecord] = relationship()

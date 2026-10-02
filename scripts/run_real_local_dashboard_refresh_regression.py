@@ -52,6 +52,18 @@ def parse_args() -> argparse.Namespace:
         default=7000,
         help="Target upper bound for the full overlay-settled timing.",
     )
+    parser.add_argument(
+        "--research-target-ms",
+        type=int,
+        default=3000,
+        help="Target upper bound for warm research-table readiness without waiting for technicals.",
+    )
+    parser.add_argument(
+        "--chart-target-ms",
+        type=int,
+        default=2000,
+        help="Target upper bound for a warm cached selected-symbol chart.",
+    )
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
     return parser.parse_args()
 
@@ -139,12 +151,20 @@ def summarize_runs(
     *,
     dashboard_target_ms: int,
     overlay_target_ms: int,
+    research_target_ms: int,
+    chart_target_ms: int,
 ) -> dict[str, Any]:
     if not runs:
         raise RegressionError("Browser refresh regression returned no runs.")
 
     dashboard_timings = [int(run["dashboard_ready_ms"]) for run in runs]
+    research_timings = [int(run["research_table_ready_ms"]) for run in runs]
+    chart_timings = [int(run["selected_chart_ready_ms"]) for run in runs]
     overlay_timings = [int(run["overlays_settled_ms"]) for run in runs]
+    warm_dashboard_timings = dashboard_timings[1:] or dashboard_timings
+    warm_research_timings = research_timings[1:] or research_timings
+    warm_chart_timings = chart_timings[1:] or chart_timings
+    warm_overlay_timings = overlay_timings[1:] or overlay_timings
     dashboard_paths = [
         resource
         for run in runs
@@ -172,7 +192,9 @@ def summarize_runs(
         prefix: summary
         for prefix in (
             "/account-snapshots/latest",
-            "/brokers/longbridge/quote",
+            "/research/universe",
+            "/research/technicals",
+            "/research/symbols/",
             "/strategies/pre-open-risk",
             "/orders",
             "/strategies/bull-put/spreads",
@@ -189,17 +211,31 @@ def summarize_runs(
         "iterations": len(runs),
         "dashboard_target_ms": dashboard_target_ms,
         "overlay_target_ms": overlay_target_ms,
+        "research_target_ms": research_target_ms,
+        "chart_target_ms": chart_target_ms,
         "dashboard_ready": {
             "min_ms": min(dashboard_timings),
             "max_ms": max(dashboard_timings),
             "avg_ms": round(sum(dashboard_timings) / len(dashboard_timings), 1),
-            "within_target": all(value <= dashboard_target_ms for value in dashboard_timings),
+            "warm_within_target": all(value <= dashboard_target_ms for value in warm_dashboard_timings),
         },
         "overlay_settled": {
             "min_ms": min(overlay_timings),
             "max_ms": max(overlay_timings),
             "avg_ms": round(sum(overlay_timings) / len(overlay_timings), 1),
-            "within_target": all(value <= overlay_target_ms for value in overlay_timings),
+            "warm_within_target": all(value <= overlay_target_ms for value in warm_overlay_timings),
+        },
+        "research_table_ready": {
+            "min_ms": min(research_timings),
+            "max_ms": max(research_timings),
+            "avg_ms": round(sum(research_timings) / len(research_timings), 1),
+            "warm_within_target": all(value <= research_target_ms for value in warm_research_timings),
+        },
+        "selected_chart_ready": {
+            "min_ms": min(chart_timings),
+            "max_ms": max(chart_timings),
+            "avg_ms": round(sum(chart_timings) / len(chart_timings), 1),
+            "warm_within_target": all(value <= chart_target_ms for value in warm_chart_timings),
         },
         "resource_summary_ms": resource_summary,
     }
@@ -207,10 +243,14 @@ def summarize_runs(
 
 def build_summary_line(summary: dict[str, Any]) -> str:
     dashboard = summary["dashboard_ready"]
+    research = summary["research_table_ready"]
+    chart = summary["selected_chart_ready"]
     overlay = summary["overlay_settled"]
     return (
         "Real local dashboard refresh regression passed. "
         f"Dashboard ready {dashboard['min_ms']}-{dashboard['max_ms']}ms, "
+        f"research table {research['min_ms']}-{research['max_ms']}ms, "
+        f"selected chart {chart['min_ms']}-{chart['max_ms']}ms, "
         f"overlays settled {overlay['min_ms']}-{overlay['max_ms']}ms across {summary['iterations']} loads."
     )
 
@@ -237,11 +277,19 @@ def main() -> None:
                 browser["runs"],
                 dashboard_target_ms=args.dashboard_target_ms,
                 overlay_target_ms=args.overlay_target_ms,
+                research_target_ms=args.research_target_ms,
+                chart_target_ms=args.chart_target_ms,
             )
-            if not summary["dashboard_ready"]["within_target"] or not summary["overlay_settled"]["within_target"]:
+            if (
+                not summary["dashboard_ready"]["warm_within_target"]
+                or not summary["overlay_settled"]["warm_within_target"]
+                or not summary["research_table_ready"]["warm_within_target"]
+                or not summary["selected_chart_ready"]["warm_within_target"]
+            ):
                 raise RegressionError(
                     "Dashboard refresh timings exceeded the configured target. "
-                    f"dashboard={summary['dashboard_ready']} overlay={summary['overlay_settled']}"
+                    f"dashboard={summary['dashboard_ready']} research={summary['research_table_ready']} "
+                    f"chart={summary['selected_chart_ready']} overlay={summary['overlay_settled']}"
                 )
 
             emit_report(
