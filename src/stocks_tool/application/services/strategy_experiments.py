@@ -480,6 +480,7 @@ class StrategyExperimentService:
         strategy_id: str | None = None,
         mode: ExecutionMode | None = None,
         order_id: str | None = None,
+        proposal_ids: set[str] | None = None,
     ):
         if external_account_id is not None:
             self._ensure_account(external_account_id)
@@ -488,6 +489,7 @@ class StrategyExperimentService:
             strategy_id=strategy_id,
             mode=mode,
             order_id=order_id,
+            proposal_ids=proposal_ids,
         )
 
     def list_runs_for_order_ids(

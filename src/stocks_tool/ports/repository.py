@@ -643,6 +643,7 @@ class StrategyExperimentRepository(ABC):
         strategy_id: str | None = None,
         mode: ExecutionMode | None = None,
         order_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
     ) -> Iterator[StrategyRun]:
         raise NotImplementedError
 

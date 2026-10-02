@@ -425,30 +425,23 @@ class OperatorConsistencyService:
         checked_at: datetime,
     ) -> list[OperatorConsistencyCheck]:
         proposal_ids = {proposal.id for proposal in proposals}
-        runs = self.strategy_experiments.list_latest_runs_by_proposal(
+        linked_proposal_ids: set[str] = set()
+        for run in self.strategy_experiments.iter_runs(
             external_account_id=external_account_id,
             strategy_id=COVERED_CALL_STRATEGY_ID,
             mode=mode,
             proposal_ids=proposal_ids,
-            run_types={
-                "proposal_execution",
-                "open_lifecycle_refresh",
-                "proposal_close",
-                "roll_execution",
-                "roll_continuation",
-            },
-        )
-        runs_by_proposal: dict[str, list[StrategyRun]] = {}
-        for run in runs:
-            if run.proposal_id is not None:
-                runs_by_proposal.setdefault(run.proposal_id, []).append(run)
+        ):
+            if run.proposal_id not in proposal_ids:
+                continue
+            if run.order_id or _payload_has_order_id(run.raw_payload) or _payload_has_order_id(run.metrics_payload):
+                linked_proposal_ids.add(run.proposal_id)
         missing = [
             proposal
             for proposal in proposals
-            if not self._covered_call_has_order_link(
-                proposal=proposal,
-                runs=runs_by_proposal.get(proposal.id, []),
-            )
+            if proposal.id not in linked_proposal_ids
+            and not _payload_has_order_id(proposal.candidate_payload)
+            and not _payload_has_order_id(proposal.risk_payload)
         ]
         if not missing:
             return []
@@ -683,17 +676,6 @@ class OperatorConsistencyService:
             if isinstance(payload_order, Mapping) and payload_order.get("id") == order_id:
                 return signal
         return None
-
-    @staticmethod
-    def _covered_call_has_order_link(*, proposal: StrategyProposal, runs: list[StrategyRun]) -> bool:
-        for run in runs:
-            if run.proposal_id != proposal.id:
-                continue
-            if run.order_id:
-                return True
-            if _payload_has_order_id(run.raw_payload) or _payload_has_order_id(run.metrics_payload):
-                return True
-        return _payload_has_order_id(proposal.candidate_payload) or _payload_has_order_id(proposal.risk_payload)
 
     @staticmethod
     def _zero_dte_manual_scan_order_brief(order: Order) -> dict[str, Any] | None:

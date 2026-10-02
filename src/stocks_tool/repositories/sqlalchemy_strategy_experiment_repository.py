@@ -253,6 +253,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         strategy_id: str | None = None,
         mode: ExecutionMode | None = None,
         order_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
     ):
         query = select(StrategyRunRecord).order_by(
             StrategyRunRecord.created_at.desc(),
@@ -266,6 +267,11 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyRunRecord.execution_mode == mode.value)
         if order_id is not None:
             query = query.where(StrategyRunRecord.order_id == order_id)
+        if proposal_ids is not None:
+            normalized_ids = [str(item) for item in proposal_ids if str(item)]
+            if not normalized_ids:
+                return
+            query = query.where(StrategyRunRecord.proposal_id.in_(normalized_ids))
         result = self.session.execute(
             query.execution_options(stream_results=True, yield_per=200)
         ).scalars()

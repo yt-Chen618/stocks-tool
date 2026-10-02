@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
+import copy
 from datetime import datetime, timezone
+import gc
 import json
 from pathlib import Path
 import sys
@@ -20,6 +23,7 @@ import traceback
 from typing import Any
 from unittest.mock import Mock
 from uuid import uuid4
+import weakref
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
@@ -85,6 +89,8 @@ ACTIVE_RUN_IDS = {
     "active-run-roll-continuation",
     "active-run-roll-close",
 }
+CONSISTENCY_BATCH_SIZE = 200
+CONSISTENCY_DOMAIN_PEAK_LIMIT = 1200
 LEGACY_ORDER_IDS = (
     "legacy-zero-dte-order-1",
     "legacy-zero-dte-order-2",
@@ -418,6 +424,29 @@ def seed_history(engine, *, first: int, last: int) -> None:
                     id, broker_account_id, strategy_id, external_account_id,
                     execution_mode, run_type, status, symbol, proposal_id,
                     metrics_payload, created_at, updated_at
+                ) VALUES (
+                    :run_id, :broker_account, 'covered_call_v1', :account,
+                    'paper', 'proposal_close', 'executed', 'UNH.US',
+                    'closed-proposal-' || lpad(CAST(:first AS text), 10, '0'),
+                    '{}',
+                    TIMESTAMPTZ '2026-01-01' + ((CAST(:first AS bigint) + 0.5) * INTERVAL '1 second'),
+                    TIMESTAMPTZ '2026-01-01' + ((CAST(:first AS bigint) + 0.5) * INTERVAL '1 second')
+                )
+                """
+            ),
+            {
+                **params,
+                "broker_account": PAPER_BROKER_ACCOUNT_ID,
+                "run_id": f"closed-latest-empty-{first}",
+            },
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO strategy_runs (
+                    id, broker_account_id, strategy_id, external_account_id,
+                    execution_mode, run_type, status, symbol, proposal_id,
+                    metrics_payload, created_at, updated_at
                 )
                 SELECT 'closed-run-' || lpad(n::text, 10, '0'),
                     :broker_account, 'covered_call_v1', :account,
@@ -546,6 +575,34 @@ def sql_oracle(engine) -> dict[str, Any]:
             ),
             {"account": ACCOUNT_ID},
         ).mappings().one()
+        linkage = connection.execute(
+            text(
+                """
+                SELECT count(*) AS missing
+                FROM strategy_proposals AS proposal
+                WHERE proposal.strategy_id='covered_call_v1'
+                  AND proposal.external_account_id=:account
+                  AND proposal.execution_mode='paper'
+                  AND proposal.status IN ('executed','closed','rolled')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM strategy_runs AS run
+                      WHERE run.proposal_id=proposal.id
+                        AND run.strategy_id='covered_call_v1'
+                        AND run.external_account_id=:account
+                        AND run.execution_mode='paper'
+                        AND (
+                            run.order_id IS NOT NULL
+                            OR run.metrics_payload ->> 'order_id' IS NOT NULL
+                            OR run.metrics_payload ->> 'buyback_order_id' IS NOT NULL
+                            OR run.metrics_payload ->> 'sell_order_id' IS NOT NULL
+                            OR run.raw_payload ->> 'order_id' IS NOT NULL
+                        )
+                  )
+                """
+            ),
+            {"account": ACCOUNT_ID},
+        ).mappings().one()
     latest_values = [
         value
         for value in (
@@ -562,6 +619,7 @@ def sql_oracle(engine) -> dict[str, Any]:
         "executed_positions": int(proposal["executed"] or 0),
         "pending_rolls": int(proposal["pending_rolls"] or 0),
         "close_runs": int(run["close_runs"] or 0),
+        "covered_call_linkage_missing": int(linkage["missing"] or 0),
         "source_counts": {
             "proposals": int(proposal["total"] or 0),
             "runs": int(run["total"] or 0),
@@ -591,41 +649,100 @@ def _plan_node_types(plan: dict[str, Any]) -> list[str]:
     return node_types
 
 
-def explain_queries(engine, *, active_proposal_ids: set[str]) -> dict[str, Any]:
-    ids = ", ".join("'" + item.replace("'", "''") + "'" for item in sorted(active_proposal_ids))
-    queries = {
-        "global_proposal_aggregate": f"""
-            SELECT count(*)
-            FROM strategy_proposals
-            WHERE strategy_id='covered_call_v1'
-              AND external_account_id='{ACCOUNT_ID}'
-              AND execution_mode='paper'
-        """,
-        "active_latest_lifecycle_runs": f"""
-            SELECT id, proposal_id, run_type
-            FROM (
-                SELECT id, proposal_id, run_type,
-                    row_number() OVER (
-                        PARTITION BY proposal_id, run_type
-                        ORDER BY created_at DESC, id DESC
-                    ) AS row_number
-                FROM strategy_runs
-                WHERE strategy_id='covered_call_v1'
-                  AND external_account_id='{ACCOUNT_ID}'
-                  AND execution_mode='paper'
-                  AND run_type IN ('proposal_close','proposal_execution',
-                                   'open_lifecycle_refresh','roll_execution',
-                                   'roll_continuation')
-                  AND proposal_id IN ({ids})
-            ) ranked
-            WHERE row_number=1
-        """,
+class _SelectCapture:
+    """Keep only the actual strategy SELECTs needed for EXPLAIN.
+
+    The SQL text and DBAPI parameters come from SQLAlchemy's
+    ``before_cursor_execute`` hook.  No query is reconstructed from a fixture
+    or from a hand-written approximation.
+    """
+
+    def __init__(self) -> None:
+        self.entries: list[dict[str, Any]] = []
+
+    def before_cursor_execute(
+        self,
+        _connection,
+        _cursor,
+        statement: str,
+        parameters,
+        _context,
+        executemany: bool,
+    ) -> None:
+        normalized = statement.lstrip().lower()
+        if executemany or not normalized.startswith("select"):
+            return
+        if not any(
+            table in normalized
+            for table in (
+                "strategy_proposals",
+                "strategy_runs",
+                "strategy_signals",
+                "strategy_reviews",
+            )
+        ):
+            return
+        if "row_number" in normalized and "strategy_runs" in normalized:
+            label = "active_latest_lifecycle_runs"
+        elif "strategy_proposals" in normalized and (
+            "count(" in normalized or "sum(" in normalized or "max(" in normalized
+        ):
+            label = "global_proposal_aggregate"
+        elif "strategy_runs" in normalized and ("count(" in normalized or "max(" in normalized):
+            label = "global_run_aggregate"
+        elif "strategy_signals" in normalized and "max(" in normalized:
+            label = "global_signal_latest"
+        elif "strategy_reviews" in normalized and "max(" in normalized:
+            label = "global_review_latest"
+        else:
+            return
+        try:
+            saved_parameters = copy.deepcopy(parameters)
+        except Exception:
+            saved_parameters = repr(parameters)
+        self.entries.append(
+            {
+                "label": label,
+                "statement": statement,
+                "parameters": saved_parameters,
+            }
+        )
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return repr(value)
+
+
+def explain_queries(engine, capture: _SelectCapture) -> dict[str, Any]:
+    selected: dict[str, dict[str, Any]] = {}
+    for entry in capture.entries:
+        selected.setdefault(entry["label"], entry)
+    required = {
+        "global_proposal_aggregate",
+        "global_run_aggregate",
+        "global_signal_latest",
+        "global_review_latest",
+        "active_latest_lifecycle_runs",
     }
+    missing = sorted(required - selected.keys())
+    if missing:
+        raise AssertionError(f"Actual strategy SELECT capture missing: {', '.join(missing)}")
     reports: dict[str, Any] = {}
     with engine.connect() as connection:
-        for label, query in queries.items():
+        for label in sorted(required):
+            entry = selected[label]
+            query = entry["statement"]
             raw = connection.exec_driver_sql(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + query,
+                entry["parameters"],
             ).scalar_one()
             if isinstance(raw, str):
                 raw = json.loads(raw)
@@ -635,6 +752,8 @@ def explain_queries(engine, *, active_proposal_ids: set[str]) -> dict[str, Any]:
                 "planning_time_ms": document.get("Planning Time") if isinstance(document, dict) else None,
                 "execution_time_ms": document.get("Execution Time") if isinstance(document, dict) else None,
                 "node_types": _plan_node_types(plan),
+                "sql": query,
+                "parameters": _json_safe(entry["parameters"]),
                 "plan": document,
             }
     return reports
@@ -671,6 +790,7 @@ class _LocalOrderRefresh:
 
     def __init__(self) -> None:
         self.refresh_calls: list[str] = []
+        self.mutation_attempts = 0
         self.orders = {
             "active-open-order": _order_for_refresh(
                 "active-open-order", symbol="UNH261030C600000.US", side=OrderSide.SELL
@@ -690,10 +810,24 @@ class _LocalOrderRefresh:
         self.refresh_calls.append(order_id)
         return self.orders[order_id]
 
+    def __getattr__(self, name: str):
+        if name in {"submit_order", "cancel_order", "replace_order"}:
+            self.mutation_attempts += 1
+            raise AssertionError(f"Unexpected local order mutation in strategy proof: {name}")
+        raise AttributeError(name)
+
 
 class _NoBroker:
+    def __init__(self) -> None:
+        self.calls: Counter[str] = Counter()
+
     def __getattr__(self, name: str):
+        self.calls[name] += 1
         raise AssertionError(f"Unexpected broker call in strategy query regression: {name}")
+
+    @property
+    def attempts(self) -> int:
+        return sum(self.calls.values())
 
 
 class _NoBullPut:
@@ -703,15 +837,69 @@ class _NoBullPut:
 
 class _LoadMetrics:
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
         self.loaded = Counter()
-        self.loaded_ids: dict[str, set[str]] = {}
+        self.closed_run_materialized = 0
+        self.active_run_ids_seen: set[str] = set()
 
     def on_load(self, _session, instance) -> None:
         name = type(instance).__name__
         self.loaded[name] += 1
         identifier = getattr(instance, "id", None)
-        if identifier is not None:
-            self.loaded_ids.setdefault(name, set()).add(str(identifier))
+        if name != "StrategyRunRecord" or identifier is None:
+            return
+        identifier = str(identifier)
+        if identifier.startswith("closed-run-"):
+            self.closed_run_materialized += 1
+        elif identifier in ACTIVE_RUN_IDS:
+            self.active_run_ids_seen.add(identifier)
+
+
+class _DomainPeakObserver:
+    """Measure live Pydantic domain objects without retaining them or their IDs."""
+
+    def __init__(self) -> None:
+        self.live = 0
+        self.peak = 0
+        self.created: Counter[str] = Counter()
+
+    def reset(self) -> None:
+        gc.collect()
+        self.live = 0
+        self.peak = 0
+        self.created.clear()
+
+    def observe(self, value: Any) -> Any:
+        self.live += 1
+        self.peak = max(self.peak, self.live)
+        self.created[type(value).__name__] += 1
+        weakref.finalize(value, self._released)
+        return value
+
+    def _released(self) -> None:
+        self.live = max(0, self.live - 1)
+
+
+@contextmanager
+def _observe_repository_domains(observer: _DomainPeakObserver):
+    repository_type = SQLAlchemyStrategyExperimentRepository
+    originals = {
+        name: getattr(repository_type, name)
+        for name in ("_to_proposal", "_to_run", "_to_signal", "_to_review")
+    }
+
+    for name, original in originals.items():
+        def wrapped(record, _original=original):
+            return observer.observe(_original(record))
+
+        setattr(repository_type, name, staticmethod(wrapped))
+    try:
+        yield
+    finally:
+        for name, original in originals.items():
+            setattr(repository_type, name, staticmethod(original))
 
 
 def verify_scale(engine, *, size: int, first: int, seed_active: bool) -> dict[str, Any]:
@@ -722,106 +910,113 @@ def verify_scale(engine, *, size: int, first: int, seed_active: bool) -> dict[st
     settings = Settings(database_url=str(engine.url))
     activity_reports: list[dict[str, Any]] = []
     metrics = _LoadMetrics()
+    select_capture = _SelectCapture()
+    select_listener = select_capture.before_cursor_execute
+    event.listen(engine, "before_cursor_execute", select_listener)
 
-    # Match stocks_tool.db.session.get_session_factory, including flush policy.
-    with Session(engine, expire_on_commit=False, autoflush=False) as session:
-        event.listen(session, "loaded_as_persistent", metrics.on_load)
-        repository = SQLAlchemyStrategyExperimentRepository(session)
-        broker_accounts = SQLAlchemyBrokerAccountRepository(session)
-        service = StrategyExperimentService(
-            experiments=repository,
-            broker_accounts=broker_accounts,
-            settings=settings,
-        )
-        for display_limit in (1, 25):
-            metrics.loaded.clear()
-            metrics.loaded_ids.clear()
-            activity = service.get_covered_call_activity(
+    try:
+        # Match stocks_tool.db.session.get_session_factory, including flush policy.
+        with Session(engine, expire_on_commit=False, autoflush=False) as session:
+            event.listen(session, "loaded_as_persistent", metrics.on_load)
+            repository = SQLAlchemyStrategyExperimentRepository(session)
+            broker_accounts = SQLAlchemyBrokerAccountRepository(session)
+            service = StrategyExperimentService(
+                experiments=repository,
+                broker_accounts=broker_accounts,
+                settings=settings,
+            )
+            for display_limit in (1, 25):
+                metrics.reset()
+                activity = service.get_covered_call_activity(
+                    external_account_id=ACCOUNT_ID,
+                    mode=ExecutionMode.PAPER,
+                    limit=display_limit,
+                )
+                summary = activity.summary.model_dump(mode="json")
+                assert summary["total_proposals"] == oracle["total_proposals"]
+                assert summary["active_proposals"] == oracle["active_proposals"]
+                assert summary["executed_positions"] == oracle["executed_positions"]
+                assert summary["pending_rolls"] == oracle["pending_rolls"]
+                assert summary["close_runs"] == oracle["close_runs"]
+                oracle_latest = datetime.fromisoformat(oracle["latest_activity_at"]) if oracle["latest_activity_at"] else None
+                assert activity.summary.latest_activity_at == oracle_latest
+                assert len(activity.proposals) <= display_limit
+                assert len(activity.runs) <= display_limit
+                assert len(activity.signals) <= display_limit
+                assert len(activity.reviews) <= display_limit
+                assert {task.proposal_id for task in activity.lifecycle_tasks} == set(ACTIVE_PROPOSALS)
+                if display_limit >= 25:
+                    assert {
+                        run.id for run in activity.runs if run.id in ACTIVE_RUN_IDS
+                    } == ACTIVE_RUN_IDS
+                activity_reports.append(
+                    {
+                        "display_limit": display_limit,
+                        "summary": summary,
+                        "visible_counts": {
+                            "proposals": len(activity.proposals),
+                            "runs": len(activity.runs),
+                            "signals": len(activity.signals),
+                            "reviews": len(activity.reviews),
+                            "lifecycle_tasks": len(activity.lifecycle_tasks),
+                        },
+                        "loaded_records": dict(metrics.loaded),
+                    }
+                )
+
+            refresh = _LocalOrderRefresh()
+            no_broker = _NoBroker()
+            lifecycle_service = CoveredCallStrategyService(
+                settings=settings,
+                broker_accounts=broker_accounts,
+                account_snapshots=Mock(),
+                experiments=repository,
+                longbridge_adapter=no_broker,
+                order_service=refresh,
+            )
+            metrics.reset()
+            result = lifecycle_service.reconcile_pending_lifecycle(
                 external_account_id=ACCOUNT_ID,
                 mode=ExecutionMode.PAPER,
-                limit=display_limit,
+                as_of=datetime(2026, 10, 2, 14, 30, tzinfo=timezone.utc),
             )
-            summary = activity.summary.model_dump(mode="json")
-            assert summary["total_proposals"] == oracle["total_proposals"]
-            assert summary["active_proposals"] == oracle["active_proposals"]
-            assert summary["executed_positions"] == oracle["executed_positions"]
-            assert summary["pending_rolls"] == oracle["pending_rolls"]
-            assert summary["close_runs"] == oracle["close_runs"]
-            oracle_latest = datetime.fromisoformat(oracle["latest_activity_at"]) if oracle["latest_activity_at"] else None
-            assert activity.summary.latest_activity_at == oracle_latest
-            assert len(activity.proposals) <= display_limit
-            assert len(activity.runs) <= display_limit
-            assert len(activity.signals) <= display_limit
-            assert len(activity.reviews) <= display_limit
-            assert {task.proposal_id for task in activity.lifecycle_tasks} == set(ACTIVE_PROPOSALS)
-            if display_limit >= 25:
-                assert {
-                    run.id for run in activity.runs if run.id in ACTIVE_RUN_IDS
-                } == ACTIVE_RUN_IDS
-            activity_reports.append(
-                {
-                    "display_limit": display_limit,
-                    "summary": summary,
-                    "visible_counts": {
-                        "proposals": len(activity.proposals),
-                        "runs": len(activity.runs),
-                        "signals": len(activity.signals),
-                        "reviews": len(activity.reviews),
-                        "lifecycle_tasks": len(activity.lifecycle_tasks),
-                    },
-                    "loaded_records": dict(metrics.loaded),
-                    "loaded_ids": {
-                        key: sorted(value) for key, value in metrics.loaded_ids.items()
-                    },
-                }
-            )
-
-        refresh = _LocalOrderRefresh()
-        lifecycle_service = CoveredCallStrategyService(
-            settings=settings,
-            broker_accounts=broker_accounts,
-            account_snapshots=Mock(),
-            experiments=repository,
-            longbridge_adapter=_NoBroker(),
-            order_service=refresh,
-        )
-        metrics.loaded.clear()
-        metrics.loaded_ids.clear()
-        result = lifecycle_service.reconcile_pending_lifecycle(
-            external_account_id=ACCOUNT_ID,
-            mode=ExecutionMode.PAPER,
-            as_of=datetime(2026, 10, 2, 14, 30, tzinfo=timezone.utc),
-        )
-        loaded_run_ids = metrics.loaded_ids.get("StrategyRunRecord", set())
-        assert not any(item.startswith("closed-run-") for item in loaded_run_ids)
-        assert set(refresh.refresh_calls) == {
-            "active-open-order",
-            "active-close-order",
-            "active-roll-buyback",
-        }
-        assert "active-roll-sell" not in refresh.refresh_calls
-        lifecycle_report = {
-            "result": result,
-            "refresh_calls": refresh.refresh_calls,
-            "loaded_records": dict(metrics.loaded),
-            "loaded_run_ids": sorted(loaded_run_ids),
-            "closed_run_materialization": sorted(
-                item for item in loaded_run_ids if item.startswith("closed-run-")
-            ),
-        }
-        event.remove(session, "loaded_as_persistent", metrics.on_load)
+            assert metrics.closed_run_materialized == 0
+            assert len(refresh.refresh_calls) == len(set(refresh.refresh_calls))
+            assert set(refresh.refresh_calls) == {
+                "active-open-order",
+                "active-close-order",
+                "active-roll-buyback",
+            }
+            assert "active-roll-sell" not in refresh.refresh_calls
+            assert refresh.mutation_attempts == 0
+            assert no_broker.attempts == 0
+            lifecycle_report = {
+                "result": result,
+                "refresh_calls": refresh.refresh_calls,
+                "mutation_attempts": refresh.mutation_attempts,
+                "broker_attempts": dict(no_broker.calls),
+                "loaded_records": dict(metrics.loaded),
+                "loaded_active_run_ids": sorted(metrics.active_run_ids_seen),
+                "closed_run_materialization": metrics.closed_run_materialized,
+            }
+            event.remove(session, "loaded_as_persistent", metrics.on_load)
+        explain = explain_queries(engine, select_capture)
+    finally:
+        event.remove(engine, "before_cursor_execute", select_listener)
 
     return {
         "size": size,
         "oracle": oracle,
         "activity": activity_reports,
         "lifecycle": lifecycle_report,
-        "explain": explain_queries(engine, active_proposal_ids=set(ACTIVE_PROPOSALS)),
+        "captured_strategy_select_count": len(select_capture.entries),
+        "explain": explain,
     }
 
 
 def verify_operator_consistency(engine) -> dict[str, Any]:
     settings = Settings(database_url=str(engine.url))
+    oracle = sql_oracle(engine)
     with Session(engine, expire_on_commit=False, autoflush=False) as session:
         order_repository = SQLAlchemyOrderRepository(session, attach_intent_ledger=False)
         experiment_repository = SQLAlchemyStrategyExperimentRepository(session)
@@ -831,19 +1026,36 @@ def verify_operator_consistency(engine) -> dict[str, Any]:
             broker_accounts=broker_accounts,
             settings=settings,
         )
+        no_broker = _NoBroker()
         order_service = OrderService(
             settings=settings,
             broker_accounts=broker_accounts,
             trade_plans=Mock(),
             orders=order_repository,
             executions=SQLAlchemyExecutionRepository(session),
-            longbridge_adapter=_NoBroker(),
+            longbridge_adapter=no_broker,
         )
         consistency = OperatorConsistencyService(
             strategy_experiments=experiments,
             bull_put_strategy=_NoBullPut(),
             order_service=order_service,
         )
+        domain_observer = _DomainPeakObserver()
+        domain_observer.reset()
+        with _observe_repository_domains(domain_observer):
+            covered_call = consistency.get_summary(
+                external_account_id=ACCOUNT_ID,
+                mode=ExecutionMode.PAPER,
+                strategy="covered_call_v1",
+                limit=1,
+            )
+        gc.collect()
+        assert covered_call.status == "warn"
+        assert covered_call.total_check_count == oracle["covered_call_linkage_missing"]
+        assert covered_call.total_warn_count == oracle["covered_call_linkage_missing"]
+        assert covered_call.check_count <= 1
+        assert covered_call.truncated is covered_call.total_check_count > 1
+        assert domain_observer.peak <= CONSISTENCY_DOMAIN_PEAK_LIMIT
         before = consistency.get_summary(
             external_account_id=ACCOUNT_ID,
             mode=ExecutionMode.PAPER,
@@ -895,14 +1107,23 @@ def verify_operator_consistency(engine) -> dict[str, Any]:
             {"account": ACCOUNT_ID},
         ).scalar_one()
         assert signal_count_after == signal_count_before
+        assert no_broker.attempts == 0
         return {
+            "covered_call": covered_call.model_dump(mode="json"),
+            "covered_call_domain_peak": domain_observer.peak,
+            "covered_call_domain_created": dict(domain_observer.created),
+            "covered_call_domain_peak_limit": CONSISTENCY_DOMAIN_PEAK_LIMIT,
+            "covered_call_domain_peak_limit_reason": (
+                f"Fixed at six {CONSISTENCY_BATCH_SIZE}-object windows: proposal batch, streamed run batch, "
+                "and conversion overlap across two consistency phases."
+            ),
             "before": before.model_dump(mode="json"),
             "after": after.model_dump(mode="json"),
             "first_repair": first_repair.model_dump(mode="json"),
             "second_repair": second_repair.model_dump(mode="json"),
             "signal_count_before": signal_count_before,
             "signal_count_after": signal_count_after,
-            "broker_calls": 0,
+            "broker_attempts": dict(no_broker.calls),
         }
 
 
@@ -977,6 +1198,13 @@ def run() -> int:
         admin.dispose()
     if cleanup_error is not None and error is None:
         error = f"temporary database cleanup failed: {cleanup_error}"
+    broker_attempts = 0
+    mutation_attempts = 0
+    for result in results:
+        broker_attempts += sum(result.get("lifecycle", {}).get("broker_attempts", {}).values())
+        mutation_attempts += int(result.get("lifecycle", {}).get("mutation_attempts", 0))
+    if operator_report is not None:
+        broker_attempts += sum(operator_report.get("broker_attempts", {}).values())
     report = build_report(
         script=Path(__file__).name,
         workflow="strategy-query",
@@ -988,7 +1216,8 @@ def run() -> int:
             "sizes": list(args.sizes),
             "runs": results,
             "operator_consistency": operator_report,
-            "broker_calls": 0,
+            "broker_attempts": broker_attempts,
+            "mutation_attempts": mutation_attempts,
             "temporary_database_removed": bool(created and cleanup_error is None),
         },
         error=error,

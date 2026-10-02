@@ -15,7 +15,7 @@ from stocks_tool.db.models import (
     StrategyRunRecord,
 )
 from stocks_tool.domain.enums import ExecutionMode, StrategyProposalStatus, StrategyRunStatus
-from stocks_tool.domain.models import StrategyProposal
+from stocks_tool.domain.models import StrategyProposal, StrategyRun
 from stocks_tool.repositories.sqlalchemy_strategy_experiment_repository import (
     SQLAlchemyStrategyExperimentRepository,
 )
@@ -164,7 +164,31 @@ def test_operator_consistency_limit_only_truncates_details_not_global_counts() -
     ]
     experiments = Mock()
     experiments.iter_proposals.return_value = proposals
-    experiments.iter_runs.return_value = []
+    experiments.iter_runs.return_value = [
+        StrategyRun(
+            id="older-linked-run",
+            strategy_id="covered_call_v1",
+            external_account_id=ACCOUNT_ID,
+            mode=ExecutionMode.PAPER,
+            run_type="proposal_close",
+            status=StrategyRunStatus.EXECUTED,
+            proposal_id="proposal-0",
+            order_id="legacy-order-0",
+            created_at=NOW - timedelta(days=2),
+            updated_at=NOW - timedelta(days=2),
+        ),
+        StrategyRun(
+            id="newer-empty-run",
+            strategy_id="covered_call_v1",
+            external_account_id=ACCOUNT_ID,
+            mode=ExecutionMode.PAPER,
+            run_type="proposal_close",
+            status=StrategyRunStatus.EXECUTED,
+            proposal_id="proposal-0",
+            created_at=NOW - timedelta(days=1),
+            updated_at=NOW - timedelta(days=1),
+        ),
+    ]
     experiments.iter_signals.return_value = []
     experiments.list_latest_runs_by_proposal.return_value = []
     bull_put = Mock()
@@ -185,7 +209,7 @@ def test_operator_consistency_limit_only_truncates_details_not_global_counts() -
     assert report.status == "warn"
     assert report.check_count == 1
     assert report.warn_count == 1
-    assert report.total_check_count == 3
-    assert report.total_warn_count == 3
+    assert report.total_check_count == 2
+    assert report.total_warn_count == 2
     assert report.truncated is True
     assert report.coverage_complete is True
