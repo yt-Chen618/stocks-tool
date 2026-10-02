@@ -1054,7 +1054,7 @@ def verify_operator_consistency(engine) -> dict[str, Any]:
         assert covered_call.total_check_count == oracle["covered_call_linkage_missing"]
         assert covered_call.total_warn_count == oracle["covered_call_linkage_missing"]
         assert covered_call.check_count <= 1
-        assert covered_call.truncated is covered_call.total_check_count > 1
+        assert covered_call.truncated is (covered_call.total_check_count > 1)
         assert domain_observer.peak <= CONSISTENCY_DOMAIN_PEAK_LIMIT
         before = consistency.get_summary(
             external_account_id=ACCOUNT_ID,
