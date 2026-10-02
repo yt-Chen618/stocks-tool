@@ -76,7 +76,7 @@ tests/
 
 ## Quick start
 
-The verified development baseline uses Python 3.12, Node 24.15.0, uv 0.12.22, and the PostgreSQL image pinned by digest in `compose.yaml`. Python patch versions are reported by preflight; `.python-version` deliberately supports the maintained 3.12 series. Runtime and transitive Python packages are pinned in `uv.lock` to the tested baseline. Build dependencies are constrained in `pyproject.toml`. Browser tooling is project-local and pinned in `package-lock.json`; it does not add a frontend build service.
+The verified development baseline uses Python 3.12, Node 24.15.0, uv 0.12.22, and the PostgreSQL image pinned by digest in `compose.yaml`. Python patch versions are reported by preflight; `.python-version` deliberately supports the maintained 3.12 series. Runtime and transitive Python packages are pinned in `uv.lock` to the tested baseline. Build dependencies are constrained in `pyproject.toml`. Hatch exact editable mode uses the locked `editables` runtime hook so the project package imports correctly from a Windows path containing Chinese characters. `editables` stays in the main dependency set because Hatch advertises it on the editable wheel; this keeps `uv sync --no-dev` importable too. Browser tooling is project-local and pinned in `package-lock.json`; it does not add a frontend build service.
 
 Start Docker Desktop/Engine, then use the setup entry point. It creates `.venv`, installs the locked Python and Node dependencies, and installs the matching Chromium build. It bootstraps the pinned uv tool if needed and explicitly checks the declared Node version.
 
@@ -91,7 +91,7 @@ On Linux/macOS use `.venv/bin/python` for the corresponding commands. Linux brow
 
 For local broker access, copy `.env.example` to `.env` and configure credentials separately. A clean checkout can run unit tests, isolated PostgreSQL proofs, and mock browser scenarios without `.env` or broker credentials. Back up an existing database before upgrading it.
 
-`uv sync --locked --extra dev` updates an existing development environment from the committed lock. Change dependency constraints and regenerate the lock intentionally when upgrading; setup never silently refreshes the lock. `python scripts/check_environment.py --strict` reports version/lock/schema drift without installing anything or opening a broker connection. It reads schema state from explicit `DATABASE_URL`, or from the existing local PostgreSQL container, and does not read `.env`.
+`uv sync --locked --extra dev` updates an existing development environment from the committed lock. Change dependency constraints and regenerate the lock intentionally when upgrading; setup never silently refreshes the lock. `python scripts/check_environment.py --strict` reports version/lock/schema drift and directly imports `stocks_tool` in a child interpreter with `PYTHONPATH` removed, without installing anything or opening a broker connection. It reads schema state from explicit `DATABASE_URL`, or from the existing local PostgreSQL container, and does not read `.env`.
 
 The browser gates use the project Chromium build by default. An explicit `PLAYWRIGHT_CHROME_PATH` remains available for diagnostics, but strict preflight reports it as a non-reproducible override. GitHub CI in `.github/workflows/ci.yml` applies all migrations and runs the local P0 gate with empty broker/advisor credentials; external-market checks remain a separate operator activity.
 

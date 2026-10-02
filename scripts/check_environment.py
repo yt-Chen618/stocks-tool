@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 from scripts.setup_environment import UV_VERSION, uv_candidate  # noqa: E402
 REQUIRED_PYTHON_PACKAGES = (
     "alembic",
+    "editables",
     "fastapi",
     "httpx",
     "longbridge",
@@ -155,6 +156,37 @@ def python_packages_report() -> dict[str, Any]:
         "status": "ok" if not missing else "missing",
         "versions": packages,
         "missing": missing,
+    }
+
+
+def project_import_report() -> dict[str, Any]:
+    """Verify the installed interpreter can import the project package directly.
+
+    The test runs in a child interpreter with ``PYTHONPATH`` removed.  Pytest's
+    ``pythonpath = [".", "src"]`` setting must not be able to hide a broken
+    editable installation, especially on Windows where the locale used for
+    ``.pth`` files can differ from the source file encoding.
+    """
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    expected_module = (ROOT / "src" / "stocks_tool" / "__init__.py").resolve()
+    code = (
+        "import sys; "
+        "from pathlib import Path; "
+        "import stocks_tool; "
+        "actual = Path(stocks_tool.__file__).resolve(); "
+        "expected = Path(sys.argv[1]).resolve(); "
+        "print(actual.as_posix().encode('unicode_escape').decode('ascii')); "
+        "raise SystemExit(0 if actual == expected else 2)"
+    )
+    result = run_command([sys.executable, "-c", code, str(expected_module)], env=environment)
+    return {
+        "status": "ok" if result["returncode"] == 0 else "failed",
+        "executable": str(Path(sys.executable).resolve()),
+        "module_file": result["stdout"] or None,
+        "expected_module_file": str(expected_module),
+        "pythonpath_isolated": "PYTHONPATH" not in environment,
+        "error": result["stderr"] or None,
     }
 
 
@@ -427,6 +459,7 @@ def build_report() -> dict[str, Any]:
     components = {
         "python": python_report(expected_python),
         "python_packages": python_packages_report(),
+        "project_import": project_import_report(),
         "node": node_report(expected_node),
         "npm": npm_report(),
         "playwright": playwright_report(node_path, None),
@@ -447,6 +480,7 @@ def build_report() -> dict[str, Any]:
         "schema": "Back up an existing database, then run the locked environment's python -m alembic upgrade head.",
         "locks": "Restore committed uv.lock and package-lock.json before installing.",
         "chromium": "Run python scripts/setup_environment.py and clear PLAYWRIGHT_CHROME_PATH for the reproducible browser gate.",
+        "project_import": "Run python scripts/setup_environment.py to rebuild the exact editable project installation.",
     }
     for name in failing:
         components[name]["next_action"] = fixes.get(name, "Run python scripts/setup_environment.py, then use the resulting virtual environment.")

@@ -10,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "alembic>=1.14,<2.0",
+  # Hatch exact editable mode imports this hook at interpreter startup.
+  "editables==0.6",
   "fastapi>=0.115,<1.0",
   "httpx>=0.28,<1.0",
   "longbridge>=4.0.5,<5.0",
@@ -26,6 +28,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/stocks_tool"]
+dev-mode-exact = true
 
 [tool.hatch.build.targets.sdist]
 include = [

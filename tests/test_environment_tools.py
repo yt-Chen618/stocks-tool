@@ -30,6 +30,47 @@ def test_missing_uv_preflight_does_not_install_anything(monkeypatch):
     assert check_environment.locked_environment_report()["status"] == "missing"
 
 
+def test_project_import_preflight_removes_pythonpath_mask(monkeypatch):
+    calls = []
+    monkeypatch.setenv("PYTHONPATH", "src")
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return {
+            "returncode": 0,
+            "stdout": r"C:/workspace/src/stocks_tool/__init__.py",
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(check_environment, "run_command", run)
+    result = check_environment.project_import_report()
+
+    assert result["status"] == "ok"
+    assert result["pythonpath_isolated"] is True
+    assert "PYTHONPATH" not in calls[0][1]["env"]
+    assert calls[0][0][1] == "-c"
+    assert "import stocks_tool" in calls[0][0][2]
+    assert "actual == expected" in calls[0][0][2]
+    assert calls[0][0][3].replace("\\", "/").endswith("src/stocks_tool/__init__.py")
+
+
+def test_project_import_preflight_rejects_shadow_package(monkeypatch):
+    monkeypatch.setattr(
+        check_environment,
+        "run_command",
+        lambda *args, **kwargs: {
+            "returncode": 2,
+            "stdout": r"C:/other-checkout/src/stocks_tool/__init__.py",
+            "stderr": "",
+        },
+    )
+
+    result = check_environment.project_import_report()
+
+    assert result["status"] == "failed"
+    assert result["module_file"].startswith("C:/other-checkout")
+
+
 def test_database_failure_report_does_not_disclose_connection_credentials(monkeypatch):
     import sqlalchemy
 
