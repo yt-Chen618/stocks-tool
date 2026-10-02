@@ -39,27 +39,30 @@ This project assumes a local PostgreSQL instance managed by Docker Compose for d
 docker compose up -d db
 ```
 
-3. Install Python dependencies:
+3. Install the locked development environment:
 
 ```bash
-pip install -e .[dev]
+python scripts/setup_environment.py --skip-browser
 ```
 
-If you pulled a newer revision that added broker SDK dependencies, rerun the same command to refresh the environment.
+For an existing environment, run `uv sync --locked --extra dev`. Do not regenerate `uv.lock` implicitly.
 
 4. Apply migrations:
 
 ```bash
-alembic upgrade head
+.venv/Scripts/python.exe -m alembic upgrade head
 ```
 
 5. Start the API:
 
 ```bash
-uvicorn --app-dir src stocks_tool.main:app --reload
+.venv/Scripts/python.exe -m uvicorn --app-dir src stocks_tool.main:app --reload
 ```
 
 ## Notes
+
+- The current Alembic head is `20261002_0019`. Revision `0017` preserves unknown-order coverage evidence, `0018` adds scoped history/decision indexes, and `0019` adds the Bull Put account/mode/created/id keyset index. Earlier migrations remain required for clean installs and upgrades.
+- Use `.venv/bin/python` on Linux/macOS. Apply migrations to an isolated fixture database before upgrading an existing operator database; back up and compare row counts/full-row digests as described in `runtime-operations.md`.
 
 - All timestamps are stored in UTC-capable columns.
 - Monetary and quantity fields use fixed-point numeric columns.

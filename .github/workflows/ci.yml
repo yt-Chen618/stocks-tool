@@ -54,6 +54,10 @@ jobs:
         run: .venv/bin/python scripts/run_regression.py p0-safety --skip-running-api-checks --evidence-dir artifacts/ci/p0 --json-output artifacts/ci/p0-manifest.json
       - name: Verify bounded reads with large histories
         run: .venv/bin/python scripts/run_regression.py history-query --json-output artifacts/ci/history-query.json
+      - name: Verify global strategy summaries and lifecycle reads
+        run: .venv/bin/python scripts/run_regression.py strategy-query --json-output artifacts/ci/strategy-query.json
+      - name: Verify the deterministic strategy flow
+        run: .venv/bin/python scripts/run_regression.py bull-put-paper --json-output artifacts/ci/bull-put-paper.json
       - name: Save verification evidence
         if: always()
         uses: actions/upload-artifact@v4

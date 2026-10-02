@@ -58,6 +58,18 @@ Open:
 
 ## Current Implementation State
 
+### 2026-10-02 Project-wide campaign (active)
+
+- Approved scope and stop/completion rules: `docs/project-wide-optimization-campaign.md`, phases M0-M8. Integration branch: `codex/project-wide-optimization-20261002`, baseline `c163995`. All phases are required.
+- Canonical local checkpoint: `artifacts/project-wide-optimization/20261002-project-wide/state.json`; append-only campaign events: `events.jsonl` in the same directory. Read these and inspect live workers/processes before resuming; never start a duplicate gate while its recorded process identity is alive.
+- Draft PR: `https://github.com/yt-Chen618/stocks-tool/pull/1`. Baseline remote CI run `36983363697` passed at `77add1d88527413e35e0f37f8700c0bb0ece5777`; the downloaded artifact digest and JSON reports were verified. This is a baseline result, not final campaign acceptance.
+- Native heartbeat `stocks-tool` is active for this chat every ten minutes. Save/readback and manual checkpoint checks are verified; the first genuine scheduled wake remains unverified until its actual trigger is observed. Do not call a manual check scheduled evidence.
+- M1 passed the full 563-test checkpoint, 18 posture scenarios, recovery DOM races and PostgreSQL atomicity/concurrency proof. M2 passed actual-SQL and domain-memory checks at 10k/100k: active lifecycle materialized 3 proposals / 4 runs, closed-run materialization was zero, and full consistency scanning retained at most 202 domain objects. M3 passed indexed history/working-set checks, migration data retention, browser scenarios and 27-row history pagination/detail checks. M4 entry and close/recovery extractions passed 124 Bull Put tests and independent review.
+- M5 is integrated but review found an after-child persistence-error classification regression; that slice awaits a focused fix and UNKNOWN-state fault test. M6 account/UI state work and M7 owned-process timeout/cleanup repairs are in isolated worktrees. M8 documentation and final clean-checkout/CI preparation continue. Root owns integration and all heavy database/browser gates.
+- Local Alembic is `20261002_0019`; the pre-upgrade dump and full-row comparison show all 24 business tables unchanged. Final acceptance remains pending; earlier milestone test counts are not the final campaign totals.
+- Docker startup failed on stale Windows runtime sockets. The affected zero-byte runtime socket directories were preserved under sibling `*.stale-20261002-project-wide*` names; the engine and existing PostgreSQL database are restored and strict environment preflight passes. No database/WSL reset or data deletion was performed.
+- Keep real broker/model calls, `.cn`, live/Zero-DTE unlocks, `.env` changes, destructive cleanup and automatic merge excluded. Preserve the pre-existing local `.codex/` configuration outside commits.
+
 ### 2026-10-02 Four-batch optimization (complete)
 
 - Branch: `codex/four-batch-optimization-20261002`, from baseline `3f708ef`. All four accepted batches are implemented and verified; the requirement audit is `artifacts/four-batch-20261002/completion-audit.json`.

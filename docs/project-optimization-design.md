@@ -2,6 +2,8 @@
 
 Last updated: 2026-10-02
 
+Historical design and acceptance record for the four-batch baseline `c163995`. Subsequent implementation is tracked in `project-wide-optimization-campaign.md`; current interfaces and operations are documented in `architecture.md`, `api-route-inventory.md`, and `runtime-operations.md`. Test counts and statements about pending remote CI below describe that earlier checkpoint.
+
 ## Four-Batch Implementation — Completed 2026-10-02
 
 Baseline: commit `3f708ef`, 509 Python tests, 22 P0 gate checks, 18 mock browser scenarios, Alembic `20261002_0017`.

@@ -63,9 +63,14 @@ The isolated PostgreSQL history gate creates and removes its own temporary datab
 
 ```powershell
 .venv\Scripts\python.exe scripts\run_regression.py history-query --json-output artifacts\history-query-regression.json
+.venv\Scripts\python.exe scripts\run_regression.py strategy-query --json-output artifacts\strategy-query-regression.json
 ```
 
-It applies the current migrations, seeds 10,000 and then 100,000 rows per history table with another account interleaved, and checks the 50-row order/execution/journal keyset pages. The gate verifies account isolation, tied `(created_at, id)` page boundaries, no duplicate or missing rows across pages, deep cursors after 80,001 account rows at the 100,000-row scale, bounded ORM materialization, and an `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` index plan without an unbounded scan. It uses no broker call and drops the temporary database in its cleanup path. A failed run is evidence that the query shape or index contract still needs work; it must not be reported as a completed large-history gate.
+The history gate applies current migrations, seeds 10,000 and then 100,000 rows per history table with another account interleaved, and checks 50-row order/execution/journal/Bull Put keyset pages. It verifies account/mode isolation, tied `(created_at, id)` boundaries, no duplicates/omissions, deep cursors after 80,001 account rows at the 100,000-row scale, bounded ORM materialization and actual-query `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` index plans. It also checks old spread details and active/manual-action working records.
+
+The strategy gate uses separate 10,000/100,000 closed-history fixtures. SQL oracles verify global activity/Advisor totals at display limits 1 and 25, latest per-type runs for old active proposals, complete consistency warnings at limit 1, and legacy link repairs without duplicate signals. SQLAlchemy hooks capture the actual SQL and bound parameters for EXPLAIN. ORM-load counters verify active-only lifecycle materialization; weak finalizers measure retained domain objects during full consistency scanning against a fixed 1,200-object ceiling. Broker and mutation attempts are counted and must be zero. `--sizes 100,1000` is a diagnostic pilot, not full-scale acceptance.
+
+Both gates create/drop their own temporary database and report cleanup failure as failure. They make no real broker calls. A failed or interrupted run is retained as evidence and never treated as a pass.
 
 The active-spread route and recovery read model are local read contracts. Targeted tests must keep `GET /strategies/bull-put/spreads` as a complete historical read, verify that `GET /strategies/bull-put/active-spreads` pushes lifecycle status into SQL, and verify that `GET /ops/recovery-status` reports truncation and evidence guidance without reconciliation, local resolution, broker-session initialization, or order submission.
 

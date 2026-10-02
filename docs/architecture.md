@@ -86,6 +86,10 @@ The native static modules divide browser responsibilities as follows:
 - `research-view.js`: universe fetch, sequential technical batches, table/chart selection, filter/sort persistence, and explicit symbol-only handoff to the ticket.
 - `chart-view.js`: local candlestick, volume, SMA20, and SMA50 rendering through the bundled Lightweight Charts asset.
 - `watchlist-view.js`: selected/default list context plus create, update, note edit, and confirmed item removal.
+- `account-loader.js`: selected-account generations, scoped reads, pagination and detail state. Views render that state and cannot accept responses from an obsolete account generation.
+- `bull-put-view.js`: current/manual-action spreads, on-demand history and ID details, recovery disclosure and completed-action feedback.
+- `orders-view.js`, `advisor-view.js`, and `operations-recovery-view.js`: their existing account-scoped surfaces behind the account loader and shared safety decision.
+- `trading-safety.js`: the common broker-mutation decision used by button state, confirmation entry and the final request entry. Confirmation rechecks account, mode, generation, current business eligibility and recovery state.
 - `app.js`: startup and existing account, strategy, order, confirmation, and safety coordination.
 
 The top bar shows account, Paper posture, data time, global status, language, refresh, and the explicit Execution entry point. The 224px sidebar persists its 64px collapsed state. The retired `Focus` / `All` toggle and `stocks-tool-view-mode` storage key are not part of the current UI contract; the workstation uses `stocks-tool-workspace` and `stocks-tool-sidebar-collapsed`. Research-specific selection, filters, sort, view, column group, and chart range use `stocks-tool-research-state`. Existing language, collapsed-module, and session idempotency storage remain compatible.
@@ -122,6 +126,16 @@ Public broker-mutation routes require `Idempotency-Key`. Replaying the same payl
 Migration `20261002_0017` persists the start/end of complete broker-history reads. Old zero-match counts without that evidence cannot authorize a no-order resolution. History is requested from the earliest unresolved intent rather than a fixed lookback, and a saturated broker response fails closed. Imported or refreshed U.S. option orders derive contract metadata from the shared option-symbol parser.
 
 Advisor response recording uses one repository transaction for proposals, reviews, policy signals, durable audit events, and the advisor run state. A run row lock serializes simultaneous Record Output requests; matching retries return the existing downstream records, while mismatched payloads or run ownership are rejected. Other strategy CRUD commands do not provide an alternate non-atomic advisor intake path.
+
+Each external Advisor dry-run call preallocates its own run ID and persists the complete response, local provenance, usage and status in one transaction. A database failure cannot leave a successful but incomplete run. Calls are not deduplicated by response text and external model requests are not retried automatically.
+
+## Strategy Orchestration and Read Models
+
+Bull Put's existing facade retains public validation and parent-action prepare/replay/finalization. `bull_put/entry.py` and `bull_put/close.py` own entry and close/recovery sequencing; `bull_put/execution.py` shares order, quote and CAS mechanics. The existing pre-open module remains independent. Covered Call's `covered_call/lifecycle.py` coordinates open, close, roll and continuation while the facade retains public parent actions and the existing candidate/policy/order checks.
+
+Current Bull Put reads select active or manual-action records in SQL. Historical dashboard reads use a separate immutable account/mode keyset backed by migration `20261002_0019`; the legacy complete list and ID detail remain available. Lifecycle decisions do not use dashboard pages.
+
+Covered Call activity and Advisor summaries aggregate all account/mode records in SQL. Their display limits affect only visible details. The lifecycle worker first selects active proposals, then batches their latest runs by proposal and run type. Consistency has different semantics: old valid order links remain valid even if newer runs omit them. It scans legacy metadata in bounded batches, keeps only bounded display details and emits global counts. Incomplete evidence cannot become an overall healthy result.
 
 Scheduler task acquisition errors skip the task instead of granting a lease. Concurrent first creation of a lease state row is retried after rollback, then evaluated against the committed owner. The scheduling interval decision uses a broker/account/mode/status-scoped existence query rather than materializing order history.
 
@@ -160,6 +174,7 @@ Longbridge market-data reads keep a short in-process quote cache for degraded re
 - `docs/strategy-lifecycle.md`: lifecycle state and invariant catalog.
 - `docs/regression-matrix.md`: verification commands and what each gate proves.
 - `docs/api-route-inventory.md`: grouped public route inventory.
-- `docs/project-optimization-design.md`: current optimization plan and backlog.
+- `docs/project-wide-optimization-campaign.md`: current implementation scope and acceptance gates.
+- `docs/project-optimization-design.md`: historical four-batch design and baseline acceptance.
 - `docs/vibe-trading-inspired-roadmap.md`: durable roadmap for broker profile, run-card, mandate, audit, and operator posture work.
 - `docs/session-summary.md`: current handoff log, not durable architecture.

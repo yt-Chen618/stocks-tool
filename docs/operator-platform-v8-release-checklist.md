@@ -2,6 +2,8 @@
 
 Last updated: 2026-06-18
 
+Historical V8 release checklist. For the current October 2026 campaign use `project-wide-optimization-campaign.md`, `session-summary.md`, and `regression-matrix.md`; the safety principles below remain reference material.
+
 This checklist freezes the current paper-first operator-platform work into reviewable slices. Generated artifacts under `artifacts/`, `output/playwright/`, cache folders, and local notification logs are evidence only and should not be staged as source.
 
 ## Review Slices

@@ -2,6 +2,8 @@
 
 Last updated: 2026-06-16
 
+Historical V2/V3 release-slice record. Current branch scope and acceptance are in `project-wide-optimization-campaign.md`; migration and runtime instructions are in `runtime-operations.md`.
+
 This repository currently carries a large V2/V3 operator-platform worktree. Review it as coherent slices instead of as one undifferentiated diff.
 
 ## Slice 0: Generated Cleanup

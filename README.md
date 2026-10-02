@@ -12,7 +12,7 @@ The project is intentionally scoped around:
 
 It does not attempt live autonomous trading in the current phase.
 
-The October 2026 correction pass requires `alembic upgrade head` to revision `20261002_0017`. It hardens unknown-order history evidence, covered-call order linkage, scheduler leases, and atomic Advisor recording; it also corrects imported option metadata, research event completeness, and watchlist input handling. See `docs/runtime-operations.md` for the migration and recovery rules. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+The current schema requires `alembic upgrade head` through revision `20261002_0019`. The October 2026 changes harden unknown-order evidence, atomic Advisor records and scheduler leases, add indexed history pages, and separate strategy orchestration and dashboard account state. See `docs/runtime-operations.md` for migration and recovery, and `docs/project-wide-optimization-campaign.md` for the active implementation and acceptance scope. Paper entry kill switches and the Zero-DTE execution lock remain in force.
 
 ## Current status
 
@@ -137,6 +137,8 @@ Then open:
 - `POST /strategies/pre-open-runs/{external_account_id}/capture`
 - `POST /strategies/pre-open-runs/{external_account_id}/review`
 - `GET /strategies/bull-put/spreads`
+- `GET /strategies/bull-put/spreads/paged?external_account_id=LBPT10087357&mode=paper`
+- `GET /strategies/bull-put/working-spreads?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/bull-put/spreads/{spread_id}`
 - `GET /strategies/bull-put/runtime?external_account_id=LBPT10087357&mode=paper`
 - `POST /strategies/bull-put/execute`

@@ -106,6 +106,8 @@ Adding a watchlist item trims and uppercases its symbol, rejects blank/overlong 
 - `GET /strategies/bull-put/preview`
 - `GET /strategies/bull-put/readiness`
 - `GET /strategies/bull-put/spreads`
+- `GET /strategies/bull-put/spreads/paged`
+- `GET /strategies/bull-put/working-spreads`
 - `GET /strategies/bull-put/active-spreads`
 - `GET /strategies/bull-put/spreads/{spread_id}`
 - `GET /strategies/bull-put/dashboard`
@@ -118,6 +120,8 @@ Adding a watchlist item trims and uppercases its symbol, rejects blank/overlong 
 - `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility`
 - `POST /strategies/bull-put/spreads/{spread_id}/recover-close`
 - `POST /strategies/bull-put/spreads/{spread_id}/monitor`
+
+The Bull Put `/spreads/paged` read requires `external_account_id`, defaults to `mode=paper` and `limit=50` (maximum 100), and returns the existing `CursorPage`. Ordering is fixed at `(created_at DESC, id DESC)` and the opaque cursor is bound to account and mode. The dashboard requests 25 rows per page. `/working-spreads` requires the account and returns all active or `manual_action_required=true` records in that mode. Complete-list, active-list and ID-detail routes keep their existing contracts. Strategy decisions never consume UI pages.
 
 ## Covered Call
 
@@ -167,6 +171,8 @@ Only Preview is executable in P0. The execute route, `force=true` scan, and atte
 - `GET /ops/trade-actions/{action_intent_id}`
 
 No-order resolution requires explicit paper confirmation and three complete zero-match reconciliations spanning at least 60 seconds. Migration `20261002_0017` adds the persisted coverage evidence required by this check; legacy counts alone do not qualify. Incomplete history reads or conflicting broker identity evidence keep the intent unresolved.
+
+`/ops/consistency` preserves `check_count`, `pass_count`, `warn_count`, `fail_count`, and `repair_available_count` for the displayed checks. The additive `total_check_count`, `total_warn_count`, `total_fail_count`, `total_repair_available_count`, `truncated`, and `coverage_complete` fields describe the full scan. Overall status uses complete evidence; changing `limit` only changes detail display. Incomplete coverage cannot produce a healthy status. Covered Call activity and Advisor context use complete account/mode aggregates independently of their displayed history limit.
 
 Advisor Record Output is atomic across its local ledger and audit writes. With `advisor_run_id`, matching retries return the linked proposal/review records; mismatched payloads or run ownership return `409`. Covered-call roll continuation validates that both order IDs belong to the current proposal's latest roll run and that quantities match the proposal; an existing linked sell ID cannot be omitted to request a new sell.
 

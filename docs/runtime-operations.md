@@ -6,8 +6,8 @@ Last updated: 2026-10-02
 
 ```powershell
 python scripts\setup_environment.py --start-postgres
-.venv\Scripts\python.exe scripts\check_environment.py --strict --json-output artifacts\environment-preflight.json
 .venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe scripts\check_environment.py --strict --json-output artifacts\environment-preflight.json
 .venv\Scripts\uvicorn.exe --app-dir src stocks_tool.main:app --reload
 ```
 
@@ -38,7 +38,9 @@ $env:RECONCILIATION_SCHEDULER_ENABLED = "false"
 .venv\Scripts\python.exe scripts\check_alembic_head_current.py
 ```
 
-The current optimization branch adds migration `20261002_0018` after `20261002_0017`. It is additive: it creates the bounded-history keyset indexes for orders, executions, and journals, the Covered Call proposal/run decision-scope indexes, and the active Bull Put spread scope index. It does not rewrite or delete persisted rows. `alembic upgrade head` must be run before using the new query paths; `alembic heads` and `alembic current` are evidence of schema state, not a substitute for running the regression gates.
+Migration `20261002_0018` adds the bounded-history keyset indexes for orders, executions, and journals, Covered Call proposal/run decision-scope indexes, and the active Bull Put spread scope index. The next revision, `20261002_0019`, adds the Bull Put `(external_account_id, execution_mode, created_at, id)` history index. Both are additive and preserve all historical migrations and rows. Apply `alembic upgrade head` before using the query paths; head/current equality is schema evidence, not a substitute for regression gates.
+
+Validate upgrades in an isolated database first. Back up the local database before applying them, then compare business-table row counts and sorted complete-row digests. The October 2 campaign verified unchanged contents of all 24 business tables around `0019`; its dump and comparison remain local under the campaign artifact directory. For recovery, retain that backup and investigate in a separate restored database. Do not restore over the operator database or remove historical migrations as an automatic rollback.
 
 Then run mock/fault/concurrency verification and a read-only account consistency check. The aggregate command is:
 
@@ -144,6 +146,8 @@ Each returns `items`, `next_cursor`, `has_more`, and `limit`. The cursor is a ke
 
 `GET /strategies/bull-put/active-spreads?external_account_id=LBPT10087357&mode=paper` pushes the active lifecycle-status predicate into PostgreSQL and accepts an optional `symbol`. It is a read-only strategy/dashboard view. `GET /strategies/bull-put/spreads` remains the complete historical route, and the active view must not be used for order capacity or lifecycle decisions.
 
+The Bull Put dashboard uses `/working-spreads` for current or manual-action records and loads `/spreads/paged` only when history is opened. History uses account/mode-bound cursors and 25-row UI pages. ID-detail reads retain old and just-completed results even when a record leaves the working set. Recovery eligibility is loaded only when that spread's recovery disclosure is opened; it is not preloaded for every historical row.
+
 `GET /ops/recovery-status?external_account_id=LBPT10087357&mode=paper&limit=100` composes local unresolved parent/child intent evidence with the SDK timeout-quarantine read model. It reports total versus displayed counts, `truncated`, coverage start/end, count and time evidence, reason codes, next actions, and whether recovery is blocked. The endpoint does not reconcile, resolve, submit, or initialize a Longbridge context. Treat `truncated=true` or unavailable quarantine state as incomplete operator evidence.
 
 Migration `20261002_0018` adds the query indexes supporting these paths: account/time/id keysets for orders, executions, and journals; decision-scope indexes for strategy proposals and runs; and the account/mode/status/symbol scope for active Bull Put spreads. The migration is additive and does not alter the legacy complete-read contract.
@@ -155,6 +159,8 @@ Use `GET /ops/consistency?external_account_id=LBPT10087357&mode=paper` or `scrip
 - zero-DTE manual-scan paper orders that are missing local `strategy_runs` or `strategy_signals`
 - covered-call executed/closed/rolled proposals without observable local order linkage
 - bull put close-order lifecycle warning drift versus linked order state
+
+The report's `total_*` fields and `coverage_complete` are the authority for overall posture. Legacy counts describe the displayed checks; `limit` never restricts the global judgement. A warning outside the visible window remains a warning. Metadata from old runs/signals is processed in bounded batches, including older valid links when a newer run has none.
 
 Consistency repair is explicit and local-only. `POST /ops/consistency/repairs/{repair_id}` currently supports guarded zero-DTE manual-scan ledger repair only. It requires `mode=paper`, `confirm_local_repair=true`, `actor`, and `note`; it creates missing local strategy run/signal records and never submits broker orders or deletes history. A report may expose `repair_available=true`, but operators should still inspect the related order id before applying a repair.
 

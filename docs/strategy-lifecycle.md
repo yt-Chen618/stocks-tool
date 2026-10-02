@@ -1,6 +1,6 @@
 # Strategy Lifecycle
 
-Last updated: 2026-07-11
+Last updated: 2026-10-02
 
 ## Purpose
 
@@ -57,6 +57,11 @@ Callers may include extra context such as linked order ids, broker order status,
 | Existing same-day position | visible as critical manual action | block new strategy entries |
 
 ## Current Canonical Consumers
+
+- Bull Put's facade owns public validation and parent action prepare/replay/finalization. `bull_put/entry.py` owns entry sequencing, `bull_put/close.py` owns close/recovery sequencing, and `bull_put/execution.py` shares quote/order/CAS mechanics. Pre-open research remains in its existing module. Each extraction preserves the same order service and ledger.
+- Covered Call's facade owns public action preparation and finalization; `covered_call/lifecycle.py` coordinates open, close, roll and continuation through its policy, order and record dependencies. Candidate selection and order identity checks remain in the existing candidate/policy/order-lifecycle modules.
+- Lifecycle reconciliation queries active proposals first, then the latest run per proposal and run type. It never infers active state from a recent account-wide display window. Historical consistency is a different question: any valid historical order link can satisfy that check, so it streams all linked runs in bounded proposal batches.
+- Covered Call continuation validates persisted linked IDs, account, mode, contract and quantity before advancing. Working orders and unresolved sell-call intents reserve shares; a bulk refresh never submits a new replacement sell order.
 
 - Strategy services write normalized lifecycle facts into response payloads and `bull_put_spreads` summary columns where available.
 - `SQLAlchemyBullPutSpreadRepository` derives bull put lifecycle summary fields from `raw_payload.monitor` / `raw_payload.lifecycle` on write, while preserving explicit summary fields for normalized-only records.
