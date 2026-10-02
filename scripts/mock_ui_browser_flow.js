@@ -6,6 +6,7 @@ const {
   expectTextInsensitive,
   isBrokerMutationPath,
   resolveBrowserExecutable,
+  waitResponsiveSettled,
 } = require("./browser_test_helpers");
 
 async function main() {
@@ -216,11 +217,31 @@ async function main() {
     await page.click("#bull-put-history-panel > summary");
     await historyPageResponse;
     await expectText(page.locator("#bull-put-history-body"), "QQQ.US");
+    const historyRows = page.locator("#bull-put-history-body tr[data-history-spread-id]");
+    if (await historyRows.count() !== 25) throw new Error("Bull Put history must initially load 25 records.");
+    const moreHistoryResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/paged") && new URL(response.url()).searchParams.has("cursor"));
+    await page.click("#bull-put-history-load-more");
+    await moreHistoryResponse;
+    await page.waitForFunction(() => document.querySelectorAll("#bull-put-history-body tr[data-history-spread-id]").length === 27);
+    const historyIds = await historyRows.evaluateAll((rows) => rows.map((row) => row.dataset.historySpreadId));
+    if (new Set(historyIds).size !== 27) throw new Error("Bull Put history pagination duplicated or omitted records.");
+    if (!(await page.locator("#bull-put-history-load-more").isHidden())) throw new Error("Exhausted history must hide Load More.");
     const historyDetailResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/mock-spread-closed-0001"));
     await page.locator("#bull-put-history-body tr[data-history-spread-id='mock-spread-closed-0001'] button[data-history-action='detail']").click();
     await historyDetailResponse;
     await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "Closed");
     await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "QQQ260619P467000.US");
+    const bullPutScreenshots = {};
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+    for (const width of [1440, 760]) {
+      await page.setViewportSize({ width, height: 1200 });
+      await waitResponsiveSettled(page, width);
+      const capturePath = screenshotPath.replace(/\.png$/, `-bull-put-${width}.png`);
+      await page.screenshot({ path: capturePath, fullPage: true });
+      bullPutScreenshots[width] = capturePath;
+    }
+    await page.setViewportSize({ width: 1440, height: 1200 });
+    await waitResponsiveSettled(page, 1440);
     const currentRecoveryDetails = page.locator("#spreads-body details[data-recovery-details]").first();
     const recoveryEligibilityResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"));
     await currentRecoveryDetails.locator("summary").click();
@@ -516,6 +537,9 @@ async function main() {
             summary: preOpenRunText,
           },
           spread: {
+            historyRecords: historyIds.length,
+            historyUniqueRecords: new Set(historyIds).size,
+            historyScreenshots: bullPutScreenshots,
             monitorTriggered:
               summary.statusBanner.includes("canceled") || summary.spreadTable.toLowerCase().includes("closed"),
             tableRow: summary.spreadTable,
