@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
+import traceback
 from typing import Any
 from unittest.mock import Mock
 from uuid import uuid4
@@ -722,7 +723,8 @@ def verify_scale(engine, *, size: int, first: int, seed_active: bool) -> dict[st
     activity_reports: list[dict[str, Any]] = []
     metrics = _LoadMetrics()
 
-    with Session(engine, expire_on_commit=False) as session:
+    # Match stocks_tool.db.session.get_session_factory, including flush policy.
+    with Session(engine, expire_on_commit=False, autoflush=False) as session:
         event.listen(session, "loaded_as_persistent", metrics.on_load)
         repository = SQLAlchemyStrategyExperimentRepository(session)
         broker_accounts = SQLAlchemyBrokerAccountRepository(session)
@@ -745,7 +747,8 @@ def verify_scale(engine, *, size: int, first: int, seed_active: bool) -> dict[st
             assert summary["executed_positions"] == oracle["executed_positions"]
             assert summary["pending_rolls"] == oracle["pending_rolls"]
             assert summary["close_runs"] == oracle["close_runs"]
-            assert summary["latest_activity_at"] == oracle["latest_activity_at"]
+            oracle_latest = datetime.fromisoformat(oracle["latest_activity_at"]) if oracle["latest_activity_at"] else None
+            assert activity.summary.latest_activity_at == oracle_latest
             assert len(activity.proposals) <= display_limit
             assert len(activity.runs) <= display_limit
             assert len(activity.signals) <= display_limit
@@ -819,7 +822,7 @@ def verify_scale(engine, *, size: int, first: int, seed_active: bool) -> dict[st
 
 def verify_operator_consistency(engine) -> dict[str, Any]:
     settings = Settings(database_url=str(engine.url))
-    with Session(engine, expire_on_commit=False) as session:
+    with Session(engine, expire_on_commit=False, autoflush=False) as session:
         order_repository = SQLAlchemyOrderRepository(session, attach_intent_ledger=False)
         experiment_repository = SQLAlchemyStrategyExperimentRepository(session)
         broker_accounts = SQLAlchemyBrokerAccountRepository(session)
@@ -954,6 +957,7 @@ def run() -> int:
         operator_report = verify_operator_consistency(engine)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
+        traceback.print_exc(file=sys.stderr)
     finally:
         if engine is not None:
             engine.dispose()
