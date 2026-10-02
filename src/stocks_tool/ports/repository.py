@@ -602,7 +602,17 @@ class StrategyExperimentRepository(ABC):
         strategy_id: str | None = None,
         mode: ExecutionMode | None = None,
         run_types: Collection[str],
+        proposal_ids: Collection[str] | None = None,
     ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_covered_call_activity_aggregate(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> dict[str, object]:
         raise NotImplementedError
 
     @abstractmethod

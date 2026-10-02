@@ -70,6 +70,7 @@ def run_deepseek_advisor_dry_run(
     try:
         context = service.get_advisor_context(
             external_account_id=request.external_account_id,
+            mode=ExecutionMode.PAPER,
             limit=request.context_limit,
         )
         advisor_run_id = str(uuid4())

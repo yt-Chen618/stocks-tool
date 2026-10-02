@@ -72,9 +72,24 @@ class OperatorConsistencyService:
             external_account_id=external_account_id,
             mode=mode,
         )
-        checks: list[OperatorConsistencyCheck] = []
+        display_checks: list[OperatorConsistencyCheck] = []
+        total_check_count = 0
+        total_fail_count = 0
+        total_warn_count = 0
+        total_repair_count = 0
+
+        def absorb(checks: list[OperatorConsistencyCheck]) -> None:
+            nonlocal total_check_count, total_fail_count, total_warn_count, total_repair_count
+            for check in checks:
+                total_check_count += 1
+                total_fail_count += check.status == "fail"
+                total_warn_count += check.status == "warn"
+                total_repair_count += check.repair_available
+                if len(display_checks) < effective_limit:
+                    display_checks.append(check)
+
         if strategy_filter in (None, ZERO_DTE_STRATEGY_ID):
-            checks.extend(
+            absorb(
                 self._zero_dte_manual_scan_checks(
                     external_account_id=external_account_id,
                     mode=mode,
@@ -84,7 +99,7 @@ class OperatorConsistencyService:
                 )
             )
         if strategy_filter in (None, COVERED_CALL_STRATEGY_ID):
-            checks.extend(
+            absorb(
                 self._covered_call_order_linkage_checks(
                     external_account_id=external_account_id,
                     mode=mode,
@@ -93,7 +108,7 @@ class OperatorConsistencyService:
                 )
             )
         if strategy_filter in (None, BULL_PUT_STRATEGY_ID):
-            checks.extend(
+            absorb(
                 self._bull_put_lifecycle_drift_checks(
                     external_account_id=external_account_id,
                     mode=mode,
@@ -102,13 +117,9 @@ class OperatorConsistencyService:
                     limit=effective_limit,
                 )
             )
-        display_checks = checks[:effective_limit]
         fail_count = sum(1 for check in display_checks if check.status == "fail")
         warn_count = sum(1 for check in display_checks if check.status == "warn")
         pass_count = sum(1 for check in display_checks if check.status == "pass")
-        total_fail_count = sum(1 for check in checks if check.status == "fail")
-        total_warn_count = sum(1 for check in checks if check.status == "warn")
-        total_repair_count = sum(1 for check in checks if check.repair_available)
         status = "fail" if total_fail_count else "warn" if total_warn_count else "pass"
         return OperatorConsistencySummary(
             generated_at=generated_at,
@@ -122,11 +133,11 @@ class OperatorConsistencyService:
             warn_count=warn_count,
             fail_count=fail_count,
             repair_available_count=sum(1 for check in display_checks if check.repair_available),
-            total_check_count=len(checks),
+            total_check_count=total_check_count,
             total_fail_count=total_fail_count,
             total_warn_count=total_warn_count,
             total_repair_available_count=total_repair_count,
-            truncated=len(display_checks) < len(checks),
+            truncated=len(display_checks) < total_check_count,
             coverage_complete=True,
             checks=display_checks,
         )

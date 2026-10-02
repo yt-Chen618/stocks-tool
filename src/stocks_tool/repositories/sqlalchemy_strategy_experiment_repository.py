@@ -5,7 +5,7 @@ from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import (
@@ -300,6 +300,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         strategy_id: str | None = None,
         mode: ExecutionMode | None = None,
         run_types: Collection[str],
+        proposal_ids: Collection[str] | None = None,
     ) -> list[StrategyRun]:
         normalized_types = [item.strip() for item in run_types if item.strip()]
         if not normalized_types:
@@ -308,7 +309,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             StrategyRunRecord.id.label("run_id"),
             func.row_number()
             .over(
-                partition_by=StrategyRunRecord.proposal_id,
+                partition_by=(StrategyRunRecord.proposal_id, StrategyRunRecord.run_type),
                 order_by=(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc()),
             )
             .label("row_number"),
@@ -322,6 +323,11 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             ranked = ranked.where(StrategyRunRecord.strategy_id == strategy_id)
         if mode is not None:
             ranked = ranked.where(StrategyRunRecord.execution_mode == mode.value)
+        if proposal_ids is not None:
+            normalized_ids = [str(item) for item in proposal_ids if str(item)]
+            if not normalized_ids:
+                return []
+            ranked = ranked.where(StrategyRunRecord.proposal_id.in_(normalized_ids))
         ranked_subquery = ranked.subquery()
         query = (
             select(StrategyRunRecord)
@@ -331,6 +337,123 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         )
         records = self.session.execute(query).scalars().all()
         return [self._to_run(record) for record in records]
+
+    def get_covered_call_activity_aggregate(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> dict[str, object]:
+        proposal_query = select(
+            func.count(StrategyProposalRecord.id),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            StrategyProposalRecord.status.in_(
+                                [StrategyProposalStatus.PENDING.value, StrategyProposalStatus.APPROVED.value]
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            StrategyProposalRecord.proposed_action.in_(
+                                ["sell_covered_call", "roll_covered_call"]
+                            )
+                            & (StrategyProposalRecord.status == StrategyProposalStatus.EXECUTED.value),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            (StrategyProposalRecord.proposed_action == "roll_covered_call")
+                            & StrategyProposalRecord.status.in_(
+                                [StrategyProposalStatus.PENDING.value, StrategyProposalStatus.APPROVED.value]
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.max(StrategyProposalRecord.updated_at),
+        ).where(StrategyProposalRecord.strategy_id == "covered_call_v1")
+        if external_account_id is not None:
+            proposal_query = proposal_query.where(
+                StrategyProposalRecord.external_account_id == external_account_id
+            )
+        if mode is not None:
+            proposal_query = proposal_query.where(StrategyProposalRecord.execution_mode == mode.value)
+        proposal_values = self.session.execute(proposal_query).one()
+
+        run_query = select(
+            func.count(StrategyRunRecord.id),
+            func.max(StrategyRunRecord.created_at),
+        ).where(
+            StrategyRunRecord.strategy_id == "covered_call_v1",
+            StrategyRunRecord.run_type == "proposal_close",
+        )
+        activity_run_query = select(func.max(StrategyRunRecord.created_at)).where(
+            StrategyRunRecord.strategy_id == "covered_call_v1",
+            StrategyRunRecord.run_type.in_(
+                [
+                    "proposal_close",
+                    "proposal_execution",
+                    "open_lifecycle_refresh",
+                    "roll_execution",
+                    "roll_continuation",
+                ]
+            ),
+        )
+        for query_name in ("run_query", "activity_run_query"):
+            query = locals()[query_name]
+            if external_account_id is not None:
+                query = query.where(StrategyRunRecord.external_account_id == external_account_id)
+            if mode is not None:
+                query = query.where(StrategyRunRecord.execution_mode == mode.value)
+            if query_name == "run_query":
+                run_query = query
+            else:
+                activity_run_query = query
+        close_count, close_latest = self.session.execute(run_query).one()
+        lifecycle_latest = self.session.execute(activity_run_query).scalar_one()
+        signal_latest = self.session.execute(
+            select(func.max(StrategySignalRecord.emitted_at)).where(
+                StrategySignalRecord.strategy_id == "covered_call_v1",
+                *([StrategySignalRecord.external_account_id == external_account_id] if external_account_id is not None else []),
+                *([StrategySignalRecord.execution_mode == mode.value] if mode is not None else []),
+            )
+        ).scalar_one()
+        review_latest = self.session.execute(
+            select(func.max(StrategyReviewRecord.reviewed_at)).where(
+                StrategyReviewRecord.strategy_id == "covered_call_v1",
+                *([StrategyReviewRecord.external_account_id == external_account_id] if external_account_id is not None else []),
+                *([StrategyReviewRecord.execution_mode == mode.value] if mode is not None else []),
+            )
+        ).scalar_one()
+        latest_values = [value for value in (proposal_values[4], lifecycle_latest, signal_latest, review_latest) if value]
+        return {
+            "total_proposals": int(proposal_values[0] or 0),
+            "active_proposals": int(proposal_values[1] or 0),
+            "executed_positions": int(proposal_values[2] or 0),
+            "pending_rolls": int(proposal_values[3] or 0),
+            "close_runs": int(close_count or 0),
+            "latest_activity_at": max(latest_values) if latest_values else None,
+        }
 
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         signal = StrategySignal(

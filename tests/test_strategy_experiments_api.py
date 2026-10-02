@@ -413,6 +413,14 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
     ]
     experiments.list_runs.return_value = [build_covered_call_run("proposal_close")]
     experiments.list_latest_runs_by_proposal.return_value = [build_covered_call_run("proposal_close")]
+    experiments.get_covered_call_activity_aggregate.return_value = {
+        "total_proposals": 5,
+        "active_proposals": 1,
+        "executed_positions": 2,
+        "pending_rolls": 1,
+        "close_runs": 1,
+        "latest_activity_at": NOW,
+    }
     experiments.iter_proposals.return_value = experiments.list_proposals.return_value
     experiments.list_signals.return_value = []
     experiments.list_reviews.return_value = []
@@ -432,7 +440,7 @@ def test_strategy_experiment_service_summarizes_covered_call_activity() -> None:
     assert activity.summary.pending_rolls == 1
     assert activity.summary.close_runs == 1
     assert activity.summary.latest_activity_at == NOW
-    experiments.list_proposals.assert_called_once()
+    assert experiments.list_proposals.call_count == 2
 
 
 def test_strategy_experiment_service_lists_covered_call_lifecycle_tasks() -> None:
@@ -492,6 +500,14 @@ def test_strategy_experiment_service_lists_covered_call_lifecycle_tasks() -> Non
         ),
     ]
     experiments.list_latest_runs_by_proposal.return_value = experiments.list_runs.return_value
+    experiments.get_covered_call_activity_aggregate.return_value = {
+        "total_proposals": 3,
+        "active_proposals": 2,
+        "executed_positions": 0,
+        "pending_rolls": 1,
+        "close_runs": 1,
+        "latest_activity_at": NOW + timedelta(minutes=20),
+    }
     experiments.iter_proposals.return_value = experiments.list_proposals.return_value
     experiments.list_signals.return_value = [build_covered_call_monitor_signal()]
     experiments.list_reviews.return_value = []
@@ -781,6 +797,7 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     assert body["response_payload"]["raw_response"]["usage"]["prompt_cache_hit_tokens"] == 40
     service.get_advisor_context.assert_called_once_with(
         external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
         limit=6,
     )
     advisor_client.create_advisor_response.assert_called_once_with(
@@ -1262,6 +1279,14 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
     experiments.list_signals.side_effect = lambda **kwargs: [build_signal()]
     experiments.list_reviews.side_effect = lambda **kwargs: [build_review()]
     experiments.list_latest_runs_by_proposal.return_value = []
+    experiments.get_covered_call_activity_aggregate.return_value = {
+        "total_proposals": 1,
+        "active_proposals": 0,
+        "executed_positions": 0,
+        "pending_rolls": 0,
+        "close_runs": 0,
+        "latest_activity_at": NOW,
+    }
     experiments.iter_proposals.side_effect = experiments.list_proposals.side_effect
     service = StrategyExperimentService(
         experiments=experiments,
@@ -1291,6 +1316,7 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
         external_account_id="LBPT10087357",
         strategy_id=None,
         status=None,
+        statuses=None,
         mode=None,
         limit=6,
     )
@@ -1298,6 +1324,7 @@ def test_strategy_experiment_service_builds_advisor_context() -> None:
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
         status=None,
+        statuses=None,
         mode=None,
         limit=6,
     )

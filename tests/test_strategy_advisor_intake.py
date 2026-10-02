@@ -75,14 +75,22 @@ def build_context() -> StrategyAdvisorContext:
 def build_strategy_experiment_service(experiments: Mock) -> StrategyExperimentService:
     broker_accounts = Mock()
     broker_accounts.get_by_external_account_id.return_value = object()
-    experiments.list_proposals.side_effect = [[], []]
-    experiments.list_runs.side_effect = [[], []]
-    experiments.list_signals.side_effect = [[], []]
-    experiments.list_reviews.side_effect = [[], []]
+    experiments.list_proposals.side_effect = lambda **kwargs: []
+    experiments.list_runs.side_effect = lambda **kwargs: []
+    experiments.list_signals.side_effect = lambda **kwargs: []
+    experiments.list_reviews.side_effect = lambda **kwargs: []
     experiments.iter_proposals.return_value = []
     experiments.iter_runs.return_value = []
     experiments.iter_signals.return_value = []
     experiments.list_latest_runs_by_proposal.return_value = []
+    experiments.get_covered_call_activity_aggregate.return_value = {
+        "total_proposals": 0,
+        "active_proposals": 0,
+        "executed_positions": 0,
+        "pending_rolls": 0,
+        "close_runs": 0,
+        "latest_activity_at": None,
+    }
     return StrategyExperimentService(
         experiments=experiments,
         broker_accounts=broker_accounts,

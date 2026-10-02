@@ -180,37 +180,24 @@ class StrategyExperimentService:
                 limit=limit,
             ),
         )
-        summary_active_statuses = {
+        task_statuses = {
             StrategyProposalStatus.PENDING,
             StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
         }
-        task_statuses = summary_active_statuses | {StrategyProposalStatus.EXECUTED}
-        active_proposals: list[StrategyProposal] = []
-        total_proposals = 0
-        active_proposal_count = 0
-        executed_position_count = 0
-        pending_roll_count = 0
-        latest_activity_candidates: list[datetime] = []
-        for proposal in self.iter_proposals(
+        active_proposals = self.list_proposals(
             external_account_id=external_account_id,
             strategy_id="covered_call_v1",
             mode=mode,
-        ):
-            total_proposals += 1
-            if proposal.updated_at is not None:
-                latest_activity_candidates.append(proposal.updated_at)
-            if proposal.status in summary_active_statuses:
-                active_proposal_count += 1
-            if proposal.status in task_statuses:
-                active_proposals.append(proposal)
-            if proposal.proposed_action in {"sell_covered_call", "roll_covered_call"} and proposal.status == StrategyProposalStatus.EXECUTED:
-                executed_position_count += 1
-            if proposal.proposed_action == "roll_covered_call" and proposal.status in summary_active_statuses:
-                pending_roll_count += 1
+            statuses=task_statuses,
+            limit=None,
+        )
+        active_proposal_ids = [proposal.id for proposal in active_proposals]
         lifecycle_runs = self.experiments.list_latest_runs_by_proposal(
             external_account_id=external_account_id,
             strategy_id="covered_call_v1",
             mode=mode,
+            proposal_ids=active_proposal_ids,
             run_types={
                 "proposal_close",
                 "proposal_execution",
@@ -219,23 +206,18 @@ class StrategyExperimentService:
                 "roll_continuation",
             },
         )
-        latest_activity_candidates.extend(
-            run.created_at for run in lifecycle_runs if run.created_at is not None
-        )
-        latest_activity_candidates.extend(
-            signal.emitted_at for signal in display_snapshot.signals if signal.emitted_at is not None
-        )
-        latest_activity_candidates.extend(
-            review.reviewed_at for review in display_snapshot.reviews if review.reviewed_at is not None
+        aggregate = self.experiments.get_covered_call_activity_aggregate(
+            external_account_id=external_account_id,
+            mode=mode,
         )
         summary = CoveredCallActivitySummary(
             external_account_id=external_account_id,
-            total_proposals=total_proposals,
-            active_proposals=active_proposal_count,
-            executed_positions=executed_position_count,
-            pending_rolls=pending_roll_count,
-            close_runs=sum(1 for run in lifecycle_runs if run.run_type == "proposal_close"),
-            latest_activity_at=max(latest_activity_candidates) if latest_activity_candidates else None,
+            total_proposals=int(aggregate["total_proposals"]),
+            active_proposals=int(aggregate["active_proposals"]),
+            executed_positions=int(aggregate["executed_positions"]),
+            pending_rolls=int(aggregate["pending_rolls"]),
+            close_runs=int(aggregate["close_runs"]),
+            latest_activity_at=aggregate["latest_activity_at"],
         )
         task_snapshot = StrategyExperimentSnapshot(
             external_account_id=external_account_id,
@@ -430,6 +412,7 @@ class StrategyExperimentService:
         external_account_id: str | None = None,
         strategy_id: str | None = None,
         status: StrategyProposalStatus | None = None,
+        statuses: set[StrategyProposalStatus] | None = None,
         mode: ExecutionMode | None = None,
         limit: int | None = 20,
     ) -> list[StrategyProposal]:
@@ -439,6 +422,7 @@ class StrategyExperimentService:
             external_account_id=external_account_id,
             strategy_id=strategy_id,
             status=status,
+            statuses=statuses,
             mode=mode,
             limit=limit,
         )
