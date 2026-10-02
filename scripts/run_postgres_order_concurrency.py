@@ -299,12 +299,10 @@ def _verify_advisor_intake(database_url: str) -> dict:
         def new_request(summary: str) -> RecordStrategyAdvisorResponseRequest:
             with Session(engine, expire_on_commit=False, autoflush=False) as session:
                 repository = SQLAlchemyStrategyExperimentRepository(session)
-                run = repository.create_advisor_run(
-                    CreateStrategyAdvisorRunRequest(external_account_id=ACCOUNT_ID)
-                )
+                advisor_run_id = str(uuid4())
                 request = RecordStrategyAdvisorResponseRequest(
                     external_account_id=ACCOUNT_ID,
-                    advisor_run_id=run.id,
+                    advisor_run_id=advisor_run_id,
                     proposals=[StrategyAdvisorProposalDraft(
                         strategy_id="covered_call_v1",
                         symbol="QQQ.US",
@@ -316,8 +314,20 @@ def _verify_advisor_intake(database_url: str) -> dict:
                         strategy_id="covered_call_v1", summary=summary,
                     )],
                 )
-                repository.update_advisor_run_response_payload(
-                    run.id, response_payload=request.model_dump(mode="json", exclude_none=True)
+                repository.create_advisor_run(
+                    CreateStrategyAdvisorRunRequest(
+                        id=advisor_run_id,
+                        external_account_id=ACCOUNT_ID,
+                        source="deepseek",
+                        mode=ExecutionMode.PAPER,
+                        provider="deepseek",
+                        status="succeeded",
+                        context_format="compact_v1",
+                        context_limit=10,
+                        proposal_count=len(request.proposals),
+                        review_count=len(request.reviews),
+                        response_payload=request.model_dump(mode="json", exclude_none=True),
+                    )
                 )
                 return request
 

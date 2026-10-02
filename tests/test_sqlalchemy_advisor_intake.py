@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
@@ -156,6 +156,79 @@ def test_missing_run_is_rejected_without_any_downstream_rows(database: Session) 
         _record(repository, str(uuid4()), proposal, review, payload)
 
     assert _counts(database) == {"proposals": 0, "reviews": 0, "signals": 0, "audits": 0}
+
+
+def test_preallocated_run_persists_complete_response_in_one_create(database: Session) -> None:
+    repository = SQLAlchemyStrategyExperimentRepository(database)
+    advisor_run_id = str(uuid4())
+    payload = {
+        "external_account_id": ACCOUNT_ID,
+        "source": "deepseek",
+        "mode": "paper",
+        "context_limit": 6,
+        "advisor_run_id": advisor_run_id,
+        "reviews": [{"strategy_id": "covered_call_v1", "summary": "Observed"}],
+        "raw_response": {
+            "provider": "deepseek",
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4},
+        },
+    }
+
+    run = repository.create_advisor_run(
+        CreateStrategyAdvisorRunRequest(
+            id=advisor_run_id,
+            external_account_id=ACCOUNT_ID,
+            source="deepseek",
+            mode=ExecutionMode.PAPER,
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            status=StrategyAdvisorRunStatus.SUCCEEDED,
+            context_format="compact_v1",
+            context_limit=6,
+            prompt_tokens=12,
+            completion_tokens=4,
+            total_tokens=16,
+            review_count=1,
+            response_payload=payload,
+        )
+    )
+
+    assert run.id == advisor_run_id
+    assert run.status is StrategyAdvisorRunStatus.SUCCEEDED
+    assert run.context_format == "compact_v1"
+    assert run.context_limit == 6
+    assert run.prompt_tokens == 12
+    assert run.response_payload == payload
+    assert database.scalar(select(func.count()).select_from(StrategyAdvisorRunRecord)) == 1
+
+
+def test_advisor_run_database_failure_rolls_back_without_a_half_row(database: Session) -> None:
+    database.execute(
+        text(
+            """
+            CREATE TRIGGER reject_advisor_run BEFORE INSERT ON strategy_advisor_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'injected advisor run failure');
+            END
+            """
+        )
+    )
+    database.commit()
+    repository = SQLAlchemyStrategyExperimentRepository(database)
+
+    with pytest.raises(Exception, match="injected advisor run failure"):
+        repository.create_advisor_run(
+            CreateStrategyAdvisorRunRequest(
+                id=str(uuid4()),
+                external_account_id=ACCOUNT_ID,
+                source="deepseek",
+                mode=ExecutionMode.PAPER,
+                status=StrategyAdvisorRunStatus.SUCCEEDED,
+                response_payload={"advisor_run_id": "injected"},
+            )
+        )
+
+    assert database.scalar(select(func.count()).select_from(StrategyAdvisorRunRecord)) == 0
 
 
 @pytest.mark.parametrize(

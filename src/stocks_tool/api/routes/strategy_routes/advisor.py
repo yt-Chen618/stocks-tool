@@ -1,5 +1,8 @@
+import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -26,6 +29,10 @@ from stocks_tool.domain.models import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_SENSITIVE_ERROR_VALUE = re.compile(
+    r"(?i)(api[_ -]?key|authorization|token|secret)(\s*[:=]\s*)([^\s,;]+)"
+)
 
 
 @router.get("/advisor-context", response_model=StrategyAdvisorContext)
@@ -63,17 +70,19 @@ def run_deepseek_advisor_dry_run(
             external_account_id=request.external_account_id,
             limit=request.context_limit,
         )
+        advisor_run_id = str(uuid4())
         response_payload = advisor_client.create_advisor_response(
             context=context,
             model=request.model,
         )
         recordable_payload = RecordStrategyAdvisorResponseRequest.model_validate(
             {
+                **response_payload,
                 "external_account_id": request.external_account_id,
                 "source": "deepseek",
                 "mode": ExecutionMode.PAPER,
                 "context_limit": request.context_limit,
-                **response_payload,
+                "advisor_run_id": advisor_run_id,
             }
         )
         completed_at = datetime.now(timezone.utc)
@@ -86,11 +95,6 @@ def run_deepseek_advisor_dry_run(
                 started_at=started_at,
                 completed_at=completed_at,
             )
-        )
-        recordable_payload.advisor_run_id = advisor_run.id
-        advisor_run = service.update_advisor_run_response_payload(
-            advisor_run.id,
-            response_payload=recordable_payload.model_dump(mode="json", exclude_none=True),
         )
         return DeepSeekAdvisorDryRunResult(
             external_account_id=request.external_account_id,
@@ -110,6 +114,7 @@ def run_deepseek_advisor_dry_run(
                 model=request.model,
                 error=exc,
                 started_at=started_at,
+                advisor_run_id=advisor_run_id,
             )
         status_code = 400 if "configured" in str(exc).lower() else 502
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
@@ -214,6 +219,7 @@ def _advisor_run_request_from_payload(
     review_count = len(response_payload.reviews)
     response_json = response_payload.model_dump(mode="json", exclude_none=True)
     return CreateStrategyAdvisorRunRequest(
+        id=response_payload.advisor_run_id,
         external_account_id=external_account_id,
         source=response_payload.source,
         mode=ExecutionMode.PAPER,
@@ -248,11 +254,13 @@ def _record_failed_advisor_run(
     model: str | None,
     error: Exception,
     started_at: datetime,
+    advisor_run_id: str,
 ) -> None:
     failed_at = datetime.now(timezone.utc)
     try:
         service.create_advisor_run(
             CreateStrategyAdvisorRunRequest(
+                id=advisor_run_id,
                 external_account_id=external_account_id,
                 source="deepseek",
                 mode=ExecutionMode.PAPER,
@@ -266,9 +274,25 @@ def _record_failed_advisor_run(
                 completed_at=failed_at,
             )
         )
-    except Exception:
-        # The caller should still receive the original DeepSeek failure.
-        pass
+    except Exception as record_error:
+        logger.warning(
+            "advisor_dry_run_failure_record_failed",
+            extra={
+                "event": "advisor_dry_run_failure_record_failed",
+                "external_account_id": external_account_id,
+                "advisor_run_id": advisor_run_id,
+                "provider": "deepseek",
+                "provider_error_type": type(error).__name__,
+                "provider_error": _redact_error(error),
+                "record_error_type": type(record_error).__name__,
+                "record_error": _redact_error(record_error),
+            },
+        )
+
+
+def _redact_error(error: Exception) -> str:
+    message = _SENSITIVE_ERROR_VALUE.sub(r"\1\2[REDACTED]", str(error))
+    return message[:500]
 
 
 def _int_or_none(value: Any) -> int | None:

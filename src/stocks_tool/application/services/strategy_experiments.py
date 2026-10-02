@@ -455,17 +455,6 @@ class StrategyExperimentService:
             raise ValueError(f"Advisor source '{request.source}' is not recognized.")
         return self.experiments.create_advisor_run(request)
 
-    def update_advisor_run_response_payload(
-        self,
-        advisor_run_id: str,
-        *,
-        response_payload: dict,
-    ) -> StrategyAdvisorRun:
-        return self.experiments.update_advisor_run_response_payload(
-            advisor_run_id,
-            response_payload=response_payload,
-        )
-
     def mark_advisor_run_recorded(
         self,
         advisor_run_id: str,

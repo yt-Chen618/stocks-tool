@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from stocks_tool.adapters.advisors.deepseek import DeepSeekAdvisorError
 from stocks_tool.api.dependencies import get_deepseek_advisor_client, get_strategy_experiment_service
+from stocks_tool.api.routes.strategy_routes.advisor import _record_failed_advisor_run
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -706,9 +707,25 @@ def test_strategy_advisor_context_route_returns_read_only_context() -> None:
 def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writing() -> None:
     service = Mock()
     service.get_advisor_context.return_value = build_advisor_context()
-    service.create_advisor_run.return_value = build_advisor_run()
+
+    def create_advisor_run(request):
+        return build_advisor_run().model_copy(
+            update={
+                "id": request.id,
+                "response_payload": request.response_payload,
+                "proposal_count": request.proposal_count,
+                "review_count": request.review_count,
+            }
+        )
+
+    service.create_advisor_run.side_effect = create_advisor_run
     advisor_client = Mock()
     advisor_client.create_advisor_response.return_value = {
+        "external_account_id": "attacker-account",
+        "source": "attacker-source",
+        "mode": "live",
+        "context_limit": 1,
+        "advisor_run_id": "spoofed-run",
         "reviews": [
             {
                 "strategy_id": "covered_call_v1",
@@ -732,12 +749,6 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     }
     app.dependency_overrides[get_strategy_experiment_service] = lambda: service
     app.dependency_overrides[get_deepseek_advisor_client] = lambda: advisor_client
-    updated_run = build_advisor_run()
-    updated_run.response_payload = {
-        **(updated_run.response_payload or {}),
-        "advisor_run_id": "advisor-run-1",
-    }
-    service.update_advisor_run_response_payload.return_value = updated_run
     client = TestClient(app)
     try:
         response = client.post(
@@ -755,12 +766,16 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     body = response.json()
     assert body["recorded"] is False
     assert body["source"] == "deepseek"
-    assert body["advisor_run"]["id"] == "advisor-run-1"
+    advisor_run_id = body["advisor_run"]["id"]
+    assert advisor_run_id
     assert body["advisor_run"]["context_format"] == "compact_v1"
     assert body["advisor_run"]["prompt_tokens"] == 100
-    assert body["advisor_run"]["response_payload"]["advisor_run_id"] == "advisor-run-1"
+    assert body["advisor_run"]["response_payload"]["advisor_run_id"] == advisor_run_id
     assert body["response_payload"]["external_account_id"] == "LBPT10087357"
-    assert body["response_payload"]["advisor_run_id"] == "advisor-run-1"
+    assert body["response_payload"]["source"] == "deepseek"
+    assert body["response_payload"]["mode"] == "paper"
+    assert body["response_payload"]["context_limit"] == 6
+    assert body["response_payload"]["advisor_run_id"] == advisor_run_id
     assert body["response_payload"]["reviews"][0]["summary"] == "Current covered-call lifecycle is flat."
     assert body["response_payload"]["raw_response"]["usage"]["prompt_cache_hit_tokens"] == 40
     service.get_advisor_context.assert_called_once_with(
@@ -772,6 +787,7 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
         model="v4 pro",
     )
     run_request = service.create_advisor_run.call_args.args[0]
+    assert run_request.id == advisor_run_id
     assert run_request.source == "deepseek"
     assert run_request.provider == "deepseek"
     assert run_request.model == "deepseek-v4-pro"
@@ -781,10 +797,6 @@ def test_deepseek_advisor_dry_run_route_returns_recordable_payload_without_writi
     assert run_request.cache_hit_tokens == 40
     assert run_request.cache_miss_tokens == 60
     assert run_request.review_count == 1
-    service.update_advisor_run_response_payload.assert_called_once()
-    update_args = service.update_advisor_run_response_payload.call_args
-    assert update_args.args[0] == "advisor-run-1"
-    assert update_args.kwargs["response_payload"]["advisor_run_id"] == "advisor-run-1"
 
 
 def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
@@ -808,6 +820,73 @@ def test_deepseek_advisor_dry_run_route_maps_missing_key_to_400() -> None:
     run_request = service.create_advisor_run.call_args.args[0]
     assert run_request.status == StrategyAdvisorRunStatus.FAILED
     assert run_request.error_message == "DEEPSEEK_API_KEY is not configured."
+
+
+def test_deepseek_dry_runs_allocate_independent_run_ids_without_merging() -> None:
+    service = Mock()
+    service.get_advisor_context.return_value = build_advisor_context()
+    service.create_advisor_run.side_effect = lambda request: build_advisor_run().model_copy(
+        update={
+            "id": request.id,
+            "response_payload": request.response_payload,
+            "proposal_count": request.proposal_count,
+            "review_count": request.review_count,
+        }
+    )
+    advisor_client = Mock()
+    advisor_client.create_advisor_response.return_value = {
+        "reviews": [
+            {
+                "strategy_id": "covered_call_v1",
+                "summary": "Independent run",
+            }
+        ],
+        "raw_response": {"provider": "deepseek", "model": "deepseek-v4-pro"},
+    }
+    app.dependency_overrides[get_strategy_experiment_service] = lambda: service
+    app.dependency_overrides[get_deepseek_advisor_client] = lambda: advisor_client
+    client = TestClient(app)
+    try:
+        first = client.post(
+            "/strategies/advisor/deepseek/dry-run",
+            json={"external_account_id": "LBPT10087357"},
+        )
+        second = client.post(
+            "/strategies/advisor/deepseek/dry-run",
+            json={"external_account_id": "LBPT10087357"},
+        )
+    finally:
+        clear_overrides()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_id = first.json()["advisor_run"]["id"]
+    second_id = second.json()["advisor_run"]["id"]
+    assert first_id != second_id
+    assert advisor_client.create_advisor_response.call_count == 2
+    assert service.create_advisor_run.call_count == 2
+
+
+def test_failed_run_recording_logs_redacted_structured_error(caplog: pytest.LogCaptureFixture) -> None:
+    service = Mock()
+    service.create_advisor_run.side_effect = RuntimeError("token=database-secret")
+
+    with caplog.at_level("WARNING"):
+        _record_failed_advisor_run(
+            service=service,
+            external_account_id="LBPT10087357",
+            context_limit=6,
+            model="deepseek-v4-pro",
+            error=DeepSeekAdvisorError("api_key=provider-secret"),
+            started_at=NOW,
+            advisor_run_id="advisor-run-failure",
+        )
+
+    assert "advisor_dry_run_failure_record_failed" in caplog.text
+    assert "provider-secret" not in caplog.text
+    assert "database-secret" not in caplog.text
+    record = next(item for item in caplog.records if item.event == "advisor_dry_run_failure_record_failed")
+    assert record.advisor_run_id == "advisor-run-failure"
 
 
 def test_strategy_advisor_runs_route_lists_deepseek_history() -> None:

@@ -794,6 +794,7 @@ class StrategyAdvisorReviewDraft(BaseModel):
 
 
 class CreateStrategyAdvisorRunRequest(BaseModel):
+    id: str | None = Field(default=None, max_length=36)
     external_account_id: str = Field(min_length=1, max_length=64)
     source: str = Field(default="deepseek", min_length=1, max_length=64)
     mode: ExecutionMode = ExecutionMode.PAPER
