@@ -1430,10 +1430,23 @@ class CoveredCallStrategyService:
         if self.order_service is None:
             raise RuntimeError("Covered call lifecycle reconciliation requires an order service.")
         evaluated_at = self._reference_time(as_of)
+        active_proposals = self.experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            statuses=(
+                StrategyProposalStatus.PENDING,
+                StrategyProposalStatus.APPROVED,
+                StrategyProposalStatus.EXECUTED,
+            ),
+            mode=mode,
+            limit=None,
+        )
+        active_proposal_ids = {proposal.id for proposal in active_proposals}
         runs = self.experiments.list_latest_runs_by_proposal(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
             mode=mode,
+            proposal_ids=active_proposal_ids,
             run_types={
                 "proposal_execution",
                 "open_lifecycle_refresh",
@@ -1457,13 +1470,9 @@ class CoveredCallStrategyService:
             "rolls_executed": 0,
         }
 
-        for proposal in self.experiments.list_proposals(
-            external_account_id=external_account_id,
-            strategy_id=self.strategy_id,
-            status=StrategyProposalStatus.APPROVED,
-            mode=mode,
-            limit=None,
-        ):
+        for proposal in active_proposals:
+            if proposal.status != StrategyProposalStatus.APPROVED:
+                continue
             if proposal.proposed_action != "sell_covered_call":
                 continue
             execution_run = execution_runs.get(proposal.id)
@@ -1496,13 +1505,9 @@ class CoveredCallStrategyService:
                 )
                 result["sell_orders_executed"] += 1
 
-        for proposal in self.experiments.list_proposals(
-            external_account_id=external_account_id,
-            strategy_id=self.strategy_id,
-            status=StrategyProposalStatus.EXECUTED,
-            mode=mode,
-            limit=None,
-        ):
+        for proposal in active_proposals:
+            if proposal.status != StrategyProposalStatus.EXECUTED:
+                continue
             if proposal.proposed_action not in self.open_proposal_actions:
                 continue
             close_run = close_runs.get(proposal.id)
@@ -1529,13 +1534,9 @@ class CoveredCallStrategyService:
                 )
                 result["closed_proposals"] += 1
 
-        for proposal in self.experiments.list_proposals(
-            external_account_id=external_account_id,
-            strategy_id=self.strategy_id,
-            status=StrategyProposalStatus.APPROVED,
-            mode=mode,
-            limit=None,
-        ):
+        for proposal in active_proposals:
+            if proposal.status != StrategyProposalStatus.APPROVED:
+                continue
             if proposal.proposed_action != "roll_covered_call" or proposal.candidate_payload is None:
                 continue
             roll_run = roll_runs.get(proposal.id)

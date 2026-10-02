@@ -96,6 +96,7 @@ class FakeExperiments:
         self.proposal_request = None
         self.updated_status = None
         self.updated_statuses = {}
+        self.latest_run_proposal_ids = None
 
     def create_run(self, request):
         self.run_request = request
@@ -253,13 +254,17 @@ class FakeExperiments:
         strategy_id=None,
         mode=None,
         run_types,
+        proposal_ids=None,
     ):
+        self.latest_run_proposal_ids = set(proposal_ids) if proposal_ids is not None else None
         runs = self.list_runs(
             external_account_id=external_account_id,
             strategy_id=strategy_id,
             mode=mode,
             limit=None,
         )
+        if proposal_ids is not None:
+            runs = [item for item in runs if item.proposal_id in proposal_ids]
         latest = {}
         for run in runs:
             if run.proposal_id is None or run.run_type not in run_types:
@@ -2505,6 +2510,7 @@ def test_covered_call_lifecycle_reconcile_marks_filled_close_closed() -> None:
     assert result["close_orders_refreshed"] == 1
     assert result["closed_proposals"] == 1
     assert experiments.updated_status == StrategyProposalStatus.CLOSED
+    assert experiments.latest_run_proposal_ids == {"proposal-1"}
     order_service.refresh_order.assert_called_once_with("close-order-1")
 
 

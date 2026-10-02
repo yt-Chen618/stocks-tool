@@ -174,19 +174,12 @@ class OperatorConsistencyService:
             ),
             None,
         )
-        signal_source = (
-            self.strategy_experiments.iter_signals(
-                external_account_id=request.external_account_id,
-                strategy_id=ZERO_DTE_STRATEGY_ID,
-                mode=request.mode,
-                run_id=run.id,
-            )
-            if run is not None
-            else self.strategy_experiments.iter_signals(
-                external_account_id=request.external_account_id,
-                strategy_id=ZERO_DTE_STRATEGY_ID,
-                mode=request.mode,
-            )
+        signal_source = self.strategy_experiments.list_signals_for_run_or_order_ids(
+            external_account_id=request.external_account_id,
+            strategy_id=ZERO_DTE_STRATEGY_ID,
+            mode=request.mode,
+            run_ids={run.id} if run is not None else set(),
+            order_ids={order.id},
         )
         signal = self._find_zero_dte_execution_signal(signal_source, run=run, order_id=order.id)
         if run is not None and signal is not None:

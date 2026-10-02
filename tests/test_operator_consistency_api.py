@@ -183,6 +183,37 @@ def test_consistency_repair_creates_local_zero_dte_run_and_signal_only() -> None
     audit_events.create_event.assert_called_once()
 
 
+def test_consistency_repair_reuses_legacy_payload_signal_after_run_exists() -> None:
+    legacy_signal = _zero_dte_signal(run_id=None)
+    service, experiments, _orders, _audit_events = _consistency_service(
+        runs=[_zero_dte_run()],
+        signals=[legacy_signal],
+    )
+    experiments.list_signals_for_run_or_order_ids.return_value = [legacy_signal]
+
+    result = service.apply_repair(
+        "zero-dte-ledger:zero-order-1",
+        request=OperatorConsistencyRepairRequest(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            confirm_local_repair=True,
+            actor="operator-a",
+            note="legacy payload link is already complete",
+        ),
+    )
+
+    assert result.status == "already_repaired"
+    experiments.create_run.assert_not_called()
+    experiments.create_signal.assert_not_called()
+    experiments.list_signals_for_run_or_order_ids.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        strategy_id="zero_dte_lottery_v1",
+        mode=ExecutionMode.PAPER,
+        run_ids={"zero-run-1"},
+        order_ids={"zero-order-1"},
+    )
+
+
 def test_consistency_repair_rejects_without_confirmation() -> None:
     service, _experiments, _orders, _audit_events = _consistency_service()
 
