@@ -51,6 +51,8 @@ jobs:
         run: .venv/bin/python scripts/check_environment.py --strict --json-output artifacts/ci/environment.json
       - name: Run safety gates without external broker access
         run: .venv/bin/python scripts/run_regression.py p0-safety --skip-running-api-checks --evidence-dir artifacts/ci/p0 --json-output artifacts/ci/p0-manifest.json
+      - name: Verify bounded reads with large histories
+        run: .venv/bin/python scripts/run_regression.py history-query --json-output artifacts/ci/history-query.json
       - name: Save verification evidence
         if: always()
         uses: actions/upload-artifact@v4

@@ -567,5 +567,5 @@ def test_covered_call_lifecycle_reconcile_route_returns_counts() -> None:
     assert body["sell_orders_executed"] == 0
     service.reconcile_pending_lifecycle.assert_called_once_with(
         external_account_id="LBPT10087357",
-        limit=20,
+        mode=ExecutionMode.PAPER,
     )

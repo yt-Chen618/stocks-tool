@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,11 @@ from stocks_tool.domain.enums import (
     ExecutionMode,
     TradingIntentState,
     TradingOperation,
+)
+from stocks_tool.domain.intent_recovery import (
+    UNRESOLVED_INTENT_STATES,
+    covers_intent_creation,
+    evaluate_no_order_resolution,
 )
 from stocks_tool.domain.models import (
     BrokerOrderIntent,
@@ -42,14 +48,6 @@ from stocks_tool.repositories.sqlalchemy_order_repository import SQLAlchemyOrder
 from stocks_tool.repositories.sqlalchemy_strategy_audit_event_repository import (
     SQLAlchemyStrategyAuditEventRepository,
 )
-
-
-UNRESOLVED_INTENT_STATES = {
-    TradingIntentState.PREPARED.value,
-    TradingIntentState.SUBMITTING.value,
-    TradingIntentState.BROKER_ACKNOWLEDGED.value,
-    TradingIntentState.UNKNOWN.value,
-}
 
 
 class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
@@ -199,12 +197,11 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[TradeActionIntent]:
-        query = (
-            select(TradeActionIntentRecord)
-            .order_by(TradeActionIntentRecord.created_at.desc())
-            .limit(limit)
+        query = select(TradeActionIntentRecord).order_by(
+            TradeActionIntentRecord.created_at.desc(),
+            TradeActionIntentRecord.id.desc(),
         )
         if external_account_id is not None:
             query = query.where(TradeActionIntentRecord.external_account_id == external_account_id)
@@ -212,6 +209,8 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
             query = query.where(TradeActionIntentRecord.execution_mode == mode.value)
         if state is not None:
             query = query.where(TradeActionIntentRecord.state == state.value)
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_action_domain(record) for record in self.session.execute(query).scalars().all()]
 
     def prepare_intent(
@@ -538,46 +537,14 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         note: str | None = None,
     ) -> BrokerOrderIntent:
         intent, action = self._load_pair_for_update(intent_id)
-        if intent.execution_mode != ExecutionMode.PAPER.value:
-            raise PermissionError("Only paper-mode intents can be resolved as no order.")
-        if (
-            intent.operation == TradingOperation.SUBMIT.value
-            and intent.external_order_id is not None
-        ):
-            raise ValueError(
-                f"Trading intent '{intent.id}' already has external order id "
-                f"'{intent.external_order_id}' and cannot be resolved as no order."
-            )
-        if intent.state not in {
-            TradingIntentState.PREPARED.value,
-            TradingIntentState.SUBMITTING.value,
-            TradingIntentState.UNKNOWN.value,
-        }:
-            raise ValueError(
-                f"Trading intent '{intent.id}' in state '{intent.state}' cannot be resolved as no order."
-            )
-        if intent.reconciliation_attempts < 3:
-            raise ValueError("At least three successful zero-match reconciliations are required.")
-        if intent.first_reconciled_at is None or intent.last_reconciled_at is None:
-            raise ValueError("Zero-match reconciliation timestamps are incomplete.")
-        if not self._coverage_covers_intent(
-            intent,
-            intent.reconciliation_coverage_start_at,
-            intent.reconciliation_coverage_end_at,
-        ):
-            raise ValueError(
-                "Complete broker-history coverage evidence is required for no-order resolution."
-            )
-        if (intent.last_reconciled_at - intent.first_reconciled_at).total_seconds() < 60:
-            raise ValueError("Zero-match reconciliations must span at least 60 seconds.")
-        if (
-            not self._is_standalone_action_pair(intent, action)
-            and action.state == TradingIntentState.PERSISTED.value
-        ):
-            raise ValueError(
-                f"Trade action intent '{action.id}' is already persisted and cannot accept "
-                "a child no-order resolution."
-            )
+        policy = evaluate_no_order_resolution(
+            self._to_domain(intent),
+            self._to_action_domain(action),
+        )
+        if not policy.eligible:
+            if policy.permission_denied:
+                raise PermissionError(policy.message)
+            raise ValueError(policy.message)
         resolution = {
             "resolution": TradingIntentState.RESOLVED_NO_ORDER.value,
             "actor": actor,
@@ -613,16 +580,68 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        states: Collection[TradingIntentState] | None = None,
+        operation: TradingOperation | None = None,
+        operations: Collection[TradingOperation] | None = None,
+        limit: int | None = 100,
     ) -> list[BrokerOrderIntent]:
-        query = select(OrderIntentRecord).order_by(OrderIntentRecord.created_at.desc()).limit(limit)
+        query = select(OrderIntentRecord).order_by(
+            OrderIntentRecord.created_at.desc(),
+            OrderIntentRecord.id.desc(),
+        )
         if external_account_id is not None:
             query = query.where(OrderIntentRecord.external_account_id == external_account_id)
         if mode is not None:
             query = query.where(OrderIntentRecord.execution_mode == mode.value)
         if state is not None:
             query = query.where(OrderIntentRecord.state == state.value)
+        if states is not None:
+            state_values = [item.value for item in states]
+            if not state_values:
+                return []
+            query = query.where(OrderIntentRecord.state.in_(state_values))
+        if operation is not None:
+            query = query.where(OrderIntentRecord.operation == operation.value)
+        if operations is not None:
+            operation_values = [item.value for item in operations]
+            if not operation_values:
+                return []
+            query = query.where(OrderIntentRecord.operation.in_(operation_values))
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_domain(record) for record in self.session.execute(query).scalars().all()]
+
+    def count_intents(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        state: TradingIntentState | None = None,
+    ) -> int:
+        query = select(func.count(OrderIntentRecord.id))
+        if external_account_id is not None:
+            query = query.where(OrderIntentRecord.external_account_id == external_account_id)
+        if mode is not None:
+            query = query.where(OrderIntentRecord.execution_mode == mode.value)
+        if state is not None:
+            query = query.where(OrderIntentRecord.state == state.value)
+        return int(self.session.execute(query).scalar_one() or 0)
+
+    def count_actions(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        state: TradingIntentState | None = None,
+    ) -> int:
+        query = select(func.count(TradeActionIntentRecord.id))
+        if external_account_id is not None:
+            query = query.where(TradeActionIntentRecord.external_account_id == external_account_id)
+        if mode is not None:
+            query = query.where(TradeActionIntentRecord.execution_mode == mode.value)
+        if state is not None:
+            query = query.where(TradeActionIntentRecord.state == state.value)
+        return int(self.session.execute(query).scalar_one() or 0)
 
     def has_unresolved_intents(
         self,
@@ -636,7 +655,9 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
             .where(
                 OrderIntentRecord.external_account_id == external_account_id,
                 OrderIntentRecord.execution_mode == mode.value,
-                OrderIntentRecord.state.in_(UNRESOLVED_INTENT_STATES),
+                OrderIntentRecord.state.in_(
+                    [state.value for state in UNRESOLVED_INTENT_STATES]
+                ),
             )
             .limit(1)
         ).scalar_one_or_none()
@@ -645,7 +666,9 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         action_query = select(TradeActionIntentRecord.id).where(
             TradeActionIntentRecord.external_account_id == external_account_id,
             TradeActionIntentRecord.execution_mode == mode.value,
-            TradeActionIntentRecord.state.in_(UNRESOLVED_INTENT_STATES),
+            TradeActionIntentRecord.state.in_(
+                [state.value for state in UNRESOLVED_INTENT_STATES]
+            ),
         )
         if exclude_action_intent_id is not None:
             action_query = action_query.where(
@@ -1127,12 +1150,11 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
         coverage_start_at: datetime | None,
         coverage_end_at: datetime | None,
     ) -> bool:
-        if coverage_start_at is None or coverage_end_at is None:
-            return False
-        start_at = cls._as_utc(coverage_start_at)
-        end_at = cls._as_utc(coverage_end_at)
-        created_at = cls._as_utc(intent.created_at)
-        return start_at <= created_at <= end_at
+        return covers_intent_creation(
+            created_at=intent.created_at,
+            coverage_start_at=coverage_start_at,
+            coverage_end_at=coverage_end_at,
+        )
 
     @staticmethod
     def _to_action_domain(record: TradeActionIntentRecord) -> TradeActionIntent:

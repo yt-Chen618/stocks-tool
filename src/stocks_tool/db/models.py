@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     Numeric,
     String,
     Text,
@@ -349,6 +350,7 @@ class OrderRecord(TimestampMixin, Base):
             "external_order_id",
             name="uq_orders_broker_mode_external_order_id",
         ),
+        Index("ix_orders_broker_account_created_id", "broker_account_id", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
@@ -398,6 +400,9 @@ class OrderRecord(TimestampMixin, Base):
 
 class ExecutionRecord(TimestampMixin, Base):
     __tablename__ = "executions"
+    __table_args__ = (
+        Index("ix_executions_account_created_id", "external_account_id", "created_at", "id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     order_id: Mapped[str] = mapped_column(
@@ -421,6 +426,17 @@ class ExecutionRecord(TimestampMixin, Base):
 
 class BullPutSpreadRecord(TimestampMixin, Base):
     __tablename__ = "bull_put_spreads"
+    __table_args__ = (
+        Index(
+            "ix_bull_put_spreads_active_scope",
+            "external_account_id",
+            "execution_mode",
+            "status",
+            "underlying_symbol",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     broker_account_id: Mapped[str | None] = mapped_column(
@@ -657,6 +673,20 @@ class StrategyAuditEventRecord(TimestampMixin, Base):
 
 class StrategyProposalRecord(TimestampMixin, Base):
     __tablename__ = "strategy_proposals"
+    __table_args__ = (
+        Index(
+            "ix_strategy_proposals_decision_scope",
+            "external_account_id",
+            "strategy_id",
+            "execution_mode",
+            "symbol",
+            "status",
+            "proposed_action",
+            "updated_at",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     broker_account_id: Mapped[str | None] = mapped_column(
@@ -696,6 +726,18 @@ class StrategyProposalRecord(TimestampMixin, Base):
 
 class StrategyRunRecord(TimestampMixin, Base):
     __tablename__ = "strategy_runs"
+    __table_args__ = (
+        Index(
+            "ix_strategy_runs_decision_scope",
+            "external_account_id",
+            "strategy_id",
+            "execution_mode",
+            "proposal_id",
+            "run_type",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     broker_account_id: Mapped[str | None] = mapped_column(
@@ -813,6 +855,14 @@ class StrategyAdvisorRunRecord(TimestampMixin, Base):
 
 class JournalEntryRecord(TimestampMixin, Base):
     __tablename__ = "journal_entries"
+    __table_args__ = (
+        Index(
+            "ix_journal_entries_account_created_id",
+            "external_account_id",
+            "created_at",
+            "id",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     trade_plan_id: Mapped[str | None] = mapped_column(

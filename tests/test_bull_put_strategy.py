@@ -2230,7 +2230,7 @@ def test_run_entry_scan_replays_exact_success_result_before_sync() -> None:
 def test_run_review_returns_not_due_before_threshold() -> None:
     service, _, spreads, _ = build_service()
     closed_at = datetime(2026, 5, 20, 14, 45, tzinfo=timezone.utc)
-    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None: (
+    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None, **kwargs: (
         [build_closed_spread(spread_id="closed-1", closed_at=closed_at, exit_reason="take_profit")]
         if status == SpreadStatus.CLOSED
         else []
@@ -2571,7 +2571,7 @@ def test_run_review_suggests_tighter_delta_after_stop_loss_cluster() -> None:
             limit_price=Decimal("0.50"),
         )
 
-    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None: (
+    spreads.list_spreads.side_effect = lambda external_account_id=None, status=None, **kwargs: (
         closed_spreads if status == SpreadStatus.CLOSED else []
     )
     order_service.get_order.side_effect = lambda order_id: order_map.get(order_id)

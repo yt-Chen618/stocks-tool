@@ -176,7 +176,20 @@ class FakeExperiments:
         self.proposal = proposal
         return proposal
 
-    def list_proposals(self, *, external_account_id=None, strategy_id=None, status=None, limit=20):
+    def list_proposals(
+        self,
+        *,
+        external_account_id=None,
+        strategy_id=None,
+        status=None,
+        statuses=None,
+        mode=None,
+        symbol=None,
+        symbols=None,
+        proposal_ids=None,
+        proposed_actions=None,
+        limit=20,
+    ):
         proposals = list(self.proposals.values())
         if external_account_id is not None:
             proposals = [item for item in proposals if item.external_account_id == external_account_id]
@@ -184,15 +197,54 @@ class FakeExperiments:
             proposals = [item for item in proposals if item.strategy_id == strategy_id]
         if status is not None:
             proposals = [item for item in proposals if item.status == status]
-        return proposals[:limit]
+        if statuses is not None:
+            proposals = [item for item in proposals if item.status in statuses]
+        if mode is not None:
+            proposals = [item for item in proposals if item.mode == mode]
+        if symbol is not None:
+            proposals = [item for item in proposals if item.symbol == symbol]
+        if symbols is not None:
+            proposals = [item for item in proposals if item.symbol in symbols]
+        if proposal_ids is not None:
+            proposals = [item for item in proposals if item.id in proposal_ids]
+        if proposed_actions is not None:
+            proposals = [item for item in proposals if item.proposed_action in proposed_actions]
+        return proposals if limit is None else proposals[:limit]
 
-    def list_runs(self, *, external_account_id=None, strategy_id=None, limit=20):
+    def list_runs(
+        self,
+        *,
+        external_account_id=None,
+        strategy_id=None,
+        status=None,
+        statuses=None,
+        mode=None,
+        symbol=None,
+        proposal_id=None,
+        proposal_ids=None,
+        run_types=None,
+        limit=20,
+    ):
         runs = list(self.runs)
         if external_account_id is not None:
             runs = [item for item in runs if item.external_account_id == external_account_id]
         if strategy_id is not None:
             runs = [item for item in runs if item.strategy_id == strategy_id]
-        return runs[:limit]
+        if status is not None:
+            runs = [item for item in runs if item.status == status]
+        if statuses is not None:
+            runs = [item for item in runs if item.status in statuses]
+        if mode is not None:
+            runs = [item for item in runs if item.mode == mode]
+        if symbol is not None:
+            runs = [item for item in runs if item.symbol == symbol]
+        if proposal_id is not None:
+            runs = [item for item in runs if item.proposal_id == proposal_id]
+        if proposal_ids is not None:
+            runs = [item for item in runs if item.proposal_id in proposal_ids]
+        if run_types is not None:
+            runs = [item for item in runs if item.run_type in run_types]
+        return runs if limit is None else runs[:limit]
 
     def get_latest_run_for_proposal(self, *, proposal_id, strategy_id, run_types):
         for run in self.runs:

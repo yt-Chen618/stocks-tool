@@ -11,6 +11,7 @@ from stocks_tool.domain.enums import (
     ReconciliationStatus,
     SpreadStatus,
     StrategyProposalStatus,
+    StrategyRunStatus,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -45,6 +46,7 @@ from stocks_tool.domain.models import (
     UpdateWatchlistRequest,
     Watchlist,
 )
+from stocks_tool.domain.pagination import CursorPage
 
 
 class ConcurrentSpreadUpdateError(RuntimeError):
@@ -214,7 +216,28 @@ class OrderRepository(ABC):
         self,
         external_account_id: str | None = None,
         status: OrderStatus | None = None,
+        *,
+        broker: BrokerName | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        statuses: Collection[OrderStatus] | None = None,
+        order_ids: Collection[str] | None = None,
+        order_intent_ids: Collection[str] | None = None,
     ) -> list[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_orders_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Order]:
         raise NotImplementedError
 
     @abstractmethod
@@ -251,6 +274,17 @@ class ExecutionRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_executions_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Execution]:
+        raise NotImplementedError
+
+    @abstractmethod
     def upsert_execution(self, execution: Execution) -> Execution:
         raise NotImplementedError
 
@@ -270,6 +304,19 @@ class JournalRepository(ABC):
     ) -> list[JournalEntry]:
         raise NotImplementedError
 
+    @abstractmethod
+    def list_entries_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: JournalEntryType | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[JournalEntry]:
+        raise NotImplementedError
+
 
 class BullPutSpreadRepository(ABC):
     @abstractmethod
@@ -285,6 +332,10 @@ class BullPutSpreadRepository(ABC):
         self,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        *,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
     ) -> list[BullPutSpread]:
         raise NotImplementedError
 
@@ -469,7 +520,13 @@ class StrategyExperimentRepository(ABC):
         external_account_id: str | None = None,
         strategy_id: str | None = None,
         status: StrategyProposalStatus | None = None,
-        limit: int = 20,
+        statuses: Collection[StrategyProposalStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        proposal_ids: Collection[str] | None = None,
+        proposed_actions: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyProposal]:
         raise NotImplementedError
 
@@ -483,7 +540,14 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        status: StrategyRunStatus | None = None,
+        statuses: Collection[StrategyRunStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        proposal_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
+        run_types: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyRun]:
         raise NotImplementedError
 

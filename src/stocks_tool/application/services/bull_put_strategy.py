@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
@@ -206,10 +206,16 @@ class BullPutStrategyService:
         *,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
     ) -> list[BullPutSpread]:
         return self.spreads.list_spreads(
             external_account_id=external_account_id,
             status=status,
+            statuses=statuses,
+            mode=mode,
+            underlying_symbol=underlying_symbol,
         )
 
     def get_spread(self, spread_id: str) -> BullPutSpread | None:
@@ -2782,8 +2788,11 @@ class BullPutStrategyService:
     ) -> BullPutStrategyRuntimeState:
         active_spreads = [
             spread
-            for spread in self.spreads.list_spreads(external_account_id=state.external_account_id)
-            if spread.status in ACTIVE_SPREAD_STATUSES
+            for spread in self.spreads.list_spreads(
+                external_account_id=state.external_account_id,
+                statuses=ACTIVE_SPREAD_STATUSES,
+                mode=state.mode,
+            )
         ]
         open_spreads_count = compute_open_spread_count(active_spreads)
         daily_cap_reached = (
@@ -4613,7 +4622,10 @@ class BullPutStrategyService:
         if runtime_reason is not None:
             raise ValueError(runtime_reason)
         strategy = self.settings.bull_put_strategy
-        account_spreads = self.spreads.list_spreads(external_account_id=external_account_id)
+        account_spreads = self.spreads.list_spreads(
+            external_account_id=external_account_id,
+            mode=runtime_state.mode,
+        )
         if any(spread.manual_action_required for spread in account_spreads):
             raise ValueError(
                 f"Account '{external_account_id}' has a Bull Put item requiring manual action; new entry is blocked."
@@ -4630,11 +4642,11 @@ class BullPutStrategyService:
                 raise ValueError(
                     f"Account '{external_account_id}' already used the daily bull put entry-attempt capacity."
                 )
-        active_spreads = [
-            spread
-            for spread in account_spreads
-            if spread.status in ACTIVE_SPREAD_STATUSES
-        ]
+        active_spreads = self.spreads.list_spreads(
+            external_account_id=external_account_id,
+            statuses=ACTIVE_SPREAD_STATUSES,
+            mode=runtime_state.mode,
+        )
 
         if len(active_spreads) >= strategy.account_max_open_spreads:
             raise ValueError(

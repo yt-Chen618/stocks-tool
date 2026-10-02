@@ -1,6 +1,7 @@
 import hashlib
 import json
 from collections import Counter
+from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -90,12 +91,21 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         external_account_id: str | None = None,
         strategy_id: str | None = None,
         status: StrategyProposalStatus | None = None,
-        limit: int = 20,
+        statuses: Collection[StrategyProposalStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        proposal_ids: Collection[str] | None = None,
+        proposed_actions: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyProposal]:
         query = (
             select(StrategyProposalRecord)
-            .order_by(StrategyProposalRecord.updated_at.desc(), StrategyProposalRecord.created_at.desc())
-            .limit(limit)
+            .order_by(
+                StrategyProposalRecord.updated_at.desc(),
+                StrategyProposalRecord.created_at.desc(),
+                StrategyProposalRecord.id.desc(),
+            )
         )
         if external_account_id is not None:
             query = query.where(StrategyProposalRecord.external_account_id == external_account_id)
@@ -103,6 +113,32 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyProposalRecord.strategy_id == strategy_id)
         if status is not None:
             query = query.where(StrategyProposalRecord.status == status.value)
+        if statuses is not None:
+            normalized_statuses = [item.value for item in statuses]
+            if not normalized_statuses:
+                return []
+            query = query.where(StrategyProposalRecord.status.in_(normalized_statuses))
+        if mode is not None:
+            query = query.where(StrategyProposalRecord.execution_mode == mode.value)
+        if symbol is not None:
+            query = query.where(StrategyProposalRecord.symbol == symbol.strip().upper())
+        if symbols is not None:
+            normalized_symbols = [item.strip().upper() for item in symbols if item.strip()]
+            if not normalized_symbols:
+                return []
+            query = query.where(StrategyProposalRecord.symbol.in_(normalized_symbols))
+        if proposal_ids is not None:
+            normalized_ids = [str(item) for item in proposal_ids if str(item)]
+            if not normalized_ids:
+                return []
+            query = query.where(StrategyProposalRecord.id.in_(normalized_ids))
+        if proposed_actions is not None:
+            normalized_actions = [item.strip() for item in proposed_actions if item.strip()]
+            if not normalized_actions:
+                return []
+            query = query.where(StrategyProposalRecord.proposed_action.in_(normalized_actions))
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_proposal(record) for record in self.session.execute(query).scalars().all()]
 
     def create_run(self, request: CreateStrategyRunRequest) -> StrategyRun:
@@ -136,17 +172,48 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        status: StrategyRunStatus | None = None,
+        statuses: Collection[StrategyRunStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        proposal_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
+        run_types: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyRun]:
         query = (
             select(StrategyRunRecord)
-            .order_by(StrategyRunRecord.created_at.desc())
-            .limit(limit)
+            .order_by(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc())
         )
         if external_account_id is not None:
             query = query.where(StrategyRunRecord.external_account_id == external_account_id)
         if strategy_id is not None:
             query = query.where(StrategyRunRecord.strategy_id == strategy_id)
+        if status is not None:
+            query = query.where(StrategyRunRecord.status == status.value)
+        if statuses is not None:
+            normalized_statuses = [item.value for item in statuses]
+            if not normalized_statuses:
+                return []
+            query = query.where(StrategyRunRecord.status.in_(normalized_statuses))
+        if mode is not None:
+            query = query.where(StrategyRunRecord.execution_mode == mode.value)
+        if symbol is not None:
+            query = query.where(StrategyRunRecord.symbol == symbol.strip().upper())
+        if proposal_id is not None:
+            query = query.where(StrategyRunRecord.proposal_id == proposal_id)
+        if proposal_ids is not None:
+            normalized_ids = [str(item) for item in proposal_ids if str(item)]
+            if not normalized_ids:
+                return []
+            query = query.where(StrategyRunRecord.proposal_id.in_(normalized_ids))
+        if run_types is not None:
+            normalized_run_types = [item.strip() for item in run_types if item.strip()]
+            if not normalized_run_types:
+                return []
+            query = query.where(StrategyRunRecord.run_type.in_(normalized_run_types))
+        if limit is not None:
+            query = query.limit(limit)
         return [self._to_run(record) for record in self.session.execute(query).scalars().all()]
 
     def get_latest_run_for_proposal(

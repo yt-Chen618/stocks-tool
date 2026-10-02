@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from stocks_tool.api.dependencies import get_execution_repository
 from stocks_tool.domain.enums import BrokerName, OrderSide
 from stocks_tool.domain.models import Execution
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.main import app
 
 
@@ -37,6 +38,38 @@ def with_execution_repository(repository: Mock) -> TestClient:
 
 def clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def test_list_executions_paged_returns_bounded_page() -> None:
+    repository = Mock()
+    repository.list_executions_page.return_value = CursorPage(
+        items=[build_execution()],
+        next_cursor=None,
+        has_more=False,
+        limit=1,
+    )
+    client = with_execution_repository(repository)
+    try:
+        response = client.get(
+            "/executions/paged",
+            params={
+                "external_account_id": "LBPT10087357",
+                "order_id": "order-123",
+                "limit": 1,
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == "execution-123"
+    assert response.json()["has_more"] is False
+    repository.list_executions_page.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        order_id="order-123",
+        limit=1,
+        cursor=None,
+    )
 
 
 def test_list_executions_filters_by_account_and_order() -> None:

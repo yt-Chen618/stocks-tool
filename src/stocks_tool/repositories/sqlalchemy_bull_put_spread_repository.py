@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -33,12 +34,30 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         self,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        *,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
     ) -> list[BullPutSpread]:
-        query = select(BullPutSpreadRecord).order_by(BullPutSpreadRecord.created_at.desc())
+        query = select(BullPutSpreadRecord).order_by(
+            BullPutSpreadRecord.created_at.desc(),
+            BullPutSpreadRecord.id.desc(),
+        )
         if external_account_id is not None:
             query = query.where(BullPutSpreadRecord.external_account_id == external_account_id)
         if status is not None:
             query = query.where(BullPutSpreadRecord.status == status.value)
+        if statuses is not None:
+            normalized_statuses = [item.value for item in statuses]
+            if not normalized_statuses:
+                return []
+            query = query.where(BullPutSpreadRecord.status.in_(normalized_statuses))
+        if mode is not None:
+            query = query.where(BullPutSpreadRecord.execution_mode == mode.value)
+        if underlying_symbol is not None:
+            query = query.where(
+                BullPutSpreadRecord.underlying_symbol == underlying_symbol.strip().upper()
+            )
         try:
             records = self.session.execute(query).scalars().all()
             return [self._to_domain(record) for record in records]

@@ -746,6 +746,7 @@ class ReconciliationCoordinator:
                     spreads.list_spreads(
                         external_account_id=external_account_id,
                         status=status,
+                        mode=ExecutionMode.PAPER,
                     )
                 )
             if not active_spreads:
@@ -796,6 +797,7 @@ class ReconciliationCoordinator:
                 account_spreads = spreads.list_spreads(
                     external_account_id=external_account_id,
                     status=status,
+                    mode=ExecutionMode.PAPER,
                 )
             except Exception as exc:
                 if self._should_backoff_for_failure(exc):
@@ -1007,11 +1009,11 @@ class ReconciliationCoordinator:
             external_account_id=external_account_id,
             strategy_id=CoveredCallStrategyService.strategy_id,
             status=StrategyProposalStatus.EXECUTED,
-            limit=100,
+            mode=ExecutionMode.PAPER,
+            proposed_actions=CoveredCallStrategyService.open_proposal_actions,
+            limit=None,
         )
         for proposal in proposals:
-            if proposal.proposed_action not in CoveredCallStrategyService.open_proposal_actions:
-                continue
             covered_call_service.monitor_proposal(
                 proposal.id,
                 as_of=now,
@@ -1045,23 +1047,19 @@ class ReconciliationCoordinator:
         external_account_id: str,
         experiments: SQLAlchemyStrategyExperimentRepository,
     ) -> bool:
-        for status in (
-            StrategyProposalStatus.PENDING,
-            StrategyProposalStatus.APPROVED,
-            StrategyProposalStatus.EXECUTED,
-        ):
-            proposals = experiments.list_proposals(
-                external_account_id=external_account_id,
-                strategy_id=CoveredCallStrategyService.strategy_id,
-                status=status,
-                limit=100,
-            )
-            if any(
-                proposal.proposed_action in {"sell_covered_call", "roll_covered_call"}
-                for proposal in proposals
-            ):
-                return True
-        return False
+        proposals = experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=CoveredCallStrategyService.strategy_id,
+            statuses=(
+                StrategyProposalStatus.PENDING,
+                StrategyProposalStatus.APPROVED,
+                StrategyProposalStatus.EXECUTED,
+            ),
+            mode=ExecutionMode.PAPER,
+            proposed_actions=CoveredCallStrategyService.open_proposal_actions,
+            limit=None,
+        )
+        return bool(proposals)
 
     def _import_market_events_if_due(
         self,

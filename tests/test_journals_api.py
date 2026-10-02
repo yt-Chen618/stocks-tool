@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from stocks_tool.api.dependencies import get_journal_repository, get_journal_service
 from stocks_tool.domain.enums import JournalEntryType
 from stocks_tool.domain.models import JournalEntry
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.main import app
 
 
@@ -37,6 +38,41 @@ def with_journal_dependencies(repository: Mock | None = None, service: Mock | No
 
 def clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def test_list_journals_paged_returns_explicit_page_shape() -> None:
+    repository = Mock()
+    repository.list_entries_page.return_value = CursorPage(
+        items=[build_journal_entry()],
+        next_cursor="journal-next",
+        has_more=True,
+        limit=1,
+    )
+    client = with_journal_dependencies(repository=repository)
+    try:
+        response = client.get(
+            "/journals/paged",
+            params={
+                "external_account_id": "LBPT10087357",
+                "entry_type": "review",
+                "limit": 1,
+                "cursor": "journal-previous",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == "journal-123"
+    assert response.json()["next_cursor"] == "journal-next"
+    repository.list_entries_page.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        order_id=None,
+        trade_plan_id=None,
+        entry_type=JournalEntryType.REVIEW,
+        limit=1,
+        cursor="journal-previous",
+    )
 
 
 def test_list_journals_filters_by_account_order_and_type() -> None:

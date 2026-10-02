@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import datetime
 from typing import Protocol
 
@@ -69,8 +70,17 @@ class TradingIntentLedger(Protocol):
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[TradeActionIntent]:
+        ...
+
+    def count_actions(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        state: TradingIntentState | None = None,
+    ) -> int:
         ...
 
     def prepare_intent(
@@ -153,8 +163,20 @@ class TradingIntentLedger(Protocol):
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        states: Collection[TradingIntentState] | None = None,
+        operation: TradingOperation | None = None,
+        operations: Collection[TradingOperation] | None = None,
+        limit: int | None = 100,
     ) -> list[BrokerOrderIntent]:
+        ...
+
+    def count_intents(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        state: TradingIntentState | None = None,
+    ) -> int:
         ...
 
     def has_unresolved_intents(

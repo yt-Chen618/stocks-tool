@@ -7,7 +7,11 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeDependencyError,
     LongbridgeIntegrationError,
 )
-from stocks_tool.api.dependencies import get_bull_put_strategy_service, get_order_service
+from stocks_tool.api.dependencies import (
+    get_bull_put_spread_repository,
+    get_bull_put_strategy_service,
+    get_order_service,
+)
 from stocks_tool.api.idempotency import require_idempotency_key
 from stocks_tool.application.services.bull_put_strategy import (
     ACTIVE_SPREAD_STATUSES,
@@ -40,6 +44,7 @@ from stocks_tool.domain.models import (
     RecoverBullPutCloseRequest,
     UpdateBullPutStrategyRuntimeRequest,
 )
+from stocks_tool.ports.repository import BullPutSpreadRepository
 
 router = APIRouter()
 
@@ -130,11 +135,35 @@ def list_bull_put_spreads(
         description="Optional broker account id filter, e.g. LBPT10087357",
     ),
     status: SpreadStatus | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
     service: BullPutStrategyService = Depends(get_bull_put_strategy_service),
 ) -> list[BullPutSpread]:
     return service.list_spreads(
         external_account_id=external_account_id,
         status=status,
+        mode=mode,
+    )
+
+
+@router.get("/bull-put/active-spreads", response_model=list[BullPutSpread])
+def list_active_bull_put_spreads(
+    external_account_id: str | None = Query(default=None),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    symbol: str | None = Query(default=None),
+    repository: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
+) -> list[BullPutSpread]:
+    """Return only active spreads using a database-side status predicate.
+
+    The historical ``/bull-put/spreads`` route remains a complete read. This
+    route is the bounded strategy/dashboard read and is never used by order
+    capacity or lifecycle decisions.
+    """
+
+    return repository.list_spreads(
+        external_account_id=external_account_id,
+        statuses=ACTIVE_SPREAD_STATUSES,
+        mode=mode,
+        underlying_symbol=symbol,
     )
 
 
@@ -161,8 +190,8 @@ def get_bull_put_dashboard_snapshot(
             external_account_id=external_account_id,
             mode=mode,
         )
-        spreads = service.list_spreads(external_account_id=external_account_id)
-        orders = order_service.list_orders(external_account_id=external_account_id)
+        spreads = service.list_spreads(external_account_id=external_account_id, mode=mode)
+        orders = order_service.list_orders(external_account_id=external_account_id, mode=mode)
         return BullPutDashboardSnapshot(
             external_account_id=external_account_id,
             mode=mode,

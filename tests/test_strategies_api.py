@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import (
+    get_bull_put_spread_repository,
     get_bull_put_strategy_service,
     get_order_service,
     get_zero_dte_lottery_strategy_service,
@@ -96,6 +97,7 @@ def test_strategy_openapi_keeps_legacy_route_inventory() -> None:
         "/strategies/bull-put/preview",
         "/strategies/bull-put/readiness",
         "/strategies/bull-put/spreads",
+        "/strategies/bull-put/active-spreads",
         "/strategies/bull-put/spreads/{spread_id}",
         "/strategies/bull-put/dashboard",
         "/strategies/bull-put/runtime",
@@ -125,6 +127,33 @@ def with_strategy_service(service: Mock) -> TestClient:
 
 def clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def test_active_bull_put_spreads_query_pushes_status_filter_to_repository() -> None:
+    repository = Mock()
+    repository.list_spreads.return_value = []
+    app.dependency_overrides[get_bull_put_spread_repository] = lambda: repository
+    client = TestClient(app)
+    try:
+        response = client.get(
+            "/strategies/bull-put/active-spreads",
+            params={
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "symbol": "QQQ.US",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    repository.list_spreads.assert_called_once()
+    call_kwargs = repository.list_spreads.call_args.kwargs
+    assert call_kwargs["external_account_id"] == "LBPT10087357"
+    assert call_kwargs["mode"] == ExecutionMode.PAPER
+    assert call_kwargs["underlying_symbol"] == "QQQ.US"
+    assert call_kwargs["statuses"]
+    assert SpreadStatus.OPEN in call_kwargs["statuses"]
 
 
 def test_preview_bull_put_strategy_returns_scan_result() -> None:
@@ -795,6 +824,35 @@ def test_get_bull_put_dashboard_snapshot_returns_lifecycle_warnings() -> None:
     assert body["open_order_count"] == 0
     assert body["lifecycle_warnings"][0]["code"] == "close_order_canceled_manual_action_needed"
     assert body["lifecycle_warnings"][0]["record_id"] == "spread-1"
+    service.list_spreads.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+    order_service.list_orders.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+    )
+
+
+def test_list_bull_put_spreads_history_route_accepts_optional_mode_filter() -> None:
+    service = Mock()
+    service.list_spreads.return_value = []
+    app.dependency_overrides[get_bull_put_strategy_service] = lambda: service
+    client = TestClient(app)
+    try:
+        response = client.get(
+            "/strategies/bull-put/spreads",
+            params={"external_account_id": "LBPT10087357", "mode": "live"},
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    service.list_spreads.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        status=None,
+        mode=ExecutionMode.LIVE,
+    )
 
 
 def test_run_bull_put_runtime_scan_returns_scan_result() -> None:

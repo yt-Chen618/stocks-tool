@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeConfigurationError,
@@ -13,13 +13,14 @@ from stocks_tool.application.services.orders import (
     TradingIntentError,
     TradingIntentOutcomeUnknownError,
 )
-from stocks_tool.domain.enums import ExecutionMode
+from stocks_tool.domain.enums import ExecutionMode, OrderStatus
 from stocks_tool.domain.models import (
     CreateOrderRequest,
     Order,
     OrderSyncResult,
     ReplaceOrderRequest,
 )
+from stocks_tool.domain.pagination import CursorPage
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -43,6 +44,29 @@ def list_orders(
     service: OrderService = Depends(get_order_service),
 ) -> list[Order]:
     return service.list_orders(external_account_id=external_account_id)
+
+
+@router.get("/paged", response_model=CursorPage[Order])
+def list_orders_page(
+    external_account_id: str | None = Query(default=None),
+    status: OrderStatus | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None),
+    service: OrderService = Depends(get_order_service),
+) -> CursorPage[Order]:
+    try:
+        return service.list_orders_page(
+            external_account_id=external_account_id,
+            status=status,
+            mode=mode,
+            symbol=symbol,
+            limit=limit,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/{order_id}", response_model=Order)

@@ -260,7 +260,7 @@ def test_sync_blocked_spread_emits_risk_alert_without_monitoring_or_orders() -> 
     coordinator._strategy_audit_events = audit_events
     spreads = Mock()
     active = build_open_spread(last_synced_at=None)
-    spreads.list_spreads.side_effect = lambda *, external_account_id, status: (
+    spreads.list_spreads.side_effect = lambda *, external_account_id, status, **kwargs: (
         [active] if status == SpreadStatus.OPEN else []
     )
 
@@ -1420,8 +1420,14 @@ def test_reconciliation_coordinator_runs_covered_call_proposal_scan_when_enabled
     experiments.list_proposals.assert_any_call(
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
-        status=StrategyProposalStatus.PENDING,
-        limit=100,
+        statuses=(
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
+        ),
+        mode=ExecutionMode.PAPER,
+        proposed_actions={"sell_covered_call", "roll_covered_call"},
+        limit=None,
     )
 
 
@@ -1522,7 +1528,9 @@ def test_reconciliation_coordinator_monitors_executed_covered_calls_when_enabled
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
         status=StrategyProposalStatus.EXECUTED,
-        limit=100,
+        mode=ExecutionMode.PAPER,
+        proposed_actions={"sell_covered_call", "roll_covered_call"},
+        limit=None,
     )
 
 

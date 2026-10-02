@@ -132,8 +132,13 @@ class ResearchWorkspaceService:
 
         if external_account_id:
             for spread in self.bull_put_spreads.list_spreads(
-                external_account_id=external_account_id
+                external_account_id=external_account_id,
+                statuses=RESEARCH_ACTIVE_SPREAD_STATUSES,
+                mode=mode,
             ):
+                # Keep the invariant at the application boundary as a
+                # defense for alternate repositories and test doubles. The
+                # SQLAlchemy repository applies the same filter in SQL.
                 if spread.status not in RESEARCH_ACTIVE_SPREAD_STATUSES:
                     continue
                 row = self._row(rows_by_symbol, spread.underlying_symbol)
@@ -143,11 +148,14 @@ class ResearchWorkspaceService:
         if len(rows_by_symbol) > RESEARCH_UNIVERSE_LIMIT:
             raise ResearchUniverseLimitError(len(rows_by_symbol))
 
+        symbols = sorted(rows_by_symbol)
         if external_account_id:
             try:
                 proposals = self.strategy_experiments.list_proposals(
                     external_account_id=external_account_id,
-                    limit=100,
+                    mode=mode,
+                    symbols=symbols,
+                    limit=None,
                 )
             except Exception:
                 proposals = []
@@ -165,7 +173,6 @@ class ResearchWorkspaceService:
                     f"{proposal.strategy_id}:proposal:{proposal.status.value}",
                 )
 
-        symbols = list(rows_by_symbol)
         now = datetime.now(timezone.utc)
         try:
             events = self.market_events.list_events(

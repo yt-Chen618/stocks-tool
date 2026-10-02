@@ -304,13 +304,21 @@ def get_covered_call_activity(
 @router.post("/covered-call/lifecycle/{external_account_id}/reconcile")
 def reconcile_covered_call_lifecycle(
     external_account_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        deprecated=True,
+        description="Deprecated compatibility parameter; lifecycle evidence reads are complete and ignore this history cap.",
+    ),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
 ) -> dict[str, int]:
+    _ = limit  # Kept only for backward-compatible clients; the old history cap is retired.
     try:
         return service.reconcile_pending_lifecycle(
             external_account_id=external_account_id,
-            limit=limit,
+            mode=mode,
         )
     except TradingIntentError as exc:
         _raise_strategy_intent_http_error(exc)

@@ -2,14 +2,25 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 
+from sqlalchemy import create_engine
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.orm import Session
+
 from stocks_tool.application.services.strategy_lifecycle import BULL_PUT_CLOSE_ORDER_WARNING
-from stocks_tool.db.models import BullPutSpreadRecord
+from stocks_tool.db.base import Base
+from stocks_tool.db.models import BrokerAccountRecord, BullPutSpreadRecord
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, SpreadStatus
 from stocks_tool.domain.models import BullPutSpread
 from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import SQLAlchemyBullPutSpreadRepository
 
 
 NOW = datetime(2026, 6, 15, 14, 45, tzinfo=timezone.utc)
+
+
+@compiles(JSONB, "sqlite")
+def compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+    return "JSON"
 
 
 def _spread(**updates) -> BullPutSpread:
@@ -113,3 +124,62 @@ def test_bull_put_spread_repository_rolls_back_list_failure() -> None:
         raise AssertionError("Expected list_spreads to re-raise the database failure.")
 
     session.rollback.assert_called_once()
+
+
+def test_active_spread_query_is_database_filtered_and_keeps_rollback_failed() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    try:
+        with Session(engine, expire_on_commit=False) as session:
+            session.add(
+                BrokerAccountRecord(
+                    id="broker-account-1",
+                    broker=BrokerName.LONGBRIDGE.value,
+                    external_account_id="LBPT10087357",
+                )
+            )
+            for index, state in enumerate(
+                (SpreadStatus.OPEN, SpreadStatus.CLOSED, SpreadStatus.ROLLBACK_FAILED)
+            ):
+                session.add(
+                    BullPutSpreadRecord(
+                        id=f"spread-{index}",
+                        broker_account_id="broker-account-1",
+                        broker=BrokerName.LONGBRIDGE.value,
+                        external_account_id="LBPT10087357",
+                        strategy_id="paper_bull_put_v1",
+                        execution_mode=ExecutionMode.PAPER.value,
+                        underlying_symbol="QQQ.US",
+                        expiration_date=date(2026, 10, 9),
+                        contracts=1,
+                        width=Decimal("3"),
+                        long_symbol="QQQ261009P500000.US",
+                        long_strike=Decimal("500"),
+                        short_symbol="QQQ261009P503000.US",
+                        short_strike=Decimal("503"),
+                        status=state.value,
+                        created_at=NOW,
+                        updated_at=NOW,
+                    )
+                )
+            session.commit()
+
+            spreads = SQLAlchemyBullPutSpreadRepository(session).list_spreads(
+                external_account_id="LBPT10087357",
+                mode=ExecutionMode.PAPER,
+                statuses={
+                    SpreadStatus.ENTRY_PENDING_LONG,
+                    SpreadStatus.ENTRY_PENDING_SHORT,
+                    SpreadStatus.OPEN,
+                    SpreadStatus.EXIT_PENDING_SHORT,
+                    SpreadStatus.EXIT_PENDING_LONG,
+                    SpreadStatus.ROLLBACK_FAILED,
+                },
+            )
+
+            assert {spread.status for spread in spreads} == {
+                SpreadStatus.OPEN,
+                SpreadStatus.ROLLBACK_FAILED,
+            }
+    finally:
+        engine.dispose()

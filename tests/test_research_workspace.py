@@ -345,7 +345,9 @@ def test_universe_adds_proposal_context_without_expanding_proposal_only_symbols(
     assert "ONLYPROPOSAL.US" not in {row.symbol for row in response.rows}
     strategy_experiments.list_proposals.assert_called_once_with(
         external_account_id="LBPT10087357",
-        limit=100,
+        mode=ExecutionMode.PAPER,
+        symbols=["EWY.US", "QQQ.US", "SMH.US", "SOXL.US"],
+        limit=None,
     )
 
 

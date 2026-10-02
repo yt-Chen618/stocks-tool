@@ -28,6 +28,7 @@ from stocks_tool.domain.enums import (
     TradingOperation,
     SpreadStatus,
 )
+from stocks_tool.domain.intent_recovery import evaluate_no_order_resolution
 from stocks_tool.domain.models import (
     BrokerOrderSnapshot,
     CreateStrategyAuditEventRequest,
@@ -512,6 +513,97 @@ def test_resolved_no_order_is_terminal_and_known_external_id_cannot_be_resolved(
         )
     with pytest.raises(ValueError, match="external order id"):
         ledger.resolve_no_order(second.intent.id, actor="local_operator")
+
+
+def test_read_model_policy_matches_ledger_for_known_external_order_id(
+    session: Session,
+) -> None:
+    ledger = SQLAlchemyTradingIntentLedger(session)
+    prepared = prepare(ledger, key="strategy-order-key-policy-external-id")
+    ledger.mark_submitting(prepared.intent.id)
+    ledger.mark_unknown(
+        prepared.intent.id,
+        "mutation outcome unknown",
+        external_order_id="external-order-known",
+    )
+    record = session.get(OrderIntentRecord, prepared.intent.id)
+    assert record is not None
+    record.reconciliation_attempts = 3
+    record.first_reconciled_at = NOW
+    record.last_reconciled_at = NOW + timedelta(seconds=61)
+    record.reconciliation_coverage_start_at = COVERAGE_START
+    record.reconciliation_coverage_end_at = COVERAGE_END
+    session.commit()
+
+    intent = ledger.get_intent(prepared.intent.id)
+    action = ledger.get_action(prepared.intent.trade_action_intent_id)
+    assert intent is not None
+    assert action is not None
+    policy = evaluate_no_order_resolution(intent, action)
+
+    assert policy.eligible is False
+    assert policy.reason_code == "external_order_id_present"
+    with pytest.raises(ValueError, match="external order id"):
+        ledger.resolve_no_order(prepared.intent.id, actor="local_operator")
+
+
+def test_read_model_policy_matches_ledger_for_persisted_composite_parent(
+    session: Session,
+) -> None:
+    ledger = SQLAlchemyTradingIntentLedger(session)
+    parent = ledger.prepare_action(
+        external_account_id="LBPT10087357",
+        broker=BrokerName.LONGBRIDGE,
+        mode=ExecutionMode.PAPER,
+        idempotency_key="policy-parent-0001",
+        request_hash="c" * 64,
+        action_context=TradingActionContext(
+            action="bull_put_execute",
+            strategy_id="paper_bull_put_v1",
+            entity_id="policy-spread-1",
+        ),
+        request_payload={"symbol": "QQQ.US"},
+    )
+    child = ledger.prepare_intent(
+        external_account_id="LBPT10087357",
+        broker=BrokerName.LONGBRIDGE,
+        mode=ExecutionMode.PAPER,
+        idempotency_key="policy-child-0001",
+        request_hash="d" * 64,
+        operation=TradingOperation.SUBMIT,
+        action_context=TradingActionContext(
+            action="bull_put_entry",
+            strategy_id="paper_bull_put_v1",
+            entity_id="policy-spread-1",
+            leg="long_entry",
+        ),
+        broker_marker="st:7777777777777777",
+        request_payload={"symbol": "QQQ-option", "quantity": 1},
+        parent_action_intent_id=parent.intent.id,
+    )
+    ledger.mark_submitting(child.intent.id)
+    record = session.get(OrderIntentRecord, child.intent.id)
+    parent_record = session.get(TradeActionIntentRecord, parent.intent.id)
+    assert record is not None
+    assert parent_record is not None
+    record.reconciliation_attempts = 3
+    record.first_reconciled_at = NOW
+    record.last_reconciled_at = NOW + timedelta(seconds=61)
+    record.reconciliation_coverage_start_at = COVERAGE_START
+    record.reconciliation_coverage_end_at = COVERAGE_END
+    parent_record.state = TradingIntentState.PERSISTED.value
+    session.commit()
+
+    intent = ledger.get_intent(child.intent.id)
+    action = ledger.get_action(parent.intent.id)
+    assert intent is not None
+    assert action is not None
+    policy = evaluate_no_order_resolution(intent, action)
+
+    assert policy.eligible is False
+    assert policy.reason_code == "parent_action_persisted"
+    with pytest.raises(ValueError, match="already persisted"):
+        ledger.resolve_no_order(child.intent.id, actor="local_operator")
 
 
 @pytest.mark.parametrize("operation", [TradingOperation.CANCEL, TradingOperation.REPLACE])

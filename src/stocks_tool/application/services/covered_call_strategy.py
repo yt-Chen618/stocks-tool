@@ -1424,7 +1424,7 @@ class CoveredCallStrategyService:
         *,
         external_account_id: str,
         as_of: datetime | None = None,
-        limit: int = 100,
+        mode: ExecutionMode = ExecutionMode.PAPER,
         idempotency_key: str | None = None,
     ) -> dict[str, int]:
         if self.order_service is None:
@@ -1433,7 +1433,8 @@ class CoveredCallStrategyService:
         runs = self.experiments.list_runs(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
-            limit=limit,
+            mode=mode,
+            limit=None,
         )
         execution_runs = self._latest_runs_by_proposal(runs, {"proposal_execution", "open_lifecycle_refresh"})
         close_runs = self._latest_runs_by_proposal(runs, {"proposal_close"})
@@ -1454,7 +1455,8 @@ class CoveredCallStrategyService:
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
             status=StrategyProposalStatus.APPROVED,
-            limit=limit,
+            mode=mode,
+            limit=None,
         ):
             if proposal.proposed_action != "sell_covered_call":
                 continue
@@ -1492,7 +1494,8 @@ class CoveredCallStrategyService:
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
             status=StrategyProposalStatus.EXECUTED,
-            limit=limit,
+            mode=mode,
+            limit=None,
         ):
             if proposal.proposed_action not in self.open_proposal_actions:
                 continue
@@ -1524,7 +1527,8 @@ class CoveredCallStrategyService:
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
             status=StrategyProposalStatus.APPROVED,
-            limit=limit,
+            mode=mode,
+            limit=None,
         ):
             if proposal.proposed_action != "roll_covered_call" or proposal.candidate_payload is None:
                 continue
@@ -1703,15 +1707,13 @@ class CoveredCallStrategyService:
         proposals = self.experiments.list_proposals(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
-            limit=100,
+            mode=mode,
+            symbol=symbol,
+            statuses=active_statuses,
+            proposed_actions=self.open_proposal_actions,
+            limit=None,
         )
         for proposal in proposals:
-            if proposal.mode != mode:
-                continue
-            if proposal.status not in active_statuses:
-                continue
-            if proposal.proposed_action not in self.open_proposal_actions:
-                continue
             if proposal.symbol == symbol:
                 return proposal
         return None
@@ -1960,16 +1962,15 @@ class CoveredCallStrategyService:
         }
         reserved_shares = 0
         reserved_proposal_ids: set[str] = set()
-        proposals = self.experiments.list_proposals(
+        excluded_proposals = self.experiments.list_proposals(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
-            limit=100,
+            proposal_ids=excluded_proposal_ids,
+            limit=None,
         )
         excluded_call_symbols: set[str] = set()
-        for proposal in proposals:
-            if proposal.id not in excluded_proposal_ids or not isinstance(
-                proposal.candidate_payload, dict
-            ):
+        for proposal in excluded_proposals:
+            if not isinstance(proposal.candidate_payload, dict):
                 continue
             try:
                 if proposal.proposed_action == "sell_covered_call":
@@ -1984,12 +1985,17 @@ class CoveredCallStrategyService:
                 excluded_call_symbols.add(excluded_candidate.call_symbol.upper())
             except (TypeError, ValueError):
                 return 2**31 - 1
+        proposals = self.experiments.list_proposals(
+            external_account_id=external_account_id,
+            strategy_id=self.strategy_id,
+            mode=mode,
+            symbol=underlying_symbol,
+            statuses=active_statuses,
+            proposed_actions=self.open_proposal_actions,
+            limit=None,
+        )
         for proposal in proposals:
             if proposal.id in excluded_proposal_ids:
-                continue
-            if proposal.mode != mode or proposal.status not in active_statuses:
-                continue
-            if (proposal.symbol or "").upper() != underlying_symbol.upper():
                 continue
             if not isinstance(proposal.candidate_payload, dict):
                 continue
@@ -2013,7 +2019,16 @@ class CoveredCallStrategyService:
         for run in self.experiments.list_runs(
             external_account_id=external_account_id,
             strategy_id=self.strategy_id,
-            limit=500,
+            mode=mode,
+            proposal_ids=reserved_proposal_ids,
+            run_types={
+                "proposal_execution",
+                "open_lifecycle_refresh",
+                "proposal_close",
+                "roll_execution",
+                "roll_continuation",
+            },
+            limit=None,
         ):
             if run.proposal_id not in reserved_proposal_ids:
                 continue
@@ -2030,7 +2045,11 @@ class CoveredCallStrategyService:
                 OrderStatus.SUBMITTED,
                 OrderStatus.PARTIALLY_FILLED,
             }
-            local_orders = self.order_service.list_orders(external_account_id=external_account_id)
+            local_orders = self.order_service.list_orders(
+                external_account_id=external_account_id,
+                mode=mode,
+                statuses=working_statuses,
+            )
             local_order_intent_ids = {
                 order.order_intent_id for order in local_orders if order.order_intent_id is not None
             }
@@ -2071,7 +2090,9 @@ class CoveredCallStrategyService:
             for intent in self.order_service.list_trading_intents(
                 external_account_id=external_account_id,
                 mode=mode,
-                limit=500,
+                states=unresolved_states,
+                operation=TradingOperation.SUBMIT,
+                limit=None,
             ):
                 if intent.id in local_order_intent_ids:
                     continue

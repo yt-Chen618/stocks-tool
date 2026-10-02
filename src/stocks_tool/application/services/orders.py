@@ -1,7 +1,7 @@
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
@@ -40,6 +40,7 @@ from stocks_tool.domain.models import (
     TradingActionContext,
 )
 from stocks_tool.domain.option_symbols import parse_us_option_symbol
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.ports.repository import (
     BrokerAccountRepository,
     ExecutionRepository,
@@ -102,8 +103,44 @@ class OrderService:
     def list_orders(
         self,
         external_account_id: str | None = None,
+        *,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        statuses: Collection[OrderStatus] | None = None,
+        order_ids: Collection[str] | None = None,
+        order_intent_ids: Collection[str] | None = None,
     ) -> list[Order]:
-        return self.orders.list_orders(external_account_id=external_account_id)
+        return self.orders.list_orders(
+            external_account_id=external_account_id,
+            status=status,
+            mode=mode,
+            symbol=symbol,
+            symbols=symbols,
+            statuses=statuses,
+            order_ids=order_ids,
+            order_intent_ids=order_intent_ids,
+        )
+
+    def list_orders_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Order]:
+        return self.orders.list_orders_page(
+            external_account_id=external_account_id,
+            status=status,
+            mode=mode,
+            symbol=symbol,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def get_order(self, order_id: str) -> Order | None:
         return self.orders.get_order(order_id)
@@ -114,7 +151,10 @@ class OrderService:
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        states: Collection[TradingIntentState] | None = None,
+        operation: TradingOperation | None = None,
+        operations: Collection[TradingOperation] | None = None,
+        limit: int | None = 100,
     ) -> list[BrokerOrderIntent]:
         if self.intent_ledger is None:
             return []
@@ -122,6 +162,9 @@ class OrderService:
             external_account_id=external_account_id,
             mode=mode,
             state=state,
+            states=states,
+            operation=operation,
+            operations=operations,
             limit=limit,
         )
 
