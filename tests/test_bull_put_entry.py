@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from stocks_tool.application.services.bull_put.entry import BullPutEntryOrchestrator
 from stocks_tool.domain.enums import ExecutionMode, OrderSide, OrderStatus
 from stocks_tool.domain.models import ExecuteBullPutSpreadRequest
 
@@ -34,8 +35,20 @@ def test_entry_orchestrator_interface_preserves_two_leg_parent_and_child_identit
             limit_price=Decimal("2.40"),
         ),
     ]
+    entry = BullPutEntryOrchestrator(
+        strategy_settings=service.settings.bull_put_strategy,
+        execution=service.execution,
+        actual_entry_risk_updates=service._actual_entry_risk_updates,
+        mark_manual_action_required=service._mark_manual_action_required,
+        log_entry_failure=service._log_spread_entry_failure,
+        record_opened_spread=service._record_opened_spread,
+        prepare_runtime_state=service._prepare_runtime_state,
+        lock_for_entry=service.runtime_states.lock_for_entry,
+        assert_entry_capacity=service._assert_entry_capacity,
+        entry_session_gate_reason=service._entry_session_gate_reason,
+    )
 
-    spread = service.entry.open_from_preview(
+    spread = entry.open_from_preview(
         request=ExecuteBullPutSpreadRequest(
             external_account_id="LBPT10087357",
             symbol="QQQ.US",

@@ -14,11 +14,8 @@ from stocks_tool.application.services.bull_put.candidate import (
     entry_long_price_ladder as compute_entry_long_price_ladder,
     entry_short_price_ladder as compute_entry_short_price_ladder,
 )
-from stocks_tool.application.services.orders import (
-    OrderService,
-    TradingIntentOutcomeUnknownError,
-    TradingIntentRejectedError,
-)
+from stocks_tool.application.services.orders import TradingIntentOutcomeUnknownError, TradingIntentRejectedError
+from stocks_tool.application.services.bull_put.execution import BullPutExecutionSupport
 from stocks_tool.application.services.strategy_idempotency import strategy_order_identity
 from stocks_tool.core.config import BullPutSpreadStrategySettings
 from stocks_tool.domain.enums import (
@@ -33,12 +30,10 @@ from stocks_tool.domain.models import (
     BullPutSpread,
     BullPutSpreadScanResult,
     BullPutStrategyRuntimeState,
-    CreateOrderRequest,
     ExecuteBullPutSpreadRequest,
     OptionMarketSnapshot,
     Order,
 )
-from stocks_tool.ports.repository import BullPutSpreadRepository
 
 
 class BullPutManualActionRequiredError(RuntimeError):
@@ -54,57 +49,8 @@ class BullPutLegPersistenceError(RuntimeError):
         self.order_id_field = order_id_field
 
 
-class SpreadUpdater(Protocol):
-    def __call__(self, spread: BullPutSpread, **updates: object) -> BullPutSpread: ...
-
-
-class EntryLegRequestBuilder(Protocol):
-    def __call__(
-        self,
-        *,
-        external_account_id: str,
-        leg: OptionMarketSnapshot,
-        side: OrderSide,
-        quantity: int,
-        mode: ExecutionMode,
-        order_type: OrderType,
-        limit_price: Decimal | None,
-        remark: str | None,
-    ) -> CreateOrderRequest: ...
-
-
-class TopOfBookLoader(Protocol):
-    def __call__(self, quote: OptionMarketSnapshot, *, mode: ExecutionMode) -> OptionMarketSnapshot: ...
-
-
-class AwaitTerminalOrFill(Protocol):
-    def __call__(self, order: Order) -> Order: ...
-
-
-class CancelWorkingOrder(Protocol):
-    def __call__(
-        self,
-        order: Order,
-        *,
-        parent_action_intent_id: str | None = None,
-        parent_entity_id: str | None = None,
-    ) -> Order | None: ...
-
-
-class BuildSpreadLegSnapshot(Protocol):
-    def __call__(self, spread: BullPutSpread, *, symbol: str, strike: Decimal) -> OptionMarketSnapshot: ...
-
-
-class EffectiveFillPrice(Protocol):
-    def __call__(self, order: Order | None) -> Decimal | None: ...
-
-
 class ActualEntryRiskUpdates(Protocol):
     def __call__(self, *, spread: BullPutSpread, entry_net_credit: Decimal | None) -> dict[str, object]: ...
-
-
-class IsFilled(Protocol):
-    def __call__(self, order: Order | None) -> bool: ...
 
 
 class MarkManualActionRequired(Protocol):
@@ -175,17 +121,8 @@ class BullPutEntryOrchestrator:
         self,
         *,
         strategy_settings: BullPutSpreadStrategySettings,
-        order_service: OrderService,
-        spreads: BullPutSpreadRepository,
-        update_spread: SpreadUpdater,
-        build_leg_order_request: EntryLegRequestBuilder,
-        with_top_of_book: TopOfBookLoader,
-        await_terminal_or_fill: AwaitTerminalOrFill,
-        cancel_if_working: CancelWorkingOrder,
-        build_spread_leg_snapshot: BuildSpreadLegSnapshot,
-        effective_fill_price: EffectiveFillPrice,
+        execution: BullPutExecutionSupport,
         actual_entry_risk_updates: ActualEntryRiskUpdates,
-        is_filled: IsFilled,
         mark_manual_action_required: MarkManualActionRequired,
         log_entry_failure: LogEntryFailure,
         record_opened_spread: RecordOpenedSpread,
@@ -195,17 +132,8 @@ class BullPutEntryOrchestrator:
         entry_session_gate_reason: EntrySessionGateReason,
     ) -> None:
         self.strategy_settings = strategy_settings
-        self.order_service = order_service
-        self.spreads = spreads
-        self.update_spread = update_spread
-        self.build_leg_order_request = build_leg_order_request
-        self.with_top_of_book = with_top_of_book
-        self.await_terminal_or_fill = await_terminal_or_fill
-        self.cancel_if_working = cancel_if_working
-        self.build_spread_leg_snapshot = build_spread_leg_snapshot
-        self.effective_fill_price = effective_fill_price
+        self.execution = execution
         self.actual_entry_risk_updates = actual_entry_risk_updates
-        self.is_filled = is_filled
         self.mark_manual_action_required = mark_manual_action_required
         self.log_entry_failure = log_entry_failure
         self.record_opened_spread = record_opened_spread
@@ -280,9 +208,9 @@ class BullPutEntryOrchestrator:
             created_at=now,
             updated_at=now,
         )
-        spread = self.spreads.create_spread(spread)
-        entry_long_leg = self.with_top_of_book(preview.candidate.long_put, mode=request.mode)
-        entry_short_leg = self.with_top_of_book(preview.candidate.short_put, mode=request.mode)
+        spread = self.execution.spreads.create_spread(spread)
+        entry_long_leg = self.execution.with_top_of_book(preview.candidate.long_put, mode=request.mode)
+        entry_short_leg = self.execution.with_top_of_book(preview.candidate.short_put, mode=request.mode)
         long_entry_cap = self._entry_long_limit_price(
             long_leg=entry_long_leg,
             short_leg=entry_short_leg,
@@ -333,7 +261,7 @@ class BullPutEntryOrchestrator:
             LongbridgeConfigurationError,
             LongbridgeDependencyError,
         ):
-            failed = self.update_spread(
+            failed = self.execution.update_spread(
                 spread,
                 status=SpreadStatus.ENTRY_FAILED,
                 exit_reason="long_entry_rejected",
@@ -348,8 +276,8 @@ class BullPutEntryOrchestrator:
                 detail=str(exc),
             )
             raise
-        if not self.is_filled(long_entry_order):
-            failed = self.update_spread(
+        if not self.execution.is_filled(long_entry_order):
+            failed = self.execution.update_spread(
                 spread,
                 status=SpreadStatus.ENTRY_FAILED,
                 exit_reason="long_entry_unfilled",
@@ -358,10 +286,10 @@ class BullPutEntryOrchestrator:
             )
             return self.log_entry_failure(failed, reason="long_entry_unfilled")
 
-        spread = self.update_spread(
+        spread = self.execution.update_spread(
             spread,
             status=SpreadStatus.ENTRY_PENDING_SHORT,
-            entry_long_price=self.effective_fill_price(long_entry_order),
+            entry_long_price=self.execution.effective_fill_price(long_entry_order),
             last_synced_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
@@ -377,7 +305,7 @@ class BullPutEntryOrchestrator:
                 remark=request.remark,
                 price_ladder=self._entry_short_price_ladder(
                     bid_price=entry_short_leg.bid,
-                    filled_long_price=self.effective_fill_price(long_entry_order),
+                    filled_long_price=self.execution.effective_fill_price(long_entry_order),
                     width=preview.candidate.width,
                 ),
                 order_id_field="short_entry_order_id",
@@ -423,7 +351,7 @@ class BullPutEntryOrchestrator:
                 detail=str(exc),
             )
             raise
-        if not self.is_filled(short_entry_order):
+        if not self.execution.is_filled(short_entry_order):
             rolled_back = self._rollback_long_leg(
                 spread,
                 reason="short_entry_unfilled",
@@ -431,12 +359,12 @@ class BullPutEntryOrchestrator:
             )
             return self.log_entry_failure(rolled_back, reason="short_entry_unfilled")
 
-        entry_long_price = self.effective_fill_price(long_entry_order)
-        entry_short_price = self.effective_fill_price(short_entry_order)
+        entry_long_price = self.execution.effective_fill_price(long_entry_order)
+        entry_short_price = self.execution.effective_fill_price(short_entry_order)
         entry_net_credit = None
         if entry_long_price is not None and entry_short_price is not None:
             entry_net_credit = entry_short_price - entry_long_price
-        opened = self.update_spread(
+        opened = self.execution.update_spread(
             spread,
             status=SpreadStatus.OPEN,
             entry_long_price=entry_long_price,
@@ -483,8 +411,8 @@ class BullPutEntryOrchestrator:
                 leg=leg_name,
                 attempt=attempt,
             )
-            submitted = self.order_service.submit_order(
-                self.build_leg_order_request(
+            submitted = self.execution.orders.submit_order(
+                self.execution.build_leg_order_request(
                     external_account_id=external_account_id,
                     leg=leg,
                     side=side,
@@ -499,7 +427,7 @@ class BullPutEntryOrchestrator:
                 parent_action_intent_id=parent_action_intent_id,
             )
             try:
-                spread = self.update_spread(
+                spread = self.execution.update_spread(
                     spread,
                     **{
                         order_id_field: submitted.id,
@@ -512,10 +440,10 @@ class BullPutEntryOrchestrator:
                     order_id_field=order_id_field,
                     cause=exc,
                 ) from exc
-            current = self.await_terminal_or_fill(submitted)
-            if self.is_filled(current):
+            current = self.execution.await_terminal_or_fill(submitted)
+            if self.execution.is_filled(current):
                 return spread, current
-            last_order = self.cancel_if_working(
+            last_order = self.execution.cancel_if_working(
                 current,
                 parent_action_intent_id=parent_action_intent_id,
                 parent_entity_id=spread.id,
@@ -539,7 +467,7 @@ class BullPutEntryOrchestrator:
         reason: str,
         parent_action_intent_id: str | None,
     ) -> BullPutSpread:
-        rollback_leg = self.build_spread_leg_snapshot(
+        rollback_leg = self.execution.build_spread_leg_snapshot(
             spread,
             symbol=spread.long_symbol,
             strike=spread.long_strike,
@@ -551,8 +479,8 @@ class BullPutEntryOrchestrator:
                 action="bull_put_rollback",
                 leg="long_exit",
             )
-            rollback_order = self.order_service.submit_order(
-                self.build_leg_order_request(
+            rollback_order = self.execution.orders.submit_order(
+                self.execution.build_leg_order_request(
                     external_account_id=spread.external_account_id,
                     leg=rollback_leg,
                     side=OrderSide.SELL,
@@ -567,7 +495,7 @@ class BullPutEntryOrchestrator:
                 parent_action_intent_id=parent_action_intent_id,
             )
         except Exception as exc:
-            failed = self.update_spread(
+            failed = self.execution.update_spread(
                 spread,
                 status=SpreadStatus.ROLLBACK_FAILED,
                 exit_reason=reason,
@@ -580,22 +508,22 @@ class BullPutEntryOrchestrator:
                 detail=str(exc),
             )
 
-        spread = self.update_spread(
+        spread = self.execution.update_spread(
             spread,
             long_exit_order_id=rollback_order.id,
             exit_reason=reason,
             updated_at=datetime.now(timezone.utc),
         )
-        rollback_order = self.await_terminal_or_fill(rollback_order)
-        if self.is_filled(rollback_order):
-            return self.update_spread(
+        rollback_order = self.execution.await_terminal_or_fill(rollback_order)
+        if self.execution.is_filled(rollback_order):
+            return self.execution.update_spread(
                 spread,
                 status=SpreadStatus.ROLLED_BACK,
                 closed_at=datetime.now(timezone.utc),
                 last_synced_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
-        failed = self.update_spread(
+        failed = self.execution.update_spread(
             spread,
             status=SpreadStatus.ROLLBACK_FAILED,
             last_synced_at=datetime.now(timezone.utc),
