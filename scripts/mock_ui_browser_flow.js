@@ -240,9 +240,11 @@ async function main() {
       await page.setViewportSize({ width, height: 1200 });
       await waitResponsiveSettled(page, width);
       await page.evaluate(() => {
-        window.scrollTo(0, 0);
-        return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        document.documentElement.style.scrollBehavior = "auto";
+        window.scrollTo({ top: 0, left: 0, behavior: "instant" });
       });
+      await page.waitForFunction(() => window.scrollY === 0);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const capturePath = screenshotPath.replace(/\.png$/, `-bull-put-${width}.png`);
       await page.screenshot({ path: capturePath, fullPage: true });
       bullPutScreenshots[width] = capturePath;
@@ -683,12 +685,20 @@ async function captureResponsiveScreenshots(page, screenshotPath) {
   ];
   const outputs = {};
   await page.evaluate(() => {
-    window.scrollTo(0, 0);
-    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    document.documentElement.style.scrollBehavior = "auto";
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
   });
+  await page.waitForFunction(() => window.scrollY === 0);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   for (const target of targets) {
     await page.setViewportSize({ width: target.width, height: target.height });
+    await page.evaluate(() => {
+      document.documentElement.style.scrollBehavior = "auto";
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    });
+    await page.waitForFunction(() => window.scrollY === 0);
     await assertResponsiveShell(page, target.label);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await page.screenshot({ path: target.output, fullPage: true });
     outputs[target.label] = target.output;
   }
@@ -712,6 +722,7 @@ async function assertResponsiveShell(page, label) {
     }
   }
   if (label === "760") {
+    await page.waitForFunction(() => window.scrollY === 0);
     await page.waitForFunction(() => {
       const sidebar = document.getElementById("workspace-sidebar")?.getBoundingClientRect();
       const nav = document.getElementById("workspace-nav")?.getBoundingClientRect();
@@ -740,6 +751,14 @@ async function assertResponsiveShell(page, label) {
       ) {
         throw new Error(`760px bottom ${name} must span the viewport: ${JSON.stringify(geometry)}`);
       }
+    }
+    const warningGeometry = await page.evaluate(() => {
+      const header = document.querySelector(".workspace-topbar")?.getBoundingClientRect();
+      const warning = document.getElementById("desktop-trading-notice")?.getBoundingClientRect();
+      return { headerBottom: header?.bottom ?? null, warningTop: warning?.top ?? null, warningVisible: Boolean(warning && warning.height > 0) };
+    });
+    if (warningGeometry.warningVisible && warningGeometry.warningTop + 1 < warningGeometry.headerBottom) {
+      throw new Error(`760px trading warning must clear the actual topbar: ${JSON.stringify(warningGeometry)}`);
     }
   }
 }

@@ -7,6 +7,7 @@
 
   let initialized = false;
   let elements = {};
+  let topbarResizeObserver = null;
 
   function readStorage(key) {
     try {
@@ -173,6 +174,27 @@
     }
   }
 
+  function syncTopbarOffset() {
+    const topbar = elements.topbar;
+    if (!topbar) return;
+    const height = Math.ceil(topbar.getBoundingClientRect().height);
+    if (!Number.isFinite(height) || height <= 0) return;
+    const nextValue = `${height}px`;
+    const currentValue = document.documentElement.style.getPropertyValue("--workspace-topbar-offset").trim();
+    if (currentValue !== nextValue) {
+      document.documentElement.style.setProperty("--workspace-topbar-offset", nextValue);
+    }
+  }
+
+  function observeTopbar() {
+    syncTopbarOffset();
+    if (typeof ResizeObserver === "function" && elements.topbar) {
+      topbarResizeObserver = new ResizeObserver(() => syncTopbarOffset());
+      topbarResizeObserver.observe(elements.topbar);
+    }
+    window.addEventListener("resize", syncTopbarOffset, { passive: true });
+  }
+
   function handleTabArrow(event, items, currentIndex, activate) {
     let nextIndex = currentIndex;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") {
@@ -259,6 +281,7 @@
       appShell: document.getElementById("app-shell"),
       sidebar: document.getElementById("workspace-sidebar"),
       sidebarToggle: document.getElementById("sidebar-toggle"),
+      topbar: document.querySelector(".workspace-topbar"),
       workspaceOptions: Array.from(document.querySelectorAll("[data-workspace-option]")),
       workspacePanels: Array.from(document.querySelectorAll("[data-workspace-panel]")),
       accountContext: document.getElementById("topbar-account-context"),
@@ -271,6 +294,7 @@
 
     bindWorkspaceNavigation();
     bindStrategyTabs();
+    observeTopbar();
     setSidebarCollapsed(readStorage(SIDEBAR_STORAGE_KEY) === "true", false);
     selectWorkspace(readStorage(WORKSPACE_STORAGE_KEY) || DEFAULT_WORKSPACE);
     initialized = true;

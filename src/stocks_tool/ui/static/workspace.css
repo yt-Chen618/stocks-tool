@@ -3,6 +3,7 @@
   --workspace-sidebar-collapsed: 64px;
   --workspace-sidebar-width: var(--workspace-sidebar-expanded);
   --workspace-topbar-height: 72px;
+  --workspace-topbar-offset: var(--workspace-topbar-height);
   --workspace-drawer-width: 640px;
   --workspace-sidebar: #111C1B;
   --workspace-background: #F3F5F4;
@@ -241,7 +242,7 @@ body[data-workspace] .workspace-topbar {
 body[data-workspace] .workspace {
   width: 100%;
   max-width: none;
-  padding: calc(var(--workspace-topbar-height) + 20px) 24px 32px;
+  padding: calc(var(--workspace-topbar-offset) + 20px) 24px 32px;
 }
 
 [data-workspace-panel][hidden],
@@ -844,7 +845,7 @@ body[data-workspace] .table-action.primary:hover {
   }
 
   body[data-workspace] .workspace {
-    padding: calc(var(--workspace-topbar-height) + 12px) 12px calc(28px + env(safe-area-inset-bottom));
+    padding: calc(var(--workspace-topbar-offset) + 12px) 12px calc(28px + env(safe-area-inset-bottom));
   }
 
   .desktop-trading-notice {
