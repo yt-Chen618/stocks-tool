@@ -16,8 +16,18 @@ async function main() {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
   page.on("dialog", (dialog) => dialog.accept());
   const brokerMutationRequests = [];
+  const bullPutReadRequests = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
+    if (
+      request.method() === "GET" &&
+      (url.pathname === "/strategies/bull-put/working-spreads" ||
+        url.pathname === "/strategies/bull-put/spreads/paged" ||
+        /^\/strategies\/bull-put\/spreads\/[^/]+$/.test(url.pathname) ||
+        /\/strategies\/bull-put\/spreads\/[^/]+\/recover-close\/eligibility$/.test(url.pathname))
+    ) {
+      bullPutReadRequests.push({ path: url.pathname, search: url.search });
+    }
     if (request.method() === "POST" && isBrokerMutationPath(url.pathname, url.search)) {
       brokerMutationRequests.push({
         path: `${url.pathname}${url.search}`,
@@ -197,6 +207,29 @@ async function main() {
     await selectStrategyTab(page, "bull-put");
     await expectText(page.locator("#strategy-section"), "Bull Put Strategy");
     await expectText(page.locator("#strategy-section"), "Bull Put Monitor");
+    const initialEligibilityReads = bullPutReadRequests.filter((request) => request.path.endsWith("/recover-close/eligibility")).length;
+    if (initialEligibilityReads !== 0) {
+      throw new Error(`Initial Bull Put load must not issue recovery eligibility N+1 requests: ${initialEligibilityReads}`);
+    }
+    const workingRead = bullPutReadRequests.find((request) => request.path === "/strategies/bull-put/working-spreads");
+    if (!workingRead || !workingRead.search.includes("external_account_id=LBPT10087357") || !workingRead.search.includes("mode=paper")) {
+      throw new Error("Bull Put working-spreads read must be scoped to the selected paper account.");
+    }
+    const historyPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/paged"));
+    await page.click("#bull-put-history-panel > summary");
+    await historyPageResponse;
+    await expectText(page.locator("#bull-put-history-body"), "QQQ.US");
+    const historyDetailResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/mock-spread-closed-0001"));
+    await page.locator("#bull-put-history-body tr[data-history-spread-id='mock-spread-closed-0001'] button[data-history-action='detail']").click();
+    await historyDetailResponse;
+    await expectText(page.locator("#bull-put-history-body"), "closed");
+    const currentRecoveryDetails = page.locator("#spreads-body details[data-recovery-details]").first();
+    const recoveryEligibilityResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"));
+    await currentRecoveryDetails.locator("summary").click();
+    await recoveryEligibilityResponse;
+    if (bullPutReadRequests.filter((request) => request.path.endsWith("/recover-close/eligibility")).length !== 1) {
+      throw new Error("Recovery eligibility must load only after the corresponding current spread is expanded.");
+    }
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
     await selectStrategyTab(page, "zero-dte");
     await expectText(page.locator("#strategy-section"), "Lottery Strategy");

@@ -29,6 +29,7 @@ def render_dashboard() -> HTMLResponse:
     research_view_js_url = _asset_url("research-view.js")
     watchlist_view_js_url = _asset_url("watchlist-view.js")
     account_loader_js_url = _asset_url("account-loader.js")
+    bull_put_view_js_url = _asset_url("bull-put-view.js")
     advisor_view_js_url = _asset_url("advisor-view.js")
     orders_view_js_url = _asset_url("orders-view.js")
     operations_recovery_js_url = _asset_url("operations-recovery-view.js")
@@ -662,6 +663,29 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
 
+                        <section class="panel panel-span-2 bull-put-history-panel" data-strategy-category="bull-put">
+                          <details id="bull-put-history-panel">
+                            <summary class="panel-header bull-put-history-summary">
+                              <div>
+                                <span class="section-kicker">History</span>
+                                <h2>Bull Put History</h2>
+                              </div>
+                              <span id="bull-put-history-status" class="form-hint" role="status" aria-live="polite">Expand to load completed Bull Put spreads.</span>
+                            </summary>
+                            <div class="table-shell">
+                              <table class="data-table bull-put-history-table">
+                                <thead>
+                                  <tr><th>Underlying</th><th>Expiry</th><th>Status</th><th>Updated</th><th>Details</th></tr>
+                                </thead>
+                                <tbody id="bull-put-history-body">
+                                  <tr><td colspan="5" class="empty-row">Expand to load Bull Put history.</td></tr>
+                                </tbody>
+                              </table>
+                            </div>
+                            <div class="table-footer"><button id="bull-put-history-load-more" class="table-action" type="button" hidden>Load more history</button></div>
+                          </details>
+                        </section>
+
                         <section class="panel panel-span-2" data-workspace-relocate="macro">
                           <div class="panel-header">
                             <div>
@@ -1099,6 +1123,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{research_view_js_url}" defer></script>
                 <script src="{watchlist_view_js_url}" defer></script>
                 <script src="{account_loader_js_url}" defer></script>
+                <script src="{bull_put_view_js_url}" defer></script>
                 <script src="{advisor_view_js_url}" defer></script>
                 <script src="{orders_view_js_url}" defer></script>
                 <script src="{operations_recovery_js_url}" defer></script>

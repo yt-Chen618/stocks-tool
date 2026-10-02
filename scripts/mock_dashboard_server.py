@@ -687,6 +687,32 @@ class MockDashboardState:
                 "updated_at": "2026-05-21T02:14:54Z",
             }
         ]
+        self.closed_spreads = []
+        for index in range(1, 27):
+            closed_spread = deepcopy(self.spreads[0])
+            closed_spread.update(
+                {
+                    "id": f"mock-spread-closed-{index:04d}",
+                    "status": "closed",
+                    "exit_reason": "take_profit",
+                    "long_exit_order_id": f"mock-order-closed-long-{index:04d}",
+                    "short_exit_order_id": f"mock-order-closed-short-{index:04d}",
+                    "closed_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                    "last_synced_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                    "updated_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                }
+            )
+            closed_payload = dict(closed_spread.get("raw_payload") or {})
+            closed_payload["monitor"] = {
+                **dict(closed_payload.get("monitor") or {}),
+                "should_close": True,
+                "exit_reason": "take_profit",
+                "estimated_exit_debit": "0.4500",
+                "estimated_pnl": "85.0000",
+                "evaluated_at": closed_spread["closed_at"],
+            }
+            closed_spread["raw_payload"] = closed_payload
+            self.closed_spreads.append(closed_spread)
         self.runtime = {
             "id": "mock-runtime-0001",
             "strategy_id": "paper_bull_put_v1",
@@ -1642,10 +1668,20 @@ class MockDashboardState:
         runs = self.list_strategy_runs(external_account_id, "covered_call_v1", limit=limit)
         signals = self.list_strategy_signals(external_account_id, "covered_call_v1", limit=limit)
         reviews = self.list_strategy_reviews(external_account_id, "covered_call_v1", limit=limit)
+        all_proposals = [
+            row for row in self.strategy_proposals
+            if (external_account_id is None or row.get("external_account_id") == external_account_id)
+            and row.get("strategy_id") == "covered_call_v1"
+        ]
+        all_runs = [
+            row for row in self.strategy_runs
+            if (external_account_id is None or row.get("external_account_id") == external_account_id)
+            and row.get("strategy_id") == "covered_call_v1"
+        ]
         active_statuses = {"pending", "approved"}
         activity_times = [
-            *(row["updated_at"] for row in proposals if row.get("updated_at")),
-            *(row["created_at"] for row in runs if row.get("created_at")),
+            *(row["updated_at"] for row in all_proposals if row.get("updated_at")),
+            *(row["created_at"] for row in all_runs if row.get("created_at")),
             *(row["emitted_at"] for row in signals if row.get("emitted_at")),
             *(row["reviewed_at"] for row in reviews if row.get("reviewed_at")),
         ]
@@ -1653,19 +1689,19 @@ class MockDashboardState:
             "external_account_id": external_account_id,
             "summary": {
                 "external_account_id": external_account_id,
-                "total_proposals": len(proposals),
-                "active_proposals": sum(1 for row in proposals if row["status"] in active_statuses),
+                "total_proposals": len(all_proposals),
+                "active_proposals": sum(1 for row in all_proposals if row["status"] in active_statuses),
                 "executed_positions": sum(
                     1
-                    for row in proposals
+                    for row in all_proposals
                     if row["proposed_action"] == "sell_covered_call" and row["status"] == "executed"
                 ),
                 "pending_rolls": sum(
                     1
-                    for row in proposals
+                    for row in all_proposals
                     if row["proposed_action"] == "roll_covered_call" and row["status"] in active_statuses
                 ),
-                "close_runs": sum(1 for row in runs if row["run_type"] == "proposal_close"),
+                "close_runs": sum(1 for row in all_runs if row["run_type"] == "proposal_close"),
                 "latest_activity_at": max(activity_times) if activity_times else None,
             },
             "proposals": proposals,
@@ -1757,6 +1793,28 @@ class MockDashboardState:
         if statuses is not None:
             rows = [row for row in rows if row["status"] in statuses]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def list_spreads_page(
+        self,
+        external_account_id: str,
+        *,
+        mode: str = "paper",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        rows = self.list_spreads(external_account_id=external_account_id, mode=mode)
+        rows.extend(
+            deepcopy(
+                [
+                    spread
+                    for spread in self.closed_spreads
+                    if spread.get("external_account_id") == external_account_id
+                    and spread.get("mode", "paper") == mode
+                ]
+            )
+        )
+        rows.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+        return self._page_rows(rows, limit=limit, cursor=cursor)
 
     @staticmethod
     def _page_rows(
@@ -2334,7 +2392,7 @@ class MockDashboardState:
         }
 
     def get_spread(self, spread_id: str) -> dict[str, Any]:
-        for spread in self.spreads:
+        for spread in [*self.spreads, *self.closed_spreads]:
             if spread["id"] == spread_id:
                 return spread
         raise KeyError(spread_id)
@@ -2726,8 +2784,11 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     @app.get("/strategies/covered-call/activity")
     def covered_call_activity(
         external_account_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
         limit: int = Query(default=12, ge=1, le=100),
     ) -> dict[str, Any]:
+        if mode not in {None, "paper"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock covered-call activity is paper-only.")
         state._covered_call_activity_request_count += 1
         if state.scenario == "covered-call-data-failure" and state._covered_call_activity_request_count > 1:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock covered-call activity failure.")
@@ -2944,8 +3005,43 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     def spreads(
         external_account_id: str | None = Query(default=None),
         status: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
-        return state.list_spreads(external_account_id=external_account_id, status=status)
+        return state.list_spreads(external_account_id=external_account_id, status=status, mode=mode)
+
+    @app.get("/strategies/bull-put/spreads/paged")
+    def spreads_paged(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_spreads_page(
+                external_account_id=external_account_id,
+                mode=mode,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    @app.get("/strategies/bull-put/working-spreads")
+    def working_spreads(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+    ) -> list[dict[str, Any]]:
+        rows = state.list_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+        active_statuses = {"entry_pending_long", "entry_pending_short", "open", "exit_pending_short", "exit_pending_long", "rollback_failed"}
+        return [
+            row
+            for row in rows
+            if row.get("status") in active_statuses
+            or bool((row.get("raw_payload") or {}).get("lifecycle", {}).get("manual_action_required"))
+        ]
 
     @app.get("/strategies/bull-put/active-spreads")
     def active_spreads(

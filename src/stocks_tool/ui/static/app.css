@@ -1211,6 +1211,80 @@ a {
   border-radius: 8px;
 }
 
+.bull-put-history-panel > details {
+  display: grid;
+  gap: 12px;
+}
+
+.bull-put-history-summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.bull-put-history-summary::-webkit-details-marker {
+  display: none;
+}
+
+.bull-put-history-summary::after {
+  content: "⌄";
+  margin-left: auto;
+  color: var(--text-soft);
+  font-size: 18px;
+}
+
+.bull-put-history-panel > details[open] .bull-put-history-summary::after {
+  content: "⌃";
+}
+
+.bull-put-history-table td:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.bull-put-history-table td:first-child span {
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.history-detail-row td {
+  background: rgba(246, 249, 247, 0.78);
+}
+
+.bull-put-last-action td {
+  background: rgba(237, 247, 242, 0.82);
+}
+
+.spread-history-detail {
+  display: grid;
+  gap: 4px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.spread-history-detail strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.history-detail-error {
+  color: var(--danger-text);
+}
+
+.recover-close-disclosure {
+  min-width: 220px;
+  max-width: 280px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.recover-close-disclosure > summary {
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .pnl-chip {
   display: inline-flex;
   align-items: center;

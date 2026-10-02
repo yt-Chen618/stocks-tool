@@ -1,5 +1,6 @@
 (function () {
   const ACTIVITY_PAGE_SIZE = 25;
+  const BULL_PUT_HISTORY_PAGE_SIZE = 25;
   const EMPTY_EXPERIMENT = { proposals: [], runs: [], signals: [], reviews: [] };
   const EMPTY_COVERED_CALL = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
 
@@ -28,6 +29,10 @@
       return { cursor: null, hasMore: false, loading: false, error: null };
     }
 
+    function emptyBullPutHistoryPage() {
+      return { cursor: null, hasMore: false, loading: false, error: null };
+    }
+
     function ensureActivityPages() {
       state.activityPages ||= {};
       for (const key of ["orders", "executions", "journals"]) {
@@ -47,6 +52,57 @@
       return { items: page.items, cursor: page.cursor, hasMore: page.hasMore, total: null };
     }
 
+    function isCurrentScope(accountId, loadGeneration) {
+      return loadGeneration === state.accountLoadGeneration && accountId === state.selectedAccountId;
+    }
+
+    function assertScopedSpread(spread, spreadId, accountId, mode = "paper") {
+      if (!spread || typeof spread !== "object" || spread.id !== spreadId) {
+        throw new Error("Bull Put spread detail did not match the requested id.");
+      }
+      if (spread.external_account_id !== accountId || spread.mode !== mode) {
+        throw new Error("Bull Put spread did not match the selected paper account.");
+      }
+      return spread;
+    }
+
+    function assertScopedSpreadList(spreads, accountId, mode = "paper") {
+      if (!Array.isArray(spreads)) {
+        throw new Error("Bull Put working-spreads response did not match the list contract.");
+      }
+      return spreads.map((spread) => {
+        if (!spread || typeof spread !== "object" || spread.external_account_id !== accountId || spread.mode !== mode) {
+          throw new Error("Bull Put working-spreads response did not match the selected paper account.");
+        }
+        return spread;
+      });
+    }
+
+    function setBullPutHistoryPage(payload, { append = false, accountId = state.selectedAccountId } = {}) {
+      const page = normalizePagePayload(payload);
+      const scopedItems = page.items.map((spread) => {
+        if (!spread || typeof spread !== "object" || !spread.id || spread.external_account_id !== accountId || spread.mode !== "paper") {
+          throw new Error("Bull Put history response did not match the selected paper account.");
+        }
+        return spread;
+      });
+      const current = Array.isArray(state.bullPutHistory) ? state.bullPutHistory : [];
+      const values = append ? [...current, ...scopedItems] : scopedItems;
+      const seen = new Set();
+      state.bullPutHistory = values.filter((item) => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return true;
+      });
+      state.bullPutHistoryPage = {
+        cursor: page.cursor,
+        hasMore: page.hasMore,
+        loading: false,
+        error: null,
+      };
+      return { ...page, items: scopedItems };
+    }
+
     function activityUrl(kind, accountId, { cursor = null, orderId = null } = {}) {
       const endpoint = kind === "orders" ? "/orders/paged" : kind === "executions" ? "/executions/paged" : "/journals/paged";
       const params = new URLSearchParams({
@@ -63,6 +119,20 @@
         params.set("order_id", orderId);
       }
       return `${endpoint}?${params.toString()}`;
+    }
+
+    function bullPutWorkingUrl(accountId) {
+      return `/strategies/bull-put/working-spreads?external_account_id=${encodeURIComponent(accountId)}&mode=paper`;
+    }
+
+    function bullPutHistoryUrl(accountId, { cursor = null } = {}) {
+      const params = new URLSearchParams({
+        external_account_id: accountId,
+        mode: "paper",
+        limit: String(BULL_PUT_HISTORY_PAGE_SIZE),
+      });
+      if (cursor) params.set("cursor", cursor);
+      return `/strategies/bull-put/spreads/paged?${params.toString()}`;
     }
 
     function setActivityPage(kind, payload, { append = false } = {}) {
@@ -122,6 +192,160 @@
       }
     }
 
+    async function loadWorkingSpreads({ accountId = state.selectedAccountId } = {}) {
+      if (!accountId) return { discarded: false, spreads: [] };
+      const loadGeneration = state.accountLoadGeneration;
+      try {
+        const response = await fetchJson(bullPutWorkingUrl(accountId));
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true, spreads: [] };
+        }
+        const spreads = assertScopedSpreadList(response, accountId);
+        state.spreads = spreads;
+        return { discarded: false, spreads };
+      } catch (error) {
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true, error };
+        }
+        throw error;
+      }
+    }
+
+    async function loadBullPutHistoryPage({ append = false, accountId = state.selectedAccountId } = {}) {
+      if (!accountId) {
+        return { discarded: false, page: { items: [], cursor: null, hasMore: false, limit: BULL_PUT_HISTORY_PAGE_SIZE } };
+      }
+      state.bullPutHistoryPage ||= emptyBullPutHistoryPage();
+      const pageState = state.bullPutHistoryPage;
+      if (pageState.loading) return { discarded: false, skipped: true, page: pageState };
+      if (append && !pageState.hasMore) return { discarded: false, skipped: true, page: pageState };
+      const loadGeneration = state.accountLoadGeneration;
+      const cursor = append ? pageState.cursor : null;
+      pageState.loading = true;
+      pageState.error = null;
+      try {
+        const response = await fetchJson(bullPutHistoryUrl(accountId, { cursor }));
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true };
+        }
+        const page = setBullPutHistoryPage(response, { append, accountId });
+        return { discarded: false, page };
+      } catch (error) {
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true, error };
+        }
+        pageState.loading = false;
+        pageState.error = error?.message || "Bull Put history request failed.";
+        throw error;
+      }
+    }
+
+    async function loadSpreadDetail(spreadId, { accountId = state.selectedAccountId } = {}) {
+      if (!spreadId || !accountId) return { discarded: false, detail: null };
+      state.bullPutHistoryDetails ||= {};
+      state.bullPutHistoryDetailLoading ||= {};
+      state.bullPutHistoryDetailErrors ||= {};
+      state.bullPutHistoryDetailLoading[spreadId] = true;
+      delete state.bullPutHistoryDetailErrors[spreadId];
+      const loadGeneration = state.accountLoadGeneration;
+      try {
+        const detail = await fetchJson(
+          `/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}?external_account_id=${encodeURIComponent(accountId)}&mode=paper`,
+        );
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true };
+        }
+        const scopedDetail = assertScopedSpread(detail, spreadId, accountId);
+        state.bullPutHistoryDetails[spreadId] = scopedDetail;
+        state.bullPutHistoryDetailLoading[spreadId] = false;
+        const currentIndex = state.spreads.findIndex((spread) => spread.id === spreadId);
+        if (currentIndex >= 0) state.spreads[currentIndex] = scopedDetail;
+        const historyIndex = state.bullPutHistory.findIndex((spread) => spread.id === spreadId);
+        if (historyIndex >= 0) state.bullPutHistory[historyIndex] = scopedDetail;
+        return { discarded: false, detail: scopedDetail };
+      } catch (error) {
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true, error };
+        }
+        state.bullPutHistoryDetailLoading[spreadId] = false;
+        state.bullPutHistoryDetailErrors[spreadId] = error?.message || "Bull Put spread detail unavailable.";
+        throw error;
+      }
+    }
+
+    async function loadSpreadEligibility(spreadId, { accountId = state.selectedAccountId } = {}) {
+      if (!spreadId || !accountId) return { discarded: false, eligibility: null };
+      const loadGeneration = state.accountLoadGeneration;
+      try {
+        const eligibility = await fetchJson(
+          `/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close/eligibility?external_account_id=${encodeURIComponent(accountId)}&mode=paper`,
+        );
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true };
+        }
+        if (
+          !eligibility ||
+          eligibility.spread_id !== spreadId ||
+          eligibility.external_account_id !== accountId ||
+          eligibility.mode !== "paper"
+        ) {
+          throw new Error("Recovery eligibility did not match the selected paper account.");
+        }
+        state.recoverCloseEligibility[spreadId] = eligibility;
+        return { discarded: false, eligibility };
+      } catch (error) {
+        if (!isCurrentScope(accountId, loadGeneration)) {
+          return { discarded: true, error };
+        }
+        state.recoverCloseEligibility[spreadId] = {
+          spread_id: spreadId,
+          eligible: false,
+          reasons: ["eligibility_unavailable"],
+          external_account_id: accountId,
+          mode: "paper",
+          error: error?.message || "Recovery eligibility unavailable.",
+        };
+        throw error;
+      }
+    }
+
+    async function refreshSpread(spreadId, { accountId = state.selectedAccountId } = {}) {
+      const loadGeneration = state.accountLoadGeneration;
+      const response = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/refresh`, { method: "POST" });
+      if (!isCurrentScope(accountId, loadGeneration)) return { discarded: true, detail: response };
+      const detail = assertScopedSpread(response, spreadId, accountId);
+      state.bullPutHistoryDetails ||= {};
+      state.bullPutHistoryDetails[spreadId] = detail;
+      return { discarded: false, detail };
+    }
+
+    async function monitorSpread(spreadId, idempotencyKey, { accountId = state.selectedAccountId } = {}) {
+      const loadGeneration = state.accountLoadGeneration;
+      const result = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        timeoutMs: 25000,
+      });
+      if (!isCurrentScope(accountId, loadGeneration)) return { discarded: true, result };
+      if (result?.spread) assertScopedSpread(result.spread, spreadId, accountId);
+      return { discarded: false, result };
+    }
+
+    async function recoverCloseSpread(spreadId, payload, idempotencyKey, { accountId = state.selectedAccountId } = {}) {
+      const loadGeneration = state.accountLoadGeneration;
+      const result = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(payload),
+        timeoutMs: 25000,
+      });
+      if (!isCurrentScope(accountId, loadGeneration)) return { discarded: true, result };
+      const detail = assertScopedSpread(result, spreadId, accountId);
+      state.bullPutHistoryDetails ||= {};
+      state.bullPutHistoryDetails[spreadId] = detail;
+      return { discarded: false, detail };
+    }
+
     async function ensureSelectedOrderDetail(previousOrder = null) {
       const selectedId = state.selectedOrderId;
       const accountId = state.selectedAccountId;
@@ -168,6 +392,12 @@
     function resetSelectedAccountState() {
       state.orders = [];
       state.spreads = [];
+      state.bullPutHistory = [];
+      state.bullPutHistoryPage = emptyBullPutHistoryPage();
+      state.bullPutHistoryDetails = {};
+      state.bullPutHistoryDetailLoading = {};
+      state.bullPutHistoryDetailErrors = {};
+      state.recoverCloseEligibility = {};
       state.runtime = null;
       state.zeroDteLotteryRuntime = null;
       state.zeroDteLotteryPreview = null;
@@ -200,40 +430,18 @@
         executions: emptyActivityPage(),
         journals: emptyActivityPage(),
       };
+      state.bullPutHistoryPage = emptyBullPutHistoryPage();
+      state.bullPutHistory = [];
+      state.bullPutHistoryDetails = {};
+      state.bullPutHistoryDetailLoading = {};
+      state.bullPutHistoryDetailErrors = {};
+      state.bullPutLastActionDetail = null;
       state.advisorStatus = createOverlayStatus(
         "idle",
         "Select a broker account before loading advisor context.",
       );
       renderEmptyState?.();
       renderRecoveryStatus?.(null);
-    }
-
-    async function loadRecoverCloseEligibility(spreads) {
-      const entries = await Promise.all(
-        (Array.isArray(spreads) ? spreads : []).map(async (spread) => {
-          try {
-            const eligibility = await fetchJson(
-              `/strategies/bull-put/spreads/${encodeURIComponent(spread.id)}/recover-close/eligibility?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`,
-            );
-            return [spread.id, eligibility];
-          } catch (error) {
-            console.error(error);
-            return [spread.id, {
-              spread_id: spread.id,
-              eligible: false,
-              reasons: ["eligibility_unavailable"],
-              external_account_id: spread.external_account_id,
-              mode: spread.mode || "paper",
-              latest_should_close: Boolean(spread.latest_monitor_should_close),
-              old_short_close_order_id: spread.short_exit_order_id,
-              old_short_close_order_status: spread.latest_close_order_status,
-              working_replacement_order_id: null,
-              max_debit_required_hint: null,
-            }];
-          }
-        }),
-      );
-      return Object.fromEntries(entries);
     }
 
     async function loadAccountData() {
@@ -245,6 +453,16 @@
         executions: emptyActivityPage(),
         journals: emptyActivityPage(),
       };
+      state.spreads = [];
+      state.recoverCloseEligibility = {};
+      if (state.bullPutLastActionDetail?.accountId !== selectedAccountId) {
+        state.bullPutLastActionDetail = null;
+      }
+      state.bullPutHistory = [];
+      state.bullPutHistoryPage = emptyBullPutHistoryPage();
+      state.bullPutHistoryDetails = {};
+      state.bullPutHistoryDetailLoading = {};
+      state.bullPutHistoryDetailErrors = {};
       if (!selectedAccountId) {
         resetSelectedAccountState();
         applyTradingSafetyState?.();
@@ -262,7 +480,7 @@
       const requestSpecs = [
         ["latestSnapshot", true, `/account-snapshots/latest?external_account_id=${accountId}`],
         ["orders", true, activityUrl("orders", selectedAccountId)],
-        ["spreads", true, `/strategies/bull-put/spreads?external_account_id=${accountId}&mode=paper`],
+        ["workingSpreads", true, bullPutWorkingUrl(selectedAccountId)],
         ["runtime", true, `/strategies/bull-put/runtime?external_account_id=${accountId}`],
         ["operatorStatus", true, `/ops/unattended-status?external_account_id=${accountId}&mode=paper`],
         ["recoveryStatus", true, `/ops/recovery-status?external_account_id=${accountId}&mode=paper&limit=100`],
@@ -270,7 +488,7 @@
         ["tradeActions", true, `/ops/trade-actions?external_account_id=${accountId}&mode=paper&limit=100`],
         ["zeroDteLotteryRuntime", false, `/strategies/zero-dte-lottery/runtime?external_account_id=${accountId}&mode=paper`],
         ["strategyExperiment", true, `/strategies/experiment?external_account_id=${accountId}&limit=6`],
-        ["coveredCallActivity", true, `/strategies/covered-call/activity?external_account_id=${accountId}&limit=8`],
+        ["coveredCallActivity", true, `/strategies/covered-call/activity?external_account_id=${accountId}&mode=paper&limit=8`],
         ["advisorRuns", false, `/strategies/advisor/run-cards?external_account_id=${accountId}&source=deepseek&limit=5`],
         ["marketEvents", false, "/market-events?limit=8"],
         ["executions", false, activityUrl("executions", selectedAccountId)],
@@ -317,12 +535,6 @@
         }
       }
 
-      const nextSpreads = "spreads" in values ? (Array.isArray(values.spreads) ? values.spreads : []) : null;
-      const nextRecoverCloseEligibility = nextSpreads ? await loadRecoverCloseEligibility(nextSpreads) : null;
-      if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
-        return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
-      }
-
       for (const kind of ["orders", "executions", "journals"]) {
         if (!(kind in values)) continue;
         try {
@@ -335,9 +547,22 @@
           if (kind === "journals") state.journals = [];
         }
       }
-      if (nextSpreads !== null) {
-        state.spreads = nextSpreads;
-        state.recoverCloseEligibility = nextRecoverCloseEligibility || {};
+      if ("workingSpreads" in values) {
+        try {
+          state.spreads = assertScopedSpreadList(values.workingSpreads, selectedAccountId);
+        } catch (error) {
+          errors.workingSpreads = error?.message || "Working Bull Put response was invalid.";
+          state.spreads = [];
+        }
+      }
+      if ("spreadHistory" in values) {
+        try {
+          setBullPutHistoryPage(values.spreadHistory, { accountId: selectedAccountId });
+        } catch (error) {
+          errors.spreadHistory = error?.message || "Bull Put history response was invalid.";
+          state.bullPutHistory = [];
+          state.bullPutHistoryPage = { ...emptyBullPutHistoryPage(), error: errors.spreadHistory };
+        }
       }
       if ("runtime" in values) state.runtime = values.runtime;
       if ("operatorStatus" in values) state.operatorStatus = values.operatorStatus;
@@ -438,13 +663,21 @@
     return {
       loadAccountData,
       loadActivityPage,
-      loadRecoverCloseEligibility,
+      loadWorkingSpreads,
+      loadBullPutHistoryPage,
+      loadSpreadDetail,
+      loadSpreadEligibility,
+      refreshSpread,
+      monitorSpread,
+      recoverCloseSpread,
       ensureSelectedOrderDetail,
       refreshAccounts,
       refreshAccountsSilently,
       applyAccounts,
       normalizePagePayload,
       activityUrl,
+      bullPutWorkingUrl,
+      bullPutHistoryUrl,
       pageSize: ACTIVITY_PAGE_SIZE,
     };
   }

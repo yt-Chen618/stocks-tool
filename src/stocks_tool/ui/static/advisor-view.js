@@ -234,7 +234,7 @@
       state.advisorStatus = createOverlayStatus("loading", `Loading advisor context for ${accountId}...`);
       renderAdvisorPanel();
       try {
-        const context = await fetchJson(`/strategies/advisor-context?external_account_id=${encodeURIComponent(accountId)}&limit=10`);
+        const context = await fetchJson(`/strategies/advisor-context?external_account_id=${encodeURIComponent(accountId)}&mode=paper&limit=10`);
         if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
         state.advisorContext = context;
         state.advisorDraft = null;

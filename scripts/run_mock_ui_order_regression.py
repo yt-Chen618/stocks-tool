@@ -376,6 +376,7 @@ def main() -> None:
                 "research-view.js",
                 "watchlist-view.js",
                 "account-loader.js",
+                "bull-put-view.js",
                 "advisor-view.js",
                 "orders-view.js",
                 "execution-drawer.js",
@@ -401,9 +402,7 @@ def main() -> None:
                 "renderStrategyRuntime()",
                 "renderStrategyExperiment()",
                 "renderMarketEvents()",
-                "renderSpreads()",
-                "monitorSpread(",
-                "recoverCloseSpread(",
+                "bullPutView",
             ):
                 assert marker in app_js.text, f"Missing dashboard coordinator marker: {marker}"
             assert "stocks-tool-view-mode" not in app_js.text
@@ -446,7 +445,16 @@ def main() -> None:
                     "window.StocksToolAccountLoader",
                     "createAccountLoader",
                     "/orders/paged",
+                    "/strategies/bull-put/working-spreads",
+                    "/strategies/bull-put/spreads/paged",
+                    "loadSpreadEligibility",
                     "ensureSelectedOrderDetail",
+                ),
+                "/static/bull-put-view.js": (
+                    "window.StocksToolBullPutView",
+                    "createBullPutView",
+                    "Load more history",
+                    "data-recovery-details",
                 ),
                 "/static/advisor-view.js": (
                     "window.StocksToolAdvisorView",

@@ -218,7 +218,7 @@ async function captureResourceTimings(page) {
       "/broker-accounts",
       "/account-snapshots/latest",
       "/orders",
-      "/strategies/bull-put/spreads",
+      "/strategies/bull-put/working-spreads",
       "/strategies/bull-put/runtime",
       "/strategies/experiment",
       "/executions",

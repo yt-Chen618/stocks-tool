@@ -368,7 +368,7 @@ async function main() {
     if (method !== "GET" && method !== "HEAD") {
       mutationRequests.push({ path: `${url.pathname}${url.search}`, method });
     }
-    if (method === "GET" && ["/orders/paged", "/strategies/bull-put/spreads"].includes(url.pathname)) {
+    if (method === "GET" && ["/orders/paged", "/strategies/bull-put/working-spreads", "/strategies/bull-put/spreads/paged"].includes(url.pathname)) {
       queryEvidence.push({ path: url.pathname, query: Object.fromEntries(url.searchParams.entries()) });
     }
 

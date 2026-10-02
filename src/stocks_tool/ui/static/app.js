@@ -47,6 +47,7 @@ const state = window.StocksToolState.createInitialState();
 
 const els = {};
 let accountLoader = null;
+let bullPutView = null;
 let advisorView = null;
 let ordersView = null;
 let operationsRecoveryView = null;
@@ -96,6 +97,18 @@ function initializeViewModules() {
     updateSyncButtons,
     updateOrderTicketAvailability: () => ordersView?.updateOrderTicketAvailability(),
     updatePreOpenButtons,
+  });
+  bullPutView = window.StocksToolBullPutView?.createBullPutView({
+    state,
+    els,
+    accountLoader,
+    runConfirmedBrokerMutation,
+    setStatus,
+    setActionStatus,
+    loadAccountData: () => accountLoader?.loadAccountData(),
+    applyTradingSafetyState,
+    escapeHtml,
+    formatters: window.StocksToolFormatters,
   });
   advisorView = window.StocksToolAdvisorView?.createAdvisorView({
     state,
@@ -180,6 +193,10 @@ function bindElements() {
   els.marketEventsCard = document.getElementById("market-events-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
+  els.bullPutHistoryPanel = document.getElementById("bull-put-history-panel");
+  els.bullPutHistoryStatus = document.getElementById("bull-put-history-status");
+  els.bullPutHistoryBody = document.getElementById("bull-put-history-body");
+  els.bullPutHistoryLoadMore = document.getElementById("bull-put-history-load-more");
   els.ordersBody = document.getElementById("orders-body");
   els.ordersLoadMore = document.getElementById("orders-load-more");
   els.executionsLoadMore = document.getElementById("executions-load-more");
@@ -249,7 +266,7 @@ function renderEmptyAccountState() {
   renderStrategyExperiment();
   advisorView?.renderAdvisorPanel();
   renderMarketEvents();
-  renderSpreads();
+  bullPutView?.render();
   ordersView?.render();
   renderPositions();
   updateSyncButtons();
@@ -273,7 +290,7 @@ function renderAccountDataState({ errors, requiredFailures, optionalFailures }) 
   renderStrategyExperiment();
   advisorView?.renderAdvisorPanel();
   renderMarketEvents();
-  renderSpreads();
+  bullPutView?.render();
   ordersView?.render();
   renderPositions();
   renderPanelLoadStates(errors || {});
@@ -382,35 +399,7 @@ function wireEvents() {
     });
   }
 
-  els.spreadsBody.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-spread-action]");
-    if (!button) {
-      return;
-    }
-
-    const { spreadAction, spreadId } = button.dataset;
-    if (!spreadAction || !spreadId) {
-      return;
-    }
-
-    if (spreadAction === "refresh") {
-      await refreshSpread(spreadId);
-      return;
-    }
-
-    if (spreadAction === "monitor") {
-      await monitorSpread(spreadId, button);
-    }
-  });
-
-  els.spreadsBody.addEventListener("submit", async (event) => {
-    const form = event.target.closest("form[data-recover-close-form]");
-    if (!form) {
-      return;
-    }
-    event.preventDefault();
-    await recoverCloseSpread(form.dataset.recoverCloseForm, new FormData(form), event.submitter);
-  });
+  bullPutView?.wireEvents();
 
   if (els.strategyProposalsCard) {
     els.strategyProposalsCard.addEventListener("click", async (event) => {
@@ -572,7 +561,7 @@ function renderAllForLanguage() {
   renderPreOpenAssessment();
   renderLatestPreOpenRun();
   renderStrategyRuntime();
-  renderSpreads();
+  bullPutView?.render();
   ordersView?.renderOrders();
   renderPositions();
   ordersView?.renderSelectedOrder();
@@ -1028,7 +1017,8 @@ function renderPanelLoadStates(errors) {
   const targets = {
     latestSnapshot: els.metricsStrip,
     orders: els.ordersBody,
-    spreads: els.spreadsBody,
+    workingSpreads: els.spreadsBody,
+    spreadHistory: els.bullPutHistoryStatus,
     runtime: els.strategyRuntimeStrip,
     operatorStatus: els.reconciliationStrip,
     zeroDteLotteryRuntime: els.zeroDteLotteryStrip,
@@ -1075,7 +1065,8 @@ function formatPanelLoadLabel(key) {
   const labels = {
     latestSnapshot: "Account snapshot",
     orders: "Orders",
-    spreads: "Bull Put spreads",
+    workingSpreads: "Bull Put working spreads",
+    spreadHistory: "Bull Put history",
     runtime: "Bull Put runtime",
     operatorStatus: "Operator status",
     recoveryStatus: "Recovery status",
@@ -1846,153 +1837,6 @@ async function refreshAccountsSilently(...args) {
 
 function applyAccounts(...args) {
   return accountLoader.applyAccounts(...args);
-}
-async function refreshSpread(spreadId) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  setStatus(`Refreshing spread ${spread?.underlying_symbol || spreadId}...`, "warning");
-  try {
-    const refreshed = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/refresh`, {
-      method: "POST",
-    });
-    await loadAccountData();
-    setStatus(`Spread ${refreshed.underlying_symbol} refreshed.`, "success");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Spread refresh failed.", "error");
-  }
-}
-
-async function monitorSpread(spreadId, button = null) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  try {
-    const actionKey = `bull-put-monitor:${spreadId}`;
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ spread_id: spreadId, action: "monitor" }),
-        getRequestSignature: () => JSON.stringify({ spread_id: spreadId, action: "monitor" }),
-        statusElement: els.strategyControlsHint,
-        confirmation: {
-          title: "Confirm Bull Put monitor",
-          summary: `Monitor ${spread?.underlying_symbol || spreadId}; exit rules may submit closing orders`,
-          details: {
-            Account: spread?.external_account_id || state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: spread?.underlying_symbol || spreadId,
-            "Side / Legs": `${spread?.long_symbol || "Long put"} / ${spread?.short_symbol || "Short put"}`,
-            Quantity: `${spread?.contracts || 1} spread`,
-            Price: spread?.raw_payload?.monitor?.estimated_exit_debit
-              ? `Estimated debit ${formatCurrency(spread.raw_payload.monitor.estimated_exit_debit, "USD")}`
-              : "Fresh exit limits",
-            "Max Risk": formatCurrency(spread?.max_loss, "USD"),
-            "Quote Time": formatDateTime(spread?.raw_payload?.monitor?.evaluated_at || spread?.last_synced_at),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Monitoring spread ${spread?.underlying_symbol || spreadId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const result = mutation.result;
-    await loadAccountData();
-    const action = result.should_close
-      ? `Exit action ${formatSpreadExitReason(result.exit_reason)} evaluated for ${result.spread.underlying_symbol}.`
-      : `Spread ${result.spread.underlying_symbol} remains within thresholds.`;
-    const tone = result.should_close ? "success" : "warning";
-    setActionStatus(els.strategyControlsHint, action, tone);
-    setStatus(action, tone);
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.strategyControlsHint, error.message || "Spread monitor failed.", "error");
-    setStatus(error.message || "Spread monitor failed.", "error");
-  }
-}
-
-async function recoverCloseSpread(spreadId, formData, button = null) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  const recoveryEligibility = state.recoverCloseEligibility?.[spreadId];
-  if (!recoveryEligibility?.eligible || recoveryEligibility.external_account_id !== state.selectedAccountId || recoveryEligibility.mode !== "paper") {
-    setStatus("Recovery close is no longer eligible. No request was sent.", "error");
-    return;
-  }
-  const actor = String(formData.get("actor") || "").trim();
-  const note = String(formData.get("note") || "").trim();
-  const maxDebit = String(formData.get("max_debit") || "").trim();
-  const confirmed = formData.get("confirm_paper_order") === "on";
-  if (!actor || !note || !maxDebit || !confirmed) {
-    setStatus("Recover close requires actor, note, max debit, and paper-order confirmation.", "error");
-    return;
-  }
-  try {
-    const payload = {
-      external_account_id: state.selectedAccountId,
-      mode: "paper",
-      confirm_paper_order: true,
-      max_debit: maxDebit,
-      actor,
-      note,
-    };
-    const actionKey = `bull-put-recover:${spreadId}`;
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ spread_id: spreadId, ...payload }),
-        getRequestSignature: () => JSON.stringify({ spread_id: spreadId, ...payload }),
-        businessPredicate: () => {
-          const current = state.recoverCloseEligibility?.[spreadId];
-          return current?.eligible === true
-            && current.external_account_id === state.selectedAccountId
-            && current.mode === "paper";
-        },
-        businessBlockedMessage: "Recovery close is no longer eligible. No request was sent.",
-        statusElement: els.strategyControlsHint,
-        confirmation: {
-          title: "Confirm Bull Put recovery close",
-          summary: `Buy to close the short put for ${spread?.underlying_symbol || spreadId}`,
-          details: {
-            Account: state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: spread?.short_symbol || spread?.underlying_symbol || spreadId,
-            "Side / Legs": "Buy short put to close",
-            Quantity: `${spread?.contracts || 1} contract`,
-            Price: `Max debit ${formatCurrency(maxDebit, "USD")}`,
-            "Max Risk": formatCurrency(Number(maxDebit) * Number(spread?.contracts || 1) * 100, "USD"),
-            "Quote Time": formatDateTime(spread?.last_synced_at),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Submitting recovery close for ${spread?.underlying_symbol || spreadId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify(payload),
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const recovered = mutation.result;
-    await loadAccountData();
-    setActionStatus(els.strategyControlsHint, `Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
-    setStatus(`Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.strategyControlsHint, error.message || "Recover close failed.", "error");
-    setStatus(error.message || "Recover close failed.", "error");
-  }
 }
 function renderAccountOptions() {
   els.accountSelect.innerHTML = "";
@@ -3216,226 +3060,6 @@ function renderMarketEvents() {
     .join("");
 }
 
-function getSpreadLifecycleWarning(spread) {
-  return window.StocksToolLifecycle?.bullPutSpreadLifecycleWarning(spread, state.orders) || null;
-}
-
-function renderSpreads() {
-  const spreads = [...state.spreads].sort(
-    (left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime()
-  );
-  const activeSpreads = spreads.filter(isActiveSpread);
-  const exitPendingSpreads = spreads.filter(isExitPendingSpread);
-  const monitorableSpreads = spreads.filter(isMonitorableSpread);
-  const monitoredOpenSpread = activeSpreads.find((spread) => spread.raw_payload?.monitor) || null;
-  const monitoredSnapshot = monitoredOpenSpread ? monitoredOpenSpread.raw_payload.monitor : null;
-  const lastMonitoredSpread = monitorableSpreads.find((spread) => spread.last_synced_at) || null;
-  const lifecycleWarnings = monitorableSpreads
-    .map((spread) => getSpreadLifecycleWarning(spread))
-    .filter(Boolean);
-  const primaryLifecycleWarning = lifecycleWarnings[0] || null;
-
-  const summaryValues = [
-    {
-      label: "Active Spreads",
-      value: String(activeSpreads.length),
-      tone: "",
-      detail: activeSpreads.length
-        ? `${activeSpreads.filter((spread) => spread.status === "open").length} open / ${exitPendingSpreads.length} exit pending`
-        : "No active spreads",
-    },
-    {
-      label: "Monitor Mark",
-      value: monitoredSnapshot?.estimated_exit_debit ? formatSpreadCredit(monitoredSnapshot.estimated_exit_debit) : "--",
-      tone: monitoredSnapshot?.exit_reason ? "warning" : "",
-      detail: monitoredOpenSpread
-        ? `${monitoredOpenSpread.underlying_symbol} / ${formatDateTime(monitoredSnapshot.evaluated_at)}`
-        : "No monitor snapshot",
-    },
-    {
-      label: "P/L",
-      value: monitoredSnapshot?.estimated_pnl ? formatSignedCurrency(monitoredSnapshot.estimated_pnl, "USD") : "--",
-      tone: monitoredSnapshot?.estimated_pnl ? pnlTone(monitoredSnapshot.estimated_pnl) : "",
-      detail: monitoredSnapshot
-        ? `TP Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_take_profit_debit)} / SL Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_stop_loss_debit)}`
-        : "No monitor snapshot",
-    },
-    {
-      label: "Last Monitor",
-      value: lastMonitoredSpread ? formatDateTime(lastMonitoredSpread.last_synced_at) : "--",
-      tone: primaryLifecycleWarning ? "error" : "",
-      detail: primaryLifecycleWarning
-        ? primaryLifecycleWarning.message
-        : lastMonitoredSpread
-        ? `${lastMonitoredSpread.underlying_symbol} / ${formatSpreadStatusLabel(lastMonitoredSpread.status)}`
-        : monitorableSpreads.length
-          ? "Waiting for first monitor run"
-          : "No open or exit-pending spreads are being monitored.",
-    },
-  ];
-
-  els.spreadSummaryStrip.innerHTML = summaryValues
-    .map(
-      (item) => `
-        <article class="mini-metric-tile">
-          <span class="metric-label">${escapeHtml(item.label)}</span>
-          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
-          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
-        </article>
-      `
-    )
-    .join("");
-
-  if (spreads.length === 0) {
-    els.spreadsBody.innerHTML = '<tr><td colspan="8" class="empty-row">No bull put spreads for this account.</td></tr>';
-    return;
-  }
-
-  els.spreadsBody.innerHTML = spreads
-    .map((spread) => {
-      const monitorable = isMonitorableSpread(spread);
-      const lifecycleWarning = getSpreadLifecycleWarning(spread);
-      const statusTone = lifecycleWarning ? "error" : spreadStatusClass(spread.status);
-      const statusLabel = lifecycleWarning ? "Manual Action Needed" : formatSpreadStatusLabel(spread.status);
-      const monitor = spread.raw_payload?.monitor || null;
-      const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
-      const lastUpdatedAt = spread.last_synced_at || spread.updated_at || spread.created_at;
-      const maxLoss = toNumber(spread.max_loss);
-      const entryRiskLines = [
-        `Credit ${formatSpreadCredit(spread.entry_net_credit)}`,
-        `Max Loss ${Number.isFinite(maxLoss) ? formatSignedCurrency(-Math.abs(maxLoss), "USD") : "--"}`,
-        `BE ${formatSpreadStrike(spread.break_even)}`,
-      ];
-      const monitorMark = monitor
-        ? [
-            `Mark ${formatSpreadCredit(monitor.estimated_exit_debit)}`,
-            `Spot ${formatSpreadStrike(monitor.underlying_price)}`,
-            `${monitor.days_to_expiration ?? "--"} DTE`,
-          ]
-        : ["No monitor snapshot"];
-      const distanceLines = monitor
-        ? [
-            `P/L ${formatSignedCurrency(monitor.estimated_pnl, "USD")}`,
-            `TP Gap ${formatSpreadCredit(monitor.distance_to_take_profit_debit)}`,
-            `SL Gap ${formatSpreadCredit(monitor.distance_to_stop_loss_debit)}`,
-          ]
-        : [spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--"];
-      const monitorLines = monitor
-        ? [
-            lifecycleWarning
-              ? lifecycleWarning.message
-              : monitor.exit_reason
-                ? formatSpreadExitReason(monitor.exit_reason)
-                : "Within thresholds",
-            ...(lifecycleWarning
-              ? [
-                  lifecycleWarning.detail,
-                  `Order ${lifecycleWarning.orderId} ${lifecycleWarning.orderStatus}`,
-                ]
-              : []),
-            `Next Check ${formatDateTime(monitor.next_monitor_after)}`,
-            `Updated ${formatDateTime(monitor.evaluated_at)}`,
-          ]
-        : [`Updated ${formatDateTime(lastUpdatedAt)}`];
-      const recoveryEligibility = objectPayload(state.recoverCloseEligibility?.[spread.id]);
-      const recoveryMarkup = renderRecoverClosePanel(spread, recoveryEligibility);
-      return `
-        <tr>
-          <td>
-            <div class="symbol-cell">
-              <strong>${escapeHtml(spread.underlying_symbol)}</strong>
-              <span>${escapeHtml(legSummary)}</span>
-            </div>
-          </td>
-          <td>${escapeHtml(formatSpreadDate(spread.expiration_date))}</td>
-          <td><span class="pill ${statusTone}">${escapeHtml(statusLabel)}</span></td>
-          <td>
-            ${renderSpreadDetailCell(entryRiskLines)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(monitorMark)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(distanceLines, monitor?.estimated_pnl)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(monitorLines, null, lifecycleWarning ? "error" : null)}
-          </td>
-          <td>
-            <div class="table-actions">
-              <button class="table-action" type="button" data-spread-action="refresh" data-spread-id="${escapeHtml(spread.id)}">
-                Refresh
-              </button>
-              ${
-                monitorable
-                  ? `<button class="table-action primary" type="button" data-spread-action="monitor" data-spread-id="${escapeHtml(spread.id)}" data-broker-mutation="true" data-action-key="bull-put-monitor:${escapeHtml(spread.id)}">Monitor</button>`
-                  : ""
-              }
-            </div>
-            ${recoveryMarkup}
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
-function renderRecoverClosePanel(spread, eligibility) {
-  if (!eligibility || !eligibility.spread_id) {
-    return `
-      <div class="recover-close-panel">
-        <strong>Recovery Check</strong>
-        <span>Eligibility unavailable.</span>
-      </div>
-    `;
-  }
-  const reasons = Array.isArray(eligibility.reasons) ? eligibility.reasons.filter(Boolean) : [];
-  const oldStatus = eligibility.old_short_close_order_status || "--";
-  const workingReplacement = eligibility.working_replacement_order_id || "--";
-  const hint = eligibility.max_debit_required_hint;
-  const maxDebitValue = hint !== null && hint !== undefined ? String(hint) : "";
-  const eligible = eligibility.eligible === true;
-  const toneClass = eligible ? "is-success" : reasons.includes("close_not_required") ? "is-neutral" : "is-warning";
-  const disabled = eligible ? "" : "disabled";
-  return `
-    <div class="recover-close-panel">
-      <div class="recover-close-head">
-        <strong class="${toneClass}">${eligible ? "Recovery Eligible" : "Recovery Blocked"}</strong>
-        <span>${escapeHtml(reasons.length ? reasons.join(", ") : "Ready for manual paper recovery.")}</span>
-      </div>
-      <div class="recover-close-meta">
-        <span>Old close ${escapeHtml(oldStatus)}</span>
-        <span>Working ${escapeHtml(workingReplacement)}</span>
-      </div>
-      <form class="recover-close-form" data-recover-close-form="${escapeHtml(spread.id)}">
-        <input name="actor" type="text" maxlength="80" value="local_operator" ${disabled} aria-label="Recovery actor" />
-        <input name="max_debit" type="number" min="0" step="0.01" value="${escapeHtml(maxDebitValue)}" placeholder="Max debit" ${disabled} aria-label="Recovery max debit" />
-        <input name="note" type="text" maxlength="500" value="manual recover close" ${disabled} aria-label="Recovery note" />
-        <label class="recover-confirm">
-          <input name="confirm_paper_order" type="checkbox" ${disabled} />
-          <span>Paper</span>
-        </label>
-        <button class="table-action primary" type="submit" ${disabled} data-business-disabled="${eligible ? "false" : "true"}" data-broker-mutation="true" data-action-key="bull-put-recover:${escapeHtml(spread.id)}">Recover</button>
-      </form>
-    </div>
-  `;
-}
-
-function renderSpreadDetailCell(lines, pnlValue = null, explicitTone = null) {
-  const [primary = "--", ...secondary] = lines;
-  const toneClass = explicitTone
-    ? ` is-${explicitTone}`
-    : pnlValue !== null && pnlValue !== undefined
-      ? ` is-${pnlTone(toNumber(pnlValue))}`
-      : "";
-  return `
-    <div class="spread-detail-cell">
-      <strong class="${toneClass.trim()}">${escapeHtml(primary)}</strong>
-      ${secondary.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}
-    </div>
-  `;
-}
-
 function renderPositions() {
   const snapshot = state.latestSnapshot;
   const positions = buildSortedPositions(snapshot?.positions || []);
@@ -4142,24 +3766,6 @@ function normalizeLotterySymbol() {
     els.zeroDteLotterySymbol.value = symbol;
   }
   return symbol;
-}
-
-function isActiveSpread(spread) {
-  return (
-    spread.status === "entry_pending_long" ||
-    spread.status === "entry_pending_short" ||
-    spread.status === "open" ||
-    spread.status === "exit_pending_short" ||
-    spread.status === "exit_pending_long"
-  );
-}
-
-function isExitPendingSpread(spread) {
-  return spread.status === "exit_pending_short" || spread.status === "exit_pending_long";
-}
-
-function isMonitorableSpread(spread) {
-  return spread.status === "open" || isExitPendingSpread(spread);
 }
 
 function matchingQuoteTime(symbol) {
