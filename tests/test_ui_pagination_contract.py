@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -213,7 +215,8 @@ def test_account_loader_renders_required_core_before_slow_auxiliary_panels() -> 
     assert result["finalRenders"] >= 2
 
 
-def test_unknown_lock_cleanup_requires_exact_terminal_detail() -> None:
+@pytest.mark.parametrize("terminal_state", ["persisted", "rejected", "resolved_no_order"])
+def test_unknown_lock_cleanup_requires_exact_terminal_detail(terminal_state: str) -> None:
     result = run_node(
         r'''
         (async () => {
@@ -232,7 +235,7 @@ def test_unknown_lock_cleanup_requires_exact_terminal_detail() -> None:
           terminalUnknownMutationIds: {},
         };
         const fetchJson = async (url) => {
-          if (url.endsWith("/intent-a")) return {id: "intent-a", external_account_id: "A", mode: "paper", state: "rejected"};
+          if (url.endsWith("/intent-a")) return {id: "intent-a", external_account_id: "A", mode: "paper", state: BACKEND_TERMINAL_STATE};
           if (url.endsWith("/intent-b")) return {id: "unrelated", external_account_id: "A", mode: "paper", state: "rejected"};
           throw Object.assign(new Error("not found"), {status: 404});
         };
@@ -245,7 +248,7 @@ def test_unknown_lock_cleanup_requires_exact_terminal_detail() -> None:
         const result = await loader.reconcileUnknownMutationLocks("A", 1);
         process.stdout.write(JSON.stringify({result, remaining: state.unknownMutationLocks.A, terminal: state.terminalUnknownMutationIds.A, keys: Array.from(storage.keys())}));
         })().catch((error) => { console.error(error); process.exit(1); });
-        ''',
+        '''.replace("BACKEND_TERMINAL_STATE", json.dumps(terminal_state)),
     )
     assert result["result"]["cleared"] == ["intent-a"]
     assert [lock["id"] for lock in result["remaining"]] == ["intent-b"]

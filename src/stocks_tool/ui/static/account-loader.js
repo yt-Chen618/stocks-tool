@@ -38,7 +38,7 @@
       return Array.isArray(locks) ? locks : [];
     }
 
-    const TERMINAL_UNKNOWN_STATES = new Set(["rejected", "resolved_no_order"]);
+    const TERMINAL_UNKNOWN_STATES = new Set(["persisted", "rejected", "resolved_no_order"]);
 
     async function reconcileUnknownMutationLocks(accountId, loadGeneration) {
       const locks = currentAccountUnknownLocks(accountId);
