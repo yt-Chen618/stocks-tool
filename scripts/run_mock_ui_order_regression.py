@@ -453,7 +453,8 @@ def main() -> None:
                 "/static/bull-put-view.js": (
                     "window.StocksToolBullPutView",
                     "createBullPutView",
-                    "Load more history",
+                    "bullPutHistoryLoadMore",
+                    "loadHistory({ append: true })",
                     "data-recovery-details",
                 ),
                 "/static/advisor-view.js": (
