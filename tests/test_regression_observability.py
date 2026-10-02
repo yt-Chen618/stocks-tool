@@ -23,6 +23,7 @@ from regression_common import (  # noqa: E402
     RunAlreadyActiveError,
     current_process_identity,
     process_identity_matches,
+    process_identity_probe,
     process_start_identity,
     run_bounded_process,
     start_utf8_process,
@@ -286,6 +287,24 @@ def test_active_child_cannot_be_marked_passed(tmp_path: Path) -> None:
     runner.finish("failed", next_action="inspect child interruption")
 
 
+def test_unknown_child_identity_probe_blocks_recovery(tmp_path: Path, monkeypatch) -> None:
+    runner = ObservedRun(tmp_path / "evidence", source_root=_source_root(tmp_path))
+    runner._state["status"] = "running"
+    runner._state["active_child"] = {"name": "unknown-child", "status": "running", "pid": 1234, "start_identity": "token"}
+    monkeypatch.setattr(common, "process_identity_probe", lambda pid: ("unknown", None))
+
+    with pytest.raises(ObservabilityError, match="cannot determine child"):
+        runner._mark_previous_run_interrupted({"pid": 9999, "start_identity": "owner"})
+    assert runner._state["status"] == "needs_review"
+
+
+def test_finish_passed_rejects_failed_child(tmp_path: Path) -> None:
+    runner = ObservedRun(tmp_path / "evidence", source_root=_source_root(tmp_path))
+    runner._state["children"] = {"failed-child": {"status": "failed"}}
+    with pytest.raises(ObservabilityError, match="unfinished children"):
+        runner.finish("passed")
+
+
 def test_volatile_p0_children_are_never_cacheable(tmp_path: Path) -> None:
     specs = child_specs(
         Namespace(
@@ -404,6 +423,68 @@ def test_bounded_process_preserves_explicit_interrupt_status_and_cleans_tree(tmp
     real_process.terminate()
     real_process.wait(timeout=5)
     assert real_process.poll() is not None
+
+
+def test_bounded_process_preserves_cleanup_failure_metadata(tmp_path: Path, monkeypatch) -> None:
+    real_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **({"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}),
+    )
+
+    class BlockingProcess:
+        pid = real_process.pid
+
+        @staticmethod
+        def communicate(timeout=None):
+            raise subprocess.TimeoutExpired(["fake"], timeout, output="partial", stderr="still-open")
+
+        @staticmethod
+        def poll():
+            return real_process.poll()
+
+        @staticmethod
+        def wait(timeout=None):
+            return real_process.wait(timeout=timeout)
+
+    monkeypatch.setattr(common.subprocess, "Popen", lambda *args, **kwargs: BlockingProcess())
+    monkeypatch.setattr(common, "terminate_owned_process_tree", lambda process: {"attempted": True, "terminated": False, "reason": "blocked"})
+    try:
+        result = common.run_bounded_process([sys.executable, "-c", "pass"], cwd=tmp_path, timeout_seconds=1)
+        assert result.status == "cleanup_failed"
+        assert result.timed_out is True
+        assert result.cleanup and result.cleanup["reason"] == "blocked"
+        assert "partial" in result.stdout
+    finally:
+        real_process.terminate()
+        real_process.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows taskkill branch")
+def test_windows_taskkill_nonzero_does_not_claim_cleanup(tmp_path: Path, monkeypatch) -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+    process._codex_start_identity = process_start_identity(process.pid, include_exited=True)
+    original_run = common.subprocess.run
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 5, "", "taskkill denied"),
+    )
+    try:
+        cleanup = common.terminate_owned_process_tree(process, grace_seconds=0.1)
+        assert cleanup.get("terminated") is False
+    finally:
+        common.subprocess.run = original_run
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def test_server_output_is_drained_to_diagnostic_log_without_pipe_deadlock(tmp_path: Path) -> None:

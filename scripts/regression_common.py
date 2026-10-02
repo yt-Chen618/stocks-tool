@@ -94,6 +94,84 @@ def _windows_process_start_identity(pid: int, *, include_exited: bool = False) -
         kernel32.CloseHandle(handle)
 
 
+def _windows_process_identity_probe(pid: int) -> tuple[str, str | None]:
+    class FileTime(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", ctypes.c_ulong), ("dwHighDateTime", ctypes.c_ulong)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+        ctypes.POINTER(FileTime),
+    ]
+    kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenProcess(0x1000, 0, pid)
+    if not handle:
+        return ("gone", None) if ctypes.get_last_error() in {6, 87} else ("unknown", None)
+    creation = FileTime()
+    exit_time = FileTime()
+    kernel_time = FileTime()
+    user_time = FileTime()
+    try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return ("unknown", None)
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(creation),
+            ctypes.byref(exit_time),
+            ctypes.byref(kernel_time),
+            ctypes.byref(user_time),
+        ):
+            return ("unknown", None)
+        token = f"windows-filetime:{(creation.dwHighDateTime << 32) | creation.dwLowDateTime}"
+        if exit_code.value != 259 or exit_time.dwHighDateTime or exit_time.dwLowDateTime:
+            return ("gone", token)
+        return ("live", token)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def process_identity_probe(pid: int) -> tuple[str, str | None]:
+    """Return live/gone/unknown plus a start token without conflating probe failures."""
+
+    try:
+        if os.name == "nt":
+            return _windows_process_identity_probe(pid)
+        if sys.platform.startswith("linux"):
+            stat_path = Path(f"/proc/{pid}/stat")
+            try:
+                raw = stat_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                return ("gone", None)
+            except PermissionError:
+                return ("unknown", None)
+            closing = raw.rfind(")")
+            if closing < 0:
+                return ("unknown", None)
+            fields = raw[closing + 2 :].split()
+            if len(fields) <= 19:
+                return ("unknown", None)
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+            token = f"linux:{boot_id}:{fields[19]}"
+            if fields[0] in {"Z", "X", "x"}:
+                return ("gone", token)
+            return ("live", token)
+    except PermissionError:
+        return ("unknown", None)
+    except OSError:
+        return ("unknown", None)
+    return ("unknown", None)
+
+
 def process_start_identity(pid: int, *, include_exited: bool = False) -> str | None:
     """Return a live process token, or capture an owned, not-yet-reaped child.
 
@@ -102,25 +180,9 @@ def process_start_identity(pid: int, *, include_exited: bool = False) -> str | N
     checks still reject exited processes and Linux zombies.
     """
 
-    try:
-        if os.name == "nt":
-            return _windows_process_start_identity(pid, include_exited=include_exited)
-        if sys.platform.startswith("linux"):
-            stat_path = Path(f"/proc/{pid}/stat")
-            raw = stat_path.read_text(encoding="utf-8")
-            closing = raw.rfind(")")
-            if closing < 0:
-                return None
-            fields = raw[closing + 2 :].split()
-            if not fields or (not include_exited and fields[0] in {"Z", "X", "x"}):
-                return None
-            # The process start time is field 22; after the comm field this is
-            # index 19. Include boot_id so a reboot cannot reuse the token.
-            start_ticks = fields[19]
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
-            return f"linux:{boot_id}:{start_ticks}"
-    except (OSError, ValueError, IndexError):
-        return None
+    status, token = process_identity_probe(pid)
+    if status == "live" or (include_exited and status == "gone"):
+        return token
     return None
 
 
@@ -140,7 +202,27 @@ def process_identity_matches(identity: dict[str, Any] | ProcessIdentity | None) 
         return False
     if not isinstance(expected_pid, int) or not expected_start:
         return False
-    return process_start_identity(expected_pid) == expected_start
+    status, token = process_identity_probe(expected_pid)
+    return status == "live" and token == expected_start
+
+
+def process_identity_state(identity: dict[str, Any] | ProcessIdentity | None) -> str:
+    if isinstance(identity, ProcessIdentity):
+        expected_pid = identity.pid
+        expected_start = identity.start_identity
+    elif isinstance(identity, dict):
+        expected_pid = identity.get("pid")
+        expected_start = identity.get("start_identity")
+    else:
+        return "unknown"
+    if not isinstance(expected_pid, int) or not expected_start:
+        return "unknown"
+    status, token = process_identity_probe(expected_pid)
+    if status == "unknown":
+        return "unknown"
+    if status == "gone":
+        return "gone"
+    return "live" if token == expected_start else "mismatch"
 
 
 def _json_hash(value: Any) -> str:
@@ -523,6 +605,16 @@ class ObservedRun:
         child = self._state.get("active_child")
         return self._process_record_alive(child) if isinstance(child, dict) else False
 
+    def _block_resume_for_unknown_process(self, *, child: dict[str, Any], reason: str) -> None:
+        self._state["status"] = "needs_review"
+        self._state["next_action"] = "inspect child process identity before resuming"
+        with self._state_lock:
+            self._write_state_locked(force=True)
+        self._append_event("resume_blocked", reason=reason, child=child.get("name") or child.get("pid"))
+        raise ObservabilityError(
+            f"Evidence run {self.run_id} cannot determine child PID {child.get('pid')}; inspect it before resuming."
+        )
+
     def _mark_previous_run_interrupted(self, previous_owner: dict[str, Any] | None) -> None:
         launching_children = [
             str(child_name)
@@ -557,6 +649,16 @@ class ObservedRun:
             raise ObservabilityError(
                 f"Evidence run {self.run_id} has a child in the spawn window without a persisted PID; inspect it before resuming."
             )
+        active_child = self._state.get("active_child")
+        if isinstance(active_child, dict) and active_child.get("status") == "running":
+            active_probe_state = process_identity_state(active_child)
+            if active_probe_state == "unknown":
+                self._block_resume_for_unknown_process(child=active_child, reason="active_child_probe_unknown")
+            if active_probe_state == "live":
+                child = active_child
+                raise RunAlreadyActiveError(
+                    f"Evidence run {self.run_id} has a live child PID {child.get('pid')}; refusing a duplicate."
+                )
         if self._active_child_alive():
             child = self._state.get("active_child") or {}
             raise RunAlreadyActiveError(
@@ -566,7 +668,10 @@ class ObservedRun:
         for child_name, child in (self._state.get("children") or {}).items():
             if not isinstance(child, dict) or child.get("status") != "running":
                 continue
-            if self._process_record_alive(child):
+            probe_state = process_identity_state(child)
+            if probe_state == "unknown":
+                self._block_resume_for_unknown_process(child=child, reason="child_probe_unknown")
+            if probe_state == "live":
                 raise RunAlreadyActiveError(
                     f"Evidence run {self.run_id} has a live child PID {child.get('pid')}; refusing a duplicate."
                 )
@@ -651,7 +756,10 @@ class ObservedRun:
                     raise ObservabilityError(
                         f"Evidence run {self.run_id} has a child in the spawn window without a persisted process identity; inspect it before resuming."
                     )
-                if self._process_record_alive(active_child):
+                active_probe_state = process_identity_state(active_child)
+                if active_probe_state == "unknown":
+                    self._block_resume_for_unknown_process(child=active_child, reason="active_child_probe_unknown")
+                if active_probe_state == "live":
                     raise RunAlreadyActiveError(
                         f"Evidence run {self.run_id} has a live child PID {active_child.get('pid')}; refusing a duplicate."
                     )
@@ -1000,6 +1108,16 @@ class ObservedRun:
             or self._active_child_alive()
         ):
             raise ObservabilityError("Cannot finish an evidence run as passed while a child process is still active.")
+        if status == "passed":
+            unfinished = [
+                str(name)
+                for name, child in (self._state.get("children") or {}).items()
+                if not isinstance(child, dict) or child.get("status") != "passed"
+            ]
+            if unfinished:
+                raise ObservabilityError(
+                    f"Cannot finish an evidence run as passed with unfinished children: {', '.join(unfinished)}."
+                )
         if self._heartbeat_thread is not None:
             self._heartbeat_stop.set()
             self._heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds + 1))
@@ -1186,7 +1304,8 @@ def _linux_owned_descendants(root_pid: int) -> list[dict[str, Any]]:
 
 
 def _identity_is_current(pid: int, expected: str) -> bool:
-    return process_start_identity(pid) == expected
+    status, token = process_identity_probe(pid)
+    return status == "live" and token == expected
 
 
 def terminate_owned_process_tree(
@@ -1197,8 +1316,12 @@ def terminate_owned_process_tree(
     """Terminate only a process tree whose PID still has its recorded start identity."""
 
     expected = getattr(process, "_codex_start_identity", None)
-    current = process_start_identity(process.pid)
-    if not expected or (current != expected and process_start_identity(process.pid, include_exited=True) != expected):
+    root_status, root_token = process_identity_probe(process.pid)
+    if not expected or root_status == "unknown":
+        return {"attempted": False, "reason": "pid_start_identity_mismatch", "pid": process.pid}
+    if root_status == "live" and root_token != expected:
+        return {"attempted": False, "reason": "pid_start_identity_mismatch", "pid": process.pid}
+    if root_status == "gone" and root_token not in {None, expected}:
         return {"attempted": False, "reason": "pid_start_identity_mismatch", "pid": process.pid}
 
     if os.name == "nt":
@@ -1224,12 +1347,14 @@ def terminate_owned_process_tree(
                 "terminated": False,
                 "pid": process.pid,
             }
+        terminated = completed.returncode == 0 and process.poll() is not None
         return {
             "attempted": True,
             "method": "taskkill-tree",
             "returncode": completed.returncode,
-            "terminated": True,
+            "terminated": terminated,
             "pid": process.pid,
+            "stderr": (completed.stderr or "")[-1000:],
         }
 
     descendants = _linux_owned_descendants(process.pid)
@@ -1238,6 +1363,12 @@ def terminate_owned_process_tree(
         for record in descendants
         if record["state"] not in {"Z", "X", "x"}
     ]
+    for record in targets:
+        status, token = process_identity_probe(record["pid"])
+        if status == "unknown":
+            return {"attempted": False, "reason": "descendant_probe_unknown", "pid": process.pid, "descendant": record["pid"]}
+        if status == "live" and token != record["start_identity"]:
+            return {"attempted": False, "reason": "descendant_pid_reused", "pid": process.pid, "descendant": record["pid"]}
     # Descendants can deliberately start their own session, so kill verified
     # PIDs individually instead of relying only on the root process group.
     for record in reversed(targets):
@@ -1255,19 +1386,23 @@ def terminate_owned_process_tree(
             pass
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
-        live_targets = [
-            record
-            for record in targets + [{"pid": process.pid, "start_identity": expected}]
-            if _identity_is_current(record["pid"], record["start_identity"])
-        ]
+        live_targets = []
+        for record in targets + [{"pid": process.pid, "start_identity": expected}]:
+            status, token = process_identity_probe(record["pid"])
+            if status == "unknown":
+                return {"attempted": False, "reason": "cleanup_probe_unknown", "pid": process.pid, "target": record["pid"]}
+            if status == "live" and token == record["start_identity"]:
+                live_targets.append(record)
         if not live_targets:
             return {"attempted": True, "method": "verified-pid-term", "terminated": True, "pid": process.pid, "descendants": len(targets)}
         time.sleep(0.05)
-    live_targets = [
-        record
-        for record in targets + [{"pid": process.pid, "start_identity": expected}]
-        if _identity_is_current(record["pid"], record["start_identity"])
-    ]
+    live_targets = []
+    for record in targets + [{"pid": process.pid, "start_identity": expected}]:
+        status, token = process_identity_probe(record["pid"])
+        if status == "unknown":
+            return {"attempted": False, "reason": "cleanup_probe_unknown", "pid": process.pid, "target": record["pid"]}
+        if status == "live" and token == record["start_identity"]:
+            live_targets.append(record)
     for record in reversed(live_targets):
         if _identity_is_current(record["pid"], record["start_identity"]):
             try:
@@ -1276,7 +1411,7 @@ def terminate_owned_process_tree(
                 pass
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
-        if not any(_identity_is_current(record["pid"], record["start_identity"]) for record in live_targets):
+        if not any(process_identity_probe(record["pid"])[0] == "live" and process_identity_probe(record["pid"])[1] == record["start_identity"] for record in live_targets):
             return {"attempted": True, "method": "verified-pid-kill", "terminated": True, "pid": process.pid, "descendants": len(targets)}
         time.sleep(0.05)
     return {"attempted": True, "method": "verified-pid-kill", "terminated": False, "pid": process.pid, "descendants": len(targets)}
@@ -1336,7 +1471,12 @@ def run_bounded_process(
         )
     except subprocess.TimeoutExpired as error:
         cleanup = terminate_owned_process_tree(process)
-        stdout, stderr = process.communicate(timeout=10)
+        cleanup_status = "timed_out"
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as residual:
+            cleanup_status = "cleanup_failed"
+            stdout, stderr = residual.output or "", residual.stderr or ""
         timeout_stdout = stdout or error.output or ""
         timeout_stderr = stderr or error.stderr or ""
         if isinstance(timeout_stdout, bytes):
@@ -1345,10 +1485,10 @@ def run_bounded_process(
             timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
         return BoundedProcessResult(
             command=command,
-            returncode=process.returncode if process.returncode is not None else 124,
+                returncode=getattr(process, "returncode", None) if getattr(process, "returncode", None) is not None else 124,
             stdout=timeout_stdout,
             stderr=timeout_stderr,
-            status="timed_out",
+            status=cleanup_status,
             timed_out=True,
             cleanup=cleanup,
             pid=process.pid,
@@ -1356,8 +1496,12 @@ def run_bounded_process(
         )
     except (KeyboardInterrupt, SystemExit):
         cleanup = terminate_owned_process_tree(process)
+        interrupted_status = "interrupted"
         try:
             stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired as residual:
+            interrupted_status = "cleanup_failed"
+            stdout, stderr = residual.output or "", residual.stderr or ""
         except (KeyboardInterrupt, SystemExit):
             stdout, stderr = "", ""
         return BoundedProcessResult(
@@ -1365,7 +1509,7 @@ def run_bounded_process(
             returncode=130,
             stdout=stdout or "",
             stderr=stderr or "",
-            status="interrupted",
+            status=interrupted_status,
             interrupted=True,
             cleanup=cleanup,
             pid=process.pid,
