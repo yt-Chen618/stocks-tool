@@ -25,6 +25,7 @@
     mode = "paper",
     expectedContext = null,
     requestSignature,
+    accountLoadGeneration,
     coreDataHealthy = false,
     recoveryStatusState = "idle",
     recoveryStatus = null,
@@ -55,6 +56,9 @@
     }
     if (expectedContext?.mode && expectedContext.mode !== normalizedMode) {
       reasons.push("mode_context_changed");
+    }
+    if (expectedContext?.accountLoadGeneration !== undefined && accountLoadGeneration !== expectedContext.accountLoadGeneration) {
+      reasons.push("account_context_changed");
     }
     if (expectedContext && Object.prototype.hasOwnProperty.call(expectedContext, "requestSignature") && requestSignature !== expectedContext.requestSignature) {
       reasons.push("request_signature_changed");

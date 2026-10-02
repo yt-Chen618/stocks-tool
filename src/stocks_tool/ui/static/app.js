@@ -798,6 +798,7 @@ function evaluateCurrentTradingSafety(options = {}) {
     mode: options.mode ?? "paper",
     expectedContext: options.expectedContext ?? null,
     requestSignature: options.requestSignature,
+    accountLoadGeneration: state.accountLoadGeneration,
     coreDataHealthy: state.coreDataHealthy,
     recoveryStatusState: state.recoveryStatusState,
     recoveryStatus: state.recoveryStatus,
@@ -874,15 +875,19 @@ function tradingBlockedMessage(options = {}) {
   if (safety.reasons.includes("unresolved_trading_intent")) return "An unresolved trading intent blocks all broker-writing actions until reconciliation completes.";
   if (safety.reasons.includes("account_context_changed") || safety.reasons.includes("mode_context_changed")) return "The selected account or execution mode changed. Review the action again before sending.";
   if (safety.reasons.includes("request_signature_changed")) return "The action details changed while confirmation was open. Review the action again before sending.";
+  if (safety.reasons.includes("business_disabled")) return "This action is no longer eligible. No request was sent.";
   if (safety.reasons.includes("safety_module_unavailable")) return "Trading safety checks are unavailable. No request was sent.";
   return "Trading safety checks blocked this action. No request was sent.";
 }
 async function runConfirmedBrokerMutation(
-  { actionKey, button, confirmation, requestSignature, getRequestSignature, statusElement, accountId = state.selectedAccountId, mode = "paper" },
+  { actionKey, button, confirmation, requestSignature, getRequestSignature, statusElement, accountId = state.selectedAccountId, mode = "paper", businessPredicate, businessBlockedMessage },
   operation
 ) {
-  const expectedContext = { accountId, mode, requestSignature };
-  const blockedMessage = tradingBlockedMessage({ actionKey, accountId, mode, expectedContext, requestSignature });
+  const expectedContext = { accountId, mode, requestSignature, accountLoadGeneration: state.accountLoadGeneration };
+  const businessDisabled = button?.dataset.businessDisabled === "true" || (typeof businessPredicate === "function" && !businessPredicate());
+  const blockedMessage = businessDisabled && businessBlockedMessage
+    ? businessBlockedMessage
+    : tradingBlockedMessage({ actionKey, accountId, mode, expectedContext, requestSignature, businessDisabled });
   if (blockedMessage) {
     setActionStatus(statusElement, blockedMessage, "error");
     setStatus(blockedMessage, "error");
@@ -914,10 +919,14 @@ async function runConfirmedBrokerMutation(
       expectedContext,
       requestSignature: currentRequestSignature,
       ignorePendingAction: true,
+      businessDisabled: button?.dataset.businessDisabled === "true" || (typeof businessPredicate === "function" && !businessPredicate()),
     });
     if (postConfirmationBlocked) {
-      setActionStatus(statusElement, postConfirmationBlocked, "error");
-      setStatus(postConfirmationBlocked, "error");
+      const message = (typeof businessPredicate === "function" && !businessPredicate() && businessBlockedMessage)
+        ? businessBlockedMessage
+        : postConfirmationBlocked;
+      setActionStatus(statusElement, message, "error");
+      setStatus(message, "error");
       return { executed: false, blocked: true, contextChanged: true };
     }
 
@@ -1910,6 +1919,11 @@ async function monitorSpread(spreadId, button = null) {
 
 async function recoverCloseSpread(spreadId, formData, button = null) {
   const spread = state.spreads.find((item) => item.id === spreadId);
+  const recoveryEligibility = state.recoverCloseEligibility?.[spreadId];
+  if (!recoveryEligibility?.eligible || recoveryEligibility.external_account_id !== state.selectedAccountId || recoveryEligibility.mode !== "paper") {
+    setStatus("Recovery close is no longer eligible. No request was sent.", "error");
+    return;
+  }
   const actor = String(formData.get("actor") || "").trim();
   const note = String(formData.get("note") || "").trim();
   const maxDebit = String(formData.get("max_debit") || "").trim();
@@ -1934,6 +1948,13 @@ async function recoverCloseSpread(spreadId, formData, button = null) {
         button,
         requestSignature: JSON.stringify({ spread_id: spreadId, ...payload }),
         getRequestSignature: () => JSON.stringify({ spread_id: spreadId, ...payload }),
+        businessPredicate: () => {
+          const current = state.recoverCloseEligibility?.[spreadId];
+          return current?.eligible === true
+            && current.external_account_id === state.selectedAccountId
+            && current.mode === "paper";
+        },
+        businessBlockedMessage: "Recovery close is no longer eligible. No request was sent.",
         statusElement: els.strategyControlsHint,
         confirmation: {
           title: "Confirm Bull Put recovery close",

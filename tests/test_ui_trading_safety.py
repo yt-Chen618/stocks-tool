@@ -33,6 +33,7 @@ def test_trading_guard_is_pure_account_mode_recovery_and_pending_gate() -> None:
           accountId: "A",
           selectedAccountId: "A",
           mode: "paper",
+          accountLoadGeneration: 4,
           coreDataHealthy: true,
           recoveryStatusState: "ready",
           recoveryStatus: {external_account_id: "A", mode: "paper", recovery_blocked: false},
@@ -48,6 +49,8 @@ def test_trading_guard_is_pure_account_mode_recovery_and_pending_gate() -> None:
         const ownPending = evaluate({...base, pendingActionKeys: new Set(["order-submit"]), ignorePendingAction: true});
         const otherPending = evaluate({...base, pendingActionKeys: new Set(["other-action"]), actionKey: "other-action"});
         const changed = evaluate({...base, selectedAccountId: "B", expectedContext: {accountId: "A", mode: "paper", requestSignature: "old"}, requestSignature: "new"});
+        const generationChanged = evaluate({...base, expectedContext: {accountId: "A", mode: "paper", requestSignature: "same", accountLoadGeneration: 4}, requestSignature: "same", accountLoadGeneration: 5});
+        const businessDisabled = evaluate({...base, businessDisabled: true});
         process.stdout.write(JSON.stringify({
           allowed: !allowed.blocked,
           loading: loading.reasons,
@@ -55,6 +58,8 @@ def test_trading_guard_is_pure_account_mode_recovery_and_pending_gate() -> None:
           ownPending: !ownPending.blocked,
           otherPending: otherPending.reasons,
           changed: changed.reasons,
+          generationChanged: generationChanged.reasons,
+          businessDisabled: businessDisabled.reasons,
         }));
         ''',
     )
@@ -65,3 +70,5 @@ def test_trading_guard_is_pure_account_mode_recovery_and_pending_gate() -> None:
     assert "pending_action" in result["otherPending"]
     assert "account_context_changed" in result["changed"]
     assert "request_signature_changed" in result["changed"]
+    assert "account_context_changed" in result["generationChanged"]
+    assert "business_disabled" in result["businessDisabled"]
