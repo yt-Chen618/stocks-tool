@@ -13,6 +13,7 @@ from regression_common import (
     ObservedRun,
     build_report,
     emit_report,
+    run_bounded_process,
     start_utf8_process,
     stop_process,
     wait_for_http,
@@ -57,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Mock server host.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Mock server port.")
     parser.add_argument("--timeout-seconds", type=float, default=30.0, help="HTTP timeout and step deadline.")
+    parser.add_argument("--browser-timeout-seconds", type=float, default=300.0, help="Finite timeout for one browser flow.")
     parser.add_argument("--poll-seconds", type=float, default=0.5, help="Polling interval for mock state checks.")
     parser.add_argument("--keep-server", action="store_true", help="Leave the mock server running after the script exits.")
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
@@ -70,6 +72,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str]:
+    server_log = ROOT / "artifacts" / "mock-server-logs" / f"{scenario}-{port}.log"
     return start_utf8_process(
         [
             sys.executable,
@@ -82,6 +85,7 @@ def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str
             scenario,
         ],
         cwd=ROOT,
+        output_log=server_log,
     )
 
 
@@ -109,11 +113,16 @@ def require_ok(response: httpx.Response) -> Any:
     raise RegressionError(detail)
 
 
-def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, Any]:
+def run_browser_flow(
+    base_url: str,
+    *,
+    scenario: str = "normal",
+    timeout_seconds: float = 300.0,
+) -> dict[str, Any]:
     screenshot_path = ROOT / "output" / "playwright" / f"mock-ui-{scenario}-regression.png"
     playwright_core_path = resolve_playwright_core()
     node_command = resolve_node()
-    completed = subprocess.run(
+    completed = run_bounded_process(
         [
             node_command,
             str(ROOT / "scripts" / "mock_ui_browser_flow.js"),
@@ -123,16 +132,12 @@ def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, An
             scenario,
         ],
         cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         env=browser_environment(),
+        timeout_seconds=timeout_seconds,
     )
-    if completed.returncode != 0:
+    if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(detail)
+        raise RegressionError(f"Browser flow {completed.status}: {detail}")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -261,11 +266,14 @@ def main() -> None:
                     str(args.timeout_seconds),
                     "--poll-seconds",
                     str(args.poll_seconds),
+                    "--browser-timeout-seconds",
+                    str(args.browser_timeout_seconds),
                     "--scenario",
                     scenario,
                 ]
                 child = observed_run.run_child(
                     {"name": f"scenario-{scenario}", "command": command, "cacheable": False},
+                    timeout_seconds=args.browser_timeout_seconds + 30,
                 )
                 if child["status"] != "passed":
                     stderr = Path(child["stderr_log"]).read_text(encoding="utf-8", errors="replace")
@@ -305,7 +313,11 @@ def main() -> None:
         try:
             if args.scenario != "normal":
                 evidence = run_scenario_assertions(client, scenario=args.scenario)
-                browser = run_browser_flow(base_url, scenario=args.scenario)
+                browser = run_browser_flow(
+                    base_url,
+                    scenario=args.scenario,
+                    timeout_seconds=args.browser_timeout_seconds,
+                )
                 assert browser["rendered"] is True
                 emit_report(
                     build_report(
@@ -467,7 +479,11 @@ def main() -> None:
             assert any(event["action"] == "advisor_run_card_recorded" for event in audit_events)
             audit_summary = require_ok(client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"}))
             assert audit_summary["event_count"] >= 1
-            browser = run_browser_flow(base_url, scenario=args.scenario)
+            browser = run_browser_flow(
+                base_url,
+                scenario=args.scenario,
+                timeout_seconds=args.browser_timeout_seconds,
+            )
             assert browser["operator"]["rendered"] is True
             scenario_evidence = run_scenario_assertions(client, scenario=args.scenario)
 

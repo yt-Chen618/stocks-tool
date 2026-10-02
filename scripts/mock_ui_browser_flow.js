@@ -5,6 +5,7 @@ const {
   expectText,
   expectTextInsensitive,
   isBrokerMutationPath,
+  launchBrowserPage,
   resolveBrowserExecutable,
   waitResponsiveSettled,
 } = require("./browser_test_helpers");
@@ -17,11 +18,13 @@ async function main() {
 
   const { chromium } = require(playwrightCorePath);
   const executablePath = resolveBrowserExecutable();
-  const browser = await chromium.launch({
-    headless: true,
-    ...(executablePath ? { executablePath } : {}),
+  const { browser, page } = await launchBrowserPage(chromium, {
+    browserOptions: {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    },
+    pageOptions: { viewport: { width: 1440, height: 1200 } },
   });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
   page.on("dialog", (dialog) => dialog.accept());
   const requestObserver = createRequestObserver(page, {
     readPredicate: (request, url) => request.method() === "GET" && (
@@ -675,6 +678,10 @@ async function captureResponsiveScreenshots(page, screenshotPath) {
     { label: "760", width: 760, height: 1000, output: `${base}-760${extension}` },
   ];
   const outputs = {};
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  });
   for (const target of targets) {
     await page.setViewportSize({ width: target.width, height: target.height });
     await assertResponsiveShell(page, target.label);

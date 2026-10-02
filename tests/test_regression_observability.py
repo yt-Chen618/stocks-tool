@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import signal
 import sys
 import threading
 import time
@@ -20,6 +22,10 @@ from regression_common import (  # noqa: E402
     RunAlreadyActiveError,
     current_process_identity,
     process_identity_matches,
+    process_start_identity,
+    run_bounded_process,
+    start_utf8_process,
+    stop_process,
 )
 from run_p0_safety_gate import child_specs, run_child as run_p0_child  # noqa: E402
 from run_operator_platform_v8_gate import run_child as run_v8_child  # noqa: E402
@@ -302,6 +308,69 @@ def test_process_identity_requires_start_token_to_avoid_pid_reuse() -> None:
     assert process_identity_matches(current)
     assert not process_identity_matches({"pid": current.pid, "start_identity": "different-process"})
     assert not process_identity_matches({"pid": current.pid})
+
+
+def test_bounded_process_timeout_cleans_owned_descendant(tmp_path: Path) -> None:
+    pid_file = tmp_path / "descendant.pid"
+    child_code = (
+        "import subprocess, sys, time; "
+        f"p=subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+        f"open(r'{pid_file}', 'w', encoding='ascii').write(str(p.pid)); "
+        "time.sleep(30)"
+    )
+    result = run_bounded_process(
+        [sys.executable, "-c", child_code],
+        cwd=tmp_path,
+        timeout_seconds=0.5,
+    )
+    assert result.status == "timed_out"
+    assert result.timed_out is True
+    assert result.cleanup and result.cleanup.get("attempted") is True
+    descendant_pid = int(pid_file.read_text(encoding="ascii"))
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and process_start_identity(descendant_pid) is not None:
+            time.sleep(0.05)
+        assert process_start_identity(descendant_pid) is None
+    finally:
+        if process_start_identity(descendant_pid) is not None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(descendant_pid), "/T", "/F"], check=False)
+            else:
+                os.kill(descendant_pid, signal.SIGKILL)
+
+
+def test_bounded_process_records_launch_and_nonzero_exit_faults(tmp_path: Path) -> None:
+    missing = run_bounded_process(
+        [str(tmp_path / "missing-browser-helper.exe")],
+        cwd=tmp_path,
+        timeout_seconds=1,
+    )
+    assert missing.status == "launch_failed"
+    assert missing.returncode != 0
+
+    exited = run_bounded_process(
+        [sys.executable, "-c", "import sys; print('node-like failure'); sys.exit(3)"],
+        cwd=tmp_path,
+        timeout_seconds=1,
+    )
+    assert exited.status == "completed"
+    assert exited.returncode == 3
+    assert "node-like failure" in exited.stdout
+
+
+def test_server_output_is_drained_to_diagnostic_log_without_pipe_deadlock(tmp_path: Path) -> None:
+    output_log = tmp_path / "server.log"
+    process = start_utf8_process(
+        [sys.executable, "-c", "import sys; sys.stderr.write('x' * 200000)"],
+        cwd=tmp_path,
+        output_log=output_log,
+    )
+    try:
+        assert process.wait(timeout=5) == 0
+    finally:
+        stop_process(process)
+    assert output_log.stat().st_size >= 200000
 
 
 def test_fast_child_exit_is_not_a_missing_identity_failure(tmp_path: Path, monkeypatch) -> None:

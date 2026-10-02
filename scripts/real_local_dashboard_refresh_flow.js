@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { resolveBrowserExecutable } = require("./browser_test_helpers");
+const { launchBrowserPage, resolveBrowserExecutable } = require("./browser_test_helpers");
 
 async function main() {
   const [, , baseUrl, screenshotPath, playwrightCorePath, iterationsArg, settleTimeoutArg, pauseMsArg] = process.argv;
@@ -19,11 +19,13 @@ async function main() {
 
   const { chromium } = require(playwrightCorePath);
   const executablePath = resolveBrowserExecutable();
-  const browser = await chromium.launch({
-    headless: true,
-    ...(executablePath ? { executablePath } : {}),
+  const { browser, page } = await launchBrowserPage(chromium, {
+    browserOptions: {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    },
+    pageOptions: { viewport: { width: 1600, height: 2200 } },
   });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 2200 } });
   const runs = [];
 
   try {

@@ -1,6 +1,7 @@
 const path = require("node:path");
 const {
   expectText,
+  launchBrowserPage,
   resolveBrowserExecutable,
   sleep,
   waitFor,
@@ -282,11 +283,13 @@ async function main() {
   const timeoutMs = Number(timeoutArg);
   const { chromium } = require(playwrightCorePath);
   const executablePath = resolveBrowserExecutable();
-  const browser = await chromium.launch({
-    headless: true,
-    ...(executablePath ? { executablePath } : {}),
+  const { browser, page } = await launchBrowserPage(chromium, {
+    browserOptions: {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    },
+    pageOptions: { viewport: { width: 1440, height: 1200 } },
   });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });
   page.setDefaultTimeout(timeoutMs);
   page.on("dialog", (dialog) => dialog.dismiss());
 

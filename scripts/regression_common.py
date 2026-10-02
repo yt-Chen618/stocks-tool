@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -814,6 +815,7 @@ class ObservedRun:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 bufsize=0,
+                **_process_launch_kwargs(),
             )
         except BaseException as error:
             completed_at = utc_now_iso()
@@ -911,19 +913,42 @@ class ObservedRun:
             output_threads.append(thread)
 
         timed_out = False
+        cleanup: dict[str, Any] | None = None
         completed_normally = False
         try:
             returncode = process.wait(timeout=timeout_seconds)
             completed_normally = True
         except subprocess.TimeoutExpired:
             timed_out = True
-            process.terminate()
+            cleanup = terminate_owned_process_tree(process)
             try:
                 returncode = process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                process.kill()
-                returncode = process.wait(timeout=5)
+                child_state["next_action"] = "inspect live child after failed cleanup"
+                with self._state_lock:
+                    self._state["next_action"] = child_state["next_action"]
+                    self._state["last_progress"] = {"kind": "child_cleanup_failed", "child": name}
+                    self._write_state_locked(force=True)
+                self._append_event("child_cleanup_failed", child=name, cleanup=cleanup)
+                raise ObservabilityError(f"Timed-out child '{name}' could not be cleaned up safely.")
             completed_normally = True
+        except (KeyboardInterrupt, SystemExit) as error:
+            cleanup = terminate_owned_process_tree(process)
+            cleaned = bool(cleanup and cleanup.get("terminated")) or process.poll() is not None
+            child_state.update(
+                {
+                    "status": "interrupted" if cleaned else "running",
+                    "cleanup": cleanup,
+                    "next_action": "resume after explicit interruption" if cleaned else "inspect live child after failed cleanup",
+                }
+            )
+            with self._state_lock:
+                self._state["children"][name] = child_state
+                self._state["active_child"] = None if cleaned else child_state
+                self._state["next_action"] = child_state["next_action"]
+                self._write_state_locked(force=True)
+            self._append_event("child_interrupted", child=name, reason=type(error).__name__, cleanup=cleanup)
+            raise
         except BaseException as error:
             child_state["next_action"] = "inspect live child before resuming"
             with self._state_lock:
@@ -945,6 +970,7 @@ class ObservedRun:
             "status": status,
             "returncode": returncode,
             "timed_out": timed_out,
+            "cleanup": cleanup,
             "completed_at": completed_at,
             "next_action": "run next child" if status == "passed" else "inspect child logs and resume",
             "reused": False,
@@ -1056,6 +1082,16 @@ def build_observed_child_report(
     }
 
 
+def default_child_timeout_seconds(name: str) -> float:
+    """Bound one child without imposing a total-gate timeout."""
+
+    if name in {"mock-ui", "mock-dashboard-scenario-matrix"} or name.startswith("scenario-"):
+        return 1800.0
+    if name in {"pytest", "postgres-order-concurrency", "recovery-ui", "consistency-report", "paper-session-gate", "audit-export"}:
+        return 600.0
+    return 120.0
+
+
 def build_report(
     *,
     script: str,
@@ -1082,33 +1118,212 @@ def build_report(
     return report
 
 
+@dataclass(frozen=True)
+class BoundedProcessResult:
+    command: list[str]
+    returncode: int
+    stdout: str
+    stderr: str
+    status: str
+    timed_out: bool = False
+    interrupted: bool = False
+    cleanup: dict[str, Any] | None = None
+    pid: int | None = None
+    start_identity: str | None = None
+
+
+def _process_launch_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _attach_process_identity(process: subprocess.Popen[Any]) -> ProcessIdentity | None:
+    identity = ProcessIdentity(process.pid, process_start_identity(process.pid, include_exited=True))
+    setattr(process, "_codex_start_identity", identity.start_identity)
+    return identity if identity.start_identity else None
+
+
+def terminate_owned_process_tree(
+    process: subprocess.Popen[Any],
+    *,
+    grace_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """Terminate only a process tree whose PID still has its recorded start identity."""
+
+    expected = getattr(process, "_codex_start_identity", None)
+    current = process_start_identity(process.pid)
+    if not expected or current != expected:
+        return {"attempted": False, "reason": "pid_start_identity_mismatch", "pid": process.pid}
+
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            return {
+                "attempted": True,
+                "method": "taskkill-tree",
+                "returncode": completed.returncode,
+                "terminated": False,
+                "pid": process.pid,
+            }
+        return {
+            "attempted": True,
+            "method": "taskkill-tree",
+            "returncode": completed.returncode,
+            "terminated": True,
+            "pid": process.pid,
+        }
+
+    try:
+        process_group = os.getpgid(process.pid)
+        os.killpg(process_group, signal.SIGTERM)
+    except (OSError, ProcessLookupError) as error:
+        return {"attempted": False, "reason": f"killpg_failed:{type(error).__name__}", "pid": process.pid}
+    try:
+        process.wait(timeout=grace_seconds)
+        return {"attempted": True, "method": "killpg-term", "terminated": True, "pid": process.pid}
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+            process.wait(timeout=grace_seconds)
+            return {"attempted": True, "method": "killpg-kill", "terminated": True, "pid": process.pid}
+        except (OSError, ProcessLookupError, subprocess.TimeoutExpired) as error:
+            return {"attempted": True, "method": "killpg-kill", "terminated": False, "pid": process.pid, "error": str(error)}
+
+
+def run_bounded_process(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float,
+) -> BoundedProcessResult:
+    """Run a browser helper with finite timeout and owned-tree cleanup."""
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **_process_launch_kwargs(),
+        )
+    except OSError as error:
+        return BoundedProcessResult(
+            command=command,
+            returncode=127,
+            stdout="",
+            stderr=f"{type(error).__name__}: {error}",
+            status="launch_failed",
+        )
+    identity = _attach_process_identity(process)
+    if identity is None:
+        cleanup = terminate_owned_process_tree(process)
+        return BoundedProcessResult(
+            command=command,
+            returncode=127,
+            stdout="",
+            stderr="Could not capture browser helper process identity.",
+            status="launch_failed",
+            cleanup=cleanup,
+            pid=process.pid,
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=max(1.0, timeout_seconds))
+        return BoundedProcessResult(
+            command=command,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
+            status="completed",
+            pid=process.pid,
+            start_identity=identity.start_identity,
+        )
+    except subprocess.TimeoutExpired as error:
+        cleanup = terminate_owned_process_tree(process)
+        stdout, stderr = process.communicate(timeout=10)
+        timeout_stdout = stdout or error.output or ""
+        timeout_stderr = stderr or error.stderr or ""
+        if isinstance(timeout_stdout, bytes):
+            timeout_stdout = timeout_stdout.decode("utf-8", errors="replace")
+        if isinstance(timeout_stderr, bytes):
+            timeout_stderr = timeout_stderr.decode("utf-8", errors="replace")
+        return BoundedProcessResult(
+            command=command,
+            returncode=process.returncode if process.returncode is not None else 124,
+            stdout=timeout_stdout,
+            stderr=timeout_stderr,
+            status="timed_out",
+            timed_out=True,
+            cleanup=cleanup,
+            pid=process.pid,
+            start_identity=identity.start_identity,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        cleanup = terminate_owned_process_tree(process)
+        stdout, stderr = process.communicate(timeout=10)
+        raise RuntimeError(
+            f"Browser helper interrupted; process tree cleanup={cleanup}.\n{stderr[-1000:]}"
+        )
+
+
 def start_utf8_process(
     command: list[str],
     *,
     cwd: Path,
     env: dict[str, str] | None = None,
+    output_log: Path | None = None,
 ) -> subprocess.Popen[str]:
-    return subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=env,
-    )
+    log_handle = None
+    if output_log is not None:
+        output_log.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = output_log.open("wb")
+        stdout = log_handle
+    else:
+        stdout = subprocess.DEVNULL
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=stdout,
+            stderr=subprocess.STDOUT,
+            env=env,
+            **_process_launch_kwargs(),
+        )
+    except BaseException:
+        if log_handle is not None:
+            log_handle.close()
+        raise
+    identity = _attach_process_identity(process)
+    setattr(process, "_codex_output_handle", log_handle)
+    setattr(process, "_codex_output_path", str(output_log) if output_log is not None else None)
+    setattr(process, "_codex_start_identity", identity.start_identity if identity else None)
+    return process
 
 
 def stop_process(process: subprocess.Popen[Any], *, timeout_seconds: float = 5.0) -> None:
     if process.poll() is not None:
+        handle = getattr(process, "_codex_output_handle", None)
+        if handle is not None:
+            handle.close()
         return
-    process.terminate()
-    try:
-        process.wait(timeout=timeout_seconds)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=timeout_seconds)
+    terminate_owned_process_tree(process, grace_seconds=timeout_seconds)
+    handle = getattr(process, "_codex_output_handle", None)
+    if handle is not None and process.poll() is not None:
+        handle.close()
 
 
 def wait_for_http(
@@ -1124,8 +1339,12 @@ def wait_for_http(
     last_error: str | None = None
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output = process.stdout.read() if process.stdout is not None else ""
-            raise RuntimeError(f"Process exited early with code {process.returncode}.\n{output}")
+            log_path = getattr(process, "_codex_output_path", None)
+            output = read_tail(log_path, 4000) if log_path else ""
+            raise RuntimeError(
+                f"Process exited early with code {process.returncode}. "
+                f"Diagnostic log: {log_path or 'unavailable'}.\n{output}"
+            )
         try:
             with urlopen(url, timeout=2) as response:
                 if 200 <= response.status < 500:

@@ -5,6 +5,20 @@ function resolveBrowserExecutable() {
   return configured && fs.existsSync(configured) ? configured : null;
 }
 
+async function launchBrowserPage(chromium, { browserOptions = {}, pageOptions = {} } = {}) {
+  let browser = null;
+  try {
+    browser = await chromium.launch(browserOptions);
+    const page = await browser.newPage(pageOptions);
+    return { browser, page };
+  } catch (error) {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    throw error;
+  }
+}
+
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -79,20 +93,27 @@ function createRequestObserver(page, { readPredicate = null, mutationPredicate =
   const mutationRequests = [];
   const listener = (request) => {
     const url = new URL(request.url());
+    const isMutation = mutationPredicate?.(url.pathname, url.search, request) === true;
     const evidence = {
       method: request.method(),
       path: `${url.pathname}${url.search}`,
       pathname: url.pathname,
       search: url.search,
-      headers: request.headers(),
-      postData: request.postData(),
       at: Date.now(),
     };
+    if (isMutation) {
+      const headers = request.headers();
+      evidence.headers = {
+        "idempotency-key": headers["idempotency-key"] || "",
+        "x-confirm-paper-order": headers["x-confirm-paper-order"] || "",
+      };
+      evidence.postData = request.postData();
+    }
     requests.push(evidence);
     if (readPredicate?.(request, url)) {
       readRequests.push(evidence);
     }
-    if (mutationPredicate?.(url.pathname, url.search, request)) {
+    if (isMutation) {
       mutationRequests.push(evidence);
     }
   };
@@ -112,6 +133,7 @@ module.exports = {
   expectText,
   expectTextInsensitive,
   isBrokerMutationPath,
+  launchBrowserPage,
   resolveBrowserExecutable,
   sleep,
   waitFor,

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import httpx
 from browser_runtime import browser_environment, resolve_node, resolve_playwright_core
-from regression_common import build_report, emit_report
+from regression_common import build_report, emit_report, run_bounded_process
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -64,6 +63,7 @@ def parse_args() -> argparse.Namespace:
         help="Target upper bound for a warm cached selected-symbol chart.",
     )
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
+    parser.add_argument("--browser-timeout-seconds", type=float, default=300.0, help="Finite timeout for the browser flow.")
     return parser.parse_args()
 
 
@@ -88,11 +88,12 @@ def run_browser_flow(
     iterations: int,
     settle_timeout_seconds: float,
     pause_milliseconds: int,
+    browser_timeout_seconds: float,
 ) -> dict[str, Any]:
     screenshot_path = ROOT / "output" / "playwright" / "real-local-dashboard-refresh.png"
     playwright_core_path = resolve_playwright_core()
     node_command = resolve_node()
-    completed = subprocess.run(
+    completed = run_bounded_process(
         [
             node_command,
             str(ROOT / "scripts" / "real_local_dashboard_refresh_flow.js"),
@@ -104,16 +105,12 @@ def run_browser_flow(
             str(pause_milliseconds),
         ],
         cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
         env=browser_environment(),
+        timeout_seconds=browser_timeout_seconds,
     )
-    if completed.returncode != 0:
+    if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(detail)
+        raise RegressionError(f"Real dashboard browser flow {completed.status}: {detail}")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -246,6 +243,7 @@ def main() -> None:
                 iterations=args.iterations,
                 settle_timeout_seconds=args.settle_timeout_seconds,
                 pause_milliseconds=args.pause_milliseconds,
+                browser_timeout_seconds=args.browser_timeout_seconds,
             )
             summary = summarize_runs(
                 browser["runs"],

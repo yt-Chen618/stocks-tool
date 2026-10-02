@@ -6,7 +6,13 @@ import time
 from pathlib import Path
 from typing import Any
 
-from regression_common import ObservedRun, build_observed_child_report, build_report, emit_report
+from regression_common import (
+    ObservedRun,
+    build_observed_child_report,
+    build_report,
+    default_child_timeout_seconds,
+    emit_report,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,7 +160,7 @@ def run_child(spec: dict[str, Any], observed_run: ObservedRun) -> dict[str, Any]
     started = time.monotonic()
     child = observed_run.run_child(
         {**spec, "cwd": str(ROOT)},
-        timeout_seconds=spec.get("timeout_seconds"),
+        timeout_seconds=spec.get("timeout_seconds", default_child_timeout_seconds(spec["name"])),
     )
     return build_observed_child_report(spec, child, started_monotonic=started)
 
