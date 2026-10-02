@@ -88,6 +88,7 @@ The native static modules divide browser responsibilities as follows:
 - `watchlist-view.js`: selected/default list context plus create, update, note edit, and confirmed item removal.
 - `account-loader.js`: selected-account generations, scoped reads, pagination and detail state. Views render that state and cannot accept responses from an obsolete account generation.
 - `bull-put-view.js`: current/manual-action spreads, on-demand history and ID details, recovery disclosure and completed-action feedback.
+- `strategy-view.js`: strategy runtime, Zero-DTE, Covered Call, experiment and market-event rendering; it does not own account requests.
 - `orders-view.js`, `advisor-view.js`, and `operations-recovery-view.js`: their existing account-scoped surfaces behind the account loader and shared safety decision.
 - `trading-safety.js`: the common broker-mutation decision used by button state, confirmation entry and the final request entry. Confirmation rechecks account, mode, generation, current business eligibility and recovery state.
 - `app.js`: startup and existing account, strategy, order, confirmation, and safety coordination.

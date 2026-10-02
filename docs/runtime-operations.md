@@ -21,6 +21,8 @@ Open:
 
 The canonical local paper account id is `LBPT10087357`.
 
+Dashboard mutation keys remain in session storage and are scoped to account and action. Known unknown outcomes also retain their intent identity across reloads. The loader clears those locks only after an exact ID/account/mode detail read confirms `persisted`, `rejected`, or `resolved_no_order`; missing rows, truncated lists and failed reads do not authorize clearing. A legacy unscoped key is migrated only when its stored account/signature proves ownership. Ambiguous legacy keys remain preserved and block a new key for that action until reviewed. A normal pending key alone is not a synthetic unknown intent.
+
 ## P0 Migration and Release Procedure
 
 Keep `ALLOW_LIVE_TRADING=false` throughout the release. Before migration, stop the API/scheduler, activate the Bull Put entry kill switch, back up PostgreSQL, and run the duplicate external-order preflight:
