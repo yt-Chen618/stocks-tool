@@ -115,6 +115,9 @@ def _consistency_service(
     experiments.iter_runs.return_value = runs if runs is not None else []
     experiments.iter_signals.return_value = signals if signals is not None else []
     experiments.iter_proposals.return_value = []
+    experiments.list_runs_for_order_ids.return_value = runs if runs is not None else []
+    experiments.list_signals_for_run_or_order_ids.return_value = signals if signals is not None else []
+    experiments.list_latest_runs_by_proposal.return_value = []
     bull_put = Mock()
     bull_put.list_spreads.return_value = []
     orders = Mock()

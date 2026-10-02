@@ -112,7 +112,6 @@ class OperatorConsistencyService:
                 self._bull_put_lifecycle_drift_checks(
                     external_account_id=external_account_id,
                     mode=mode,
-                    orders=order_factory(),
                     checked_at=generated_at,
                     limit=effective_limit,
                 )
@@ -292,65 +291,64 @@ class OperatorConsistencyService:
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
-        manual_scan_orders = [
-            order for order in orders if self._zero_dte_manual_scan_order_brief(order) is not None
-        ]
-        if not manual_scan_orders:
-            return [
-                self._check(
-                    checked_at=checked_at,
-                    external_account_id=external_account_id,
-                    mode=mode,
-                    strategy=ZERO_DTE_STRATEGY_ID,
-                    status="pass",
-                    reason_code="zero_dte_manual_scan_ledger_clean",
-                    summary="No zero-DTE manual-scan paper order requires local ledger repair.",
-                    recommended_action="No operator action required.",
-                )
-            ]
-        order_ids = {order.id for order in manual_scan_orders}
-        runs = [
-            run
-            for run in self.strategy_experiments.iter_runs(
+        batch: list[Order] = []
+        found_any = False
+        for order in orders:
+            if self._zero_dte_manual_scan_order_brief(order) is None:
+                continue
+            found_any = True
+            batch.append(order)
+            if len(batch) < 200:
+                continue
+            yield from self._zero_dte_manual_scan_check_batch(
                 external_account_id=external_account_id,
-                strategy_id=ZERO_DTE_STRATEGY_ID,
                 mode=mode,
+                orders=batch,
+                checked_at=checked_at,
             )
-            if run.order_id in order_ids
-            or bool(
-                order_ids
-                & {
-                    str(value)
-                    for key, value in (run.metrics_payload or {}).items()
-                    if isinstance(run.metrics_payload, dict)
-                    and key.endswith("order_id")
-                    and value
-                }
+            batch = []
+        if batch:
+            yield from self._zero_dte_manual_scan_check_batch(
+                external_account_id=external_account_id,
+                mode=mode,
+                orders=batch,
+                checked_at=checked_at,
             )
-        ]
+        if not found_any:
+            yield self._check(
+                checked_at=checked_at,
+                external_account_id=external_account_id,
+                mode=mode,
+                strategy=ZERO_DTE_STRATEGY_ID,
+                status="pass",
+                reason_code="zero_dte_manual_scan_ledger_clean",
+                summary="No zero-DTE manual-scan paper order requires local ledger repair.",
+                recommended_action="No operator action required.",
+            )
+
+    def _zero_dte_manual_scan_check_batch(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        orders: list[Order],
+        checked_at: datetime,
+    ) -> list[OperatorConsistencyCheck]:
+        order_ids = {order.id for order in orders}
+        runs = self.strategy_experiments.list_runs_for_order_ids(
+            external_account_id=external_account_id,
+            strategy_id=ZERO_DTE_STRATEGY_ID,
+            mode=mode,
+            order_ids=order_ids,
+        )
         run_ids = {run.id for run in runs}
-        signals = [
-            signal
-            for signal in self.strategy_experiments.iter_signals(
-                external_account_id=external_account_id,
-                strategy_id=ZERO_DTE_STRATEGY_ID,
-                mode=mode,
-            )
-            if signal.run_id in run_ids
-            or bool(
-                order_ids
-                & {
-                    str(payload.get("id"))
-                    for key in ("reconciled_order", "order")
-                    for payload in [
-                        signal.signal_payload.get(key)
-                        if isinstance(signal.signal_payload, dict)
-                        else None
-                    ]
-                    if isinstance(payload, Mapping) and payload.get("id")
-                }
-            )
-        ]
+        signals = self.strategy_experiments.list_signals_for_run_or_order_ids(
+            external_account_id=external_account_id,
+            strategy_id=ZERO_DTE_STRATEGY_ID,
+            mode=mode,
+            run_ids=run_ids,
+            order_ids=order_ids,
+        )
         return [
             self._zero_dte_check_for_order(
                 external_account_id=external_account_id,
@@ -364,7 +362,7 @@ class OperatorConsistencyService:
                 ),
                 checked_at=checked_at,
             )
-            for order in manual_scan_orders
+            for order in orders
         ]
 
     def _covered_call_order_linkage_checks(
@@ -375,16 +373,9 @@ class OperatorConsistencyService:
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
-        runs_by_proposal: dict[str, list[StrategyRun]] = {}
-        for run in self.strategy_experiments.iter_runs(
-            external_account_id=external_account_id,
-            strategy_id=COVERED_CALL_STRATEGY_ID,
-            mode=mode,
-        ):
-            if run.proposal_id is not None:
-                runs_by_proposal.setdefault(run.proposal_id, []).append(run)
-        missing: list[StrategyProposal] = []
+        batch: list[StrategyProposal] = []
         executed_ids: list[str] = []
+        saw_missing = False
         for proposal in self.strategy_experiments.iter_proposals(
             external_account_id=external_account_id,
             strategy_id=COVERED_CALL_STRATEGY_ID,
@@ -398,25 +389,76 @@ class OperatorConsistencyService:
                 continue
             if len(executed_ids) < 5:
                 executed_ids.append(proposal.id)
+            batch.append(proposal)
+            if len(batch) < 200:
+                continue
+            batch_checks = self._covered_call_order_linkage_batch(
+                external_account_id=external_account_id,
+                mode=mode,
+                proposals=batch,
+                checked_at=checked_at,
+            )
+            saw_missing = saw_missing or bool(batch_checks)
+            yield from batch_checks
+            batch = []
+        if batch:
+            batch_checks = self._covered_call_order_linkage_batch(
+                external_account_id=external_account_id,
+                mode=mode,
+                proposals=batch,
+                checked_at=checked_at,
+            )
+            saw_missing = saw_missing or bool(batch_checks)
+            yield from batch_checks
+        if not executed_ids or not saw_missing:
+            yield self._check(
+                checked_at=checked_at,
+                external_account_id=external_account_id,
+                mode=mode,
+                strategy=COVERED_CALL_STRATEGY_ID,
+                status="pass",
+                reason_code="covered_call_order_linkage_clean",
+                summary="Covered-call executed proposals have observable order linkage.",
+                recommended_action="No operator action required.",
+                related_proposal_ids=executed_ids,
+            )
+
+    def _covered_call_order_linkage_batch(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        proposals: list[StrategyProposal],
+        checked_at: datetime,
+    ) -> list[OperatorConsistencyCheck]:
+        proposal_ids = {proposal.id for proposal in proposals}
+        runs = self.strategy_experiments.list_latest_runs_by_proposal(
+            external_account_id=external_account_id,
+            strategy_id=COVERED_CALL_STRATEGY_ID,
+            mode=mode,
+            proposal_ids=proposal_ids,
+            run_types={
+                "proposal_execution",
+                "open_lifecycle_refresh",
+                "proposal_close",
+                "roll_execution",
+                "roll_continuation",
+            },
+        )
+        runs_by_proposal: dict[str, list[StrategyRun]] = {}
+        for run in runs:
+            if run.proposal_id is not None:
+                runs_by_proposal.setdefault(run.proposal_id, []).append(run)
+        missing = [
+            proposal
+            for proposal in proposals
             if not self._covered_call_has_order_link(
                 proposal=proposal,
                 runs=runs_by_proposal.get(proposal.id, []),
-            ):
-                missing.append(proposal)
+            )
+        ]
         if not missing:
-            return [
-                self._check(
-                    checked_at=checked_at,
-                    external_account_id=external_account_id,
-                    mode=mode,
-                    strategy=COVERED_CALL_STRATEGY_ID,
-                    status="pass",
-                    reason_code="covered_call_order_linkage_clean",
-                    summary="Covered-call executed proposals have observable order linkage.",
-                    recommended_action="No operator action required.",
-                    related_proposal_ids=executed_ids,
-                )
-            ]
+            return []
         return [
             self._check(
                 checked_at=checked_at,
@@ -438,7 +480,6 @@ class OperatorConsistencyService:
         *,
         external_account_id: str,
         mode: ExecutionMode,
-        orders: Iterable[Order],
         checked_at: datetime,
         limit: int,
     ) -> list[OperatorConsistencyCheck]:
@@ -447,13 +488,23 @@ class OperatorConsistencyService:
             for spread in self.bull_put_strategy.list_spreads(
                 external_account_id=external_account_id,
                 mode=mode,
+                statuses=ACTIVE_SPREAD_STATUSES,
             )
         ]
-        orders_by_id = self._orders_by_id(orders)
+        short_exit_ids = {
+            str(spread.short_exit_order_id)
+            for spread in spreads
+            if spread.short_exit_order_id
+        }
+        orders_by_id = self._orders_by_id(
+            self.order_service.list_orders(
+                external_account_id=external_account_id,
+                mode=mode,
+                order_ids=short_exit_ids,
+            )
+        )
         drifted: list[tuple[BullPutSpread, dict[str, Any]]] = []
         for spread in spreads:
-            if spread.status not in ACTIVE_SPREAD_STATUSES and spread.status != SpreadStatus.OPEN:
-                continue
             linked_order = orders_by_id.get(str(spread.short_exit_order_id))
             warning = bull_put_close_order_warning(
                 spread_status=spread.status,

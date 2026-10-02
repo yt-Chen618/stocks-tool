@@ -616,6 +616,17 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_runs_for_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        order_ids: Collection[str],
+    ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_covered_call_activity_aggregate(
         self,
         *,
@@ -662,6 +673,18 @@ class StrategyExperimentRepository(ABC):
         run_id: str | None = None,
         proposal_id: str | None = None,
     ) -> Iterator[StrategySignal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_signals_for_run_or_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        run_ids: Collection[str],
+        order_ids: Collection[str],
+    ) -> list[StrategySignal]:
         raise NotImplementedError
 
     @abstractmethod

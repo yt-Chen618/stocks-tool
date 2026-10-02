@@ -166,6 +166,7 @@ def test_operator_consistency_limit_only_truncates_details_not_global_counts() -
     experiments.iter_proposals.return_value = proposals
     experiments.iter_runs.return_value = []
     experiments.iter_signals.return_value = []
+    experiments.list_latest_runs_by_proposal.return_value = []
     bull_put = Mock()
     bull_put.list_spreads.return_value = []
     orders = Mock()

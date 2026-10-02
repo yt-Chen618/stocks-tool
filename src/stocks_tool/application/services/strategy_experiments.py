@@ -490,6 +490,22 @@ class StrategyExperimentService:
             order_id=order_id,
         )
 
+    def list_runs_for_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        order_ids: set[str],
+    ) -> list[StrategyRun]:
+        self._ensure_account(external_account_id)
+        return self.experiments.list_runs_for_order_ids(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            mode=mode,
+            order_ids=order_ids,
+        )
+
     def get_latest_run_for_proposal(
         self,
         *,
@@ -546,6 +562,24 @@ class StrategyExperimentService:
             mode=mode,
             run_id=run_id,
             proposal_id=proposal_id,
+        )
+
+    def list_signals_for_run_or_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        run_ids: set[str],
+        order_ids: set[str],
+    ) -> list[StrategySignal]:
+        self._ensure_account(external_account_id)
+        return self.experiments.list_signals_for_run_or_order_ids(
+            external_account_id=external_account_id,
+            strategy_id=strategy_id,
+            mode=mode,
+            run_ids=run_ids,
+            order_ids=order_ids,
         )
 
     def create_review(self, request: CreateStrategyReviewRequest) -> StrategyReview:

@@ -5,7 +5,7 @@ from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import (
@@ -454,6 +454,61 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             "close_runs": int(close_count or 0),
             "latest_activity_at": max(latest_values) if latest_values else None,
         }
+
+    def list_runs_for_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        order_ids: Collection[str],
+    ) -> list[StrategyRun]:
+        ids = [str(item) for item in order_ids if str(item)]
+        if not ids:
+            return []
+        query = select(StrategyRunRecord).where(
+            StrategyRunRecord.external_account_id == external_account_id,
+            StrategyRunRecord.strategy_id == strategy_id,
+            StrategyRunRecord.execution_mode == mode.value,
+            or_(
+                StrategyRunRecord.order_id.in_(ids),
+                StrategyRunRecord.metrics_payload["order_id"].as_string().in_(ids),
+                StrategyRunRecord.metrics_payload["reconciled_order_id"].as_string().in_(ids),
+                StrategyRunRecord.metrics_payload["manual_scan_order_id"].as_string().in_(ids),
+            ),
+        ).order_by(StrategyRunRecord.created_at.desc(), StrategyRunRecord.id.desc())
+        return [self._to_run(record) for record in self.session.execute(query).scalars().all()]
+
+    def list_signals_for_run_or_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        run_ids: Collection[str],
+        order_ids: Collection[str],
+    ) -> list[StrategySignal]:
+        normalized_runs = [str(item) for item in run_ids if str(item)]
+        normalized_orders = [str(item) for item in order_ids if str(item)]
+        if not normalized_runs and not normalized_orders:
+            return []
+        predicates = []
+        if normalized_runs:
+            predicates.append(StrategySignalRecord.run_id.in_(normalized_runs))
+        if normalized_orders:
+            predicates.extend(
+                [
+                    StrategySignalRecord.signal_payload["reconciled_order"]["id"].as_string().in_(normalized_orders),
+                    StrategySignalRecord.signal_payload["order"]["id"].as_string().in_(normalized_orders),
+                ]
+            )
+        query = select(StrategySignalRecord).where(
+            StrategySignalRecord.external_account_id == external_account_id,
+            StrategySignalRecord.strategy_id == strategy_id,
+            StrategySignalRecord.execution_mode == mode.value,
+            or_(*predicates),
+        ).order_by(StrategySignalRecord.emitted_at.desc(), StrategySignalRecord.created_at.desc())
+        return [self._to_signal(record) for record in self.session.execute(query).scalars().all()]
 
     def create_signal(self, request: CreateStrategySignalRequest) -> StrategySignal:
         signal = StrategySignal(
