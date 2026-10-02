@@ -18,10 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from stocks_tool.core.config import get_settings  # noqa: E402
+from stocks_tool.domain.enums import ExecutionMode, SpreadStatus  # noqa: E402
 from stocks_tool.domain.pagination import encode_cursor  # noqa: E402
 from stocks_tool.db.models import (  # noqa: E402
-    BrokerAccountRecord, ExecutionRecord, JournalEntryRecord, OrderRecord,
+    BrokerAccountRecord, BullPutSpreadRecord, ExecutionRecord, JournalEntryRecord, OrderRecord,
 )
+from stocks_tool.repositories.sqlalchemy_bull_put_spread_repository import SQLAlchemyBullPutSpreadRepository  # noqa: E402
 from stocks_tool.repositories.sqlalchemy_execution_repository import SQLAlchemyExecutionRepository  # noqa: E402
 from stocks_tool.repositories.sqlalchemy_journal_repository import SQLAlchemyJournalRepository  # noqa: E402
 from stocks_tool.repositories.sqlalchemy_order_repository import SQLAlchemyOrderRepository  # noqa: E402
@@ -80,7 +82,26 @@ def seed_history(engine, *, first: int, last: int) -> None:
                 TIMESTAMPTZ '2026-01-01' + (n / 10) * INTERVAL '1 second'
             FROM generate_series(CAST(:first AS bigint), CAST(:last AS bigint)) AS n
         """), parameters)
-        for table in ("orders", "executions", "journal_entries", "broker_accounts"):
+        connection.execute(text("""
+            INSERT INTO bull_put_spreads (
+                id, broker_account_id, broker, external_account_id, strategy_id,
+                execution_mode, underlying_symbol, expiration_date, contracts,
+                width, long_symbol, long_strike, short_symbol, short_strike,
+                status, version, manual_action_required, raw_payload, created_at, updated_at
+            )
+            SELECT 'spread-' || lpad(n::text, 10, '0'),
+                CASE WHEN n % 10 = 0 THEN 'history-other' ELSE 'history-primary' END,
+                'longbridge', CASE WHEN n % 10 = 0 THEN :other ELSE :account END,
+                'paper_bull_put_v1', CASE WHEN n % 20 = 1 OR n = 5 THEN 'live' ELSE 'paper' END,
+                'QQQ.US', DATE '2026-11-20', 1, 5,
+                'QQQ261120P440000.US', 440, 'QQQ261120P445000.US', 445,
+                CASE WHEN n IN (2, 5, 10) THEN 'open' ELSE 'closed' END,
+                0, n = 3, '{}'::jsonb,
+                TIMESTAMPTZ '2026-01-01' + (n / 10) * INTERVAL '1 second',
+                TIMESTAMPTZ '2026-01-01' + (n / 10) * INTERVAL '1 second'
+            FROM generate_series(CAST(:first AS bigint), CAST(:last AS bigint)) AS n
+        """), parameters)
+        for table in ("orders", "executions", "journal_entries", "bull_put_spreads", "broker_accounts"):
             connection.exec_driver_sql(f"ANALYZE {table}")
 
 
@@ -109,17 +130,22 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
                 repository_type(session, attach_intent_ledger=False)
                 if resource == "orders" else repository_type(session)
             )
+            call_scope = {"external_account_id": ACCOUNT_ID, "limit": PAGE_SIZE}
+            if resource == "bull_put_spreads":
+                call_scope["mode"] = ExecutionMode.PAPER
             started = time.perf_counter()
-            first = getattr(repository, method)(external_account_id=ACCOUNT_ID, limit=PAGE_SIZE)
+            first = getattr(repository, method)(**call_scope)
             elapsed_ms = (time.perf_counter() - started) * 1000
             first_loads = dict(loaded)
             first_statements = list(statements)
             assert first.has_more and first.next_cursor
             assert len(first.items) == PAGE_SIZE
             assert all(item.external_account_id == ACCOUNT_ID for item in first.items)
+            if resource == "bull_put_spreads":
+                assert all(item.mode == ExecutionMode.PAPER for item in first.items)
             assert loaded[model.__name__] <= PAGE_SIZE + 1
             second = getattr(repository, method)(
-                external_account_id=ACCOUNT_ID, limit=PAGE_SIZE, cursor=first.next_cursor,
+                **call_scope, cursor=first.next_cursor,
             )
             first_ids = [item.id for item in first.items]
             combined = first_ids + [item.id for item in second.items]
@@ -129,6 +155,8 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
                 oracle = oracle.where(model.broker_account_id == "history-primary")
             else:
                 oracle = oracle.where(model.external_account_id == ACCOUNT_ID)
+            if resource == "bull_put_spreads":
+                oracle = oracle.where(model.execution_mode == ExecutionMode.PAPER.value)
             assert combined == list(session.scalars(oracle))
             # A cursor deep in the history must seek to its index position,
             # rather than scan and discard every preceding row. The OFFSET
@@ -146,6 +174,9 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
                 scope = {"external_account_id": ACCOUNT_ID, "order_id": None}
                 if resource == "journals":
                     scope.update(trade_plan_id=None, entry_type=None)
+                elif resource == "bull_put_spreads":
+                    boundary_query = boundary_query.where(model.execution_mode == ExecutionMode.PAPER.value)
+                    scope = {"external_account_id": ACCOUNT_ID, "mode": ExecutionMode.PAPER.value}
             boundary_time, boundary_id = session.execute(boundary_query.offset(deep_offset).limit(1)).one()
             expected_deep_ids = list(session.scalars(oracle.offset(deep_offset + 1).limit(PAGE_SIZE)))
             deep_cursor = encode_cursor(
@@ -155,7 +186,7 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
             statements.clear()
             loaded.clear()
             deep_started = time.perf_counter()
-            deep = getattr(repository, method)(external_account_id=ACCOUNT_ID, limit=PAGE_SIZE, cursor=deep_cursor)
+            deep = getattr(repository, method)(**call_scope, cursor=deep_cursor)
             deep_elapsed_ms = (time.perf_counter() - deep_started) * 1000
             deep_statements = list(statements)
             deep_loads = dict(loaded)
@@ -167,6 +198,13 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
                 assert repository.get_order("order-0000000001").external_account_id == ACCOUNT_ID
             elif resource == "executions":
                 assert repository.get_execution("execution-0000000001").external_account_id == ACCOUNT_ID
+            elif resource == "bull_put_spreads":
+                assert repository.get_spread("spread-0000000002").external_account_id == ACCOUNT_ID
+                working = repository.list_working_spreads(
+                    external_account_id=ACCOUNT_ID, mode=ExecutionMode.PAPER,
+                    active_statuses={SpreadStatus.OPEN},
+                )
+                assert {item.id for item in working} == {"spread-0000000002", "spread-0000000003"}
             else:
                 old_entries = repository.list_entries(external_account_id=ACCOUNT_ID, order_id="order-0000000001")
                 assert [entry.id for entry in old_entries] == ["journal-0000000001"]
@@ -258,6 +296,7 @@ def main() -> int:
                 ("orders", OrderRecord, SQLAlchemyOrderRepository, "list_orders_page"),
                 ("executions", ExecutionRecord, SQLAlchemyExecutionRepository, "list_executions_page"),
                 ("journals", JournalEntryRecord, SQLAlchemyJournalRepository, "list_entries_page"),
+                ("bull_put_spreads", BullPutSpreadRecord, SQLAlchemyBullPutSpreadRepository, "list_spreads_page"),
             ):
                 checks[resource] = verify_page(
                     engine, resource=resource, model=model, repository_type=repository, method=method,
