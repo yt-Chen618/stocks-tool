@@ -330,3 +330,33 @@ def test_live_pending_key_without_intent_id_does_not_create_stranded_lock() -> N
         ''',
     )
     assert result == {"before": [], "after": [], "locks": []}
+
+
+def test_orders_view_discards_aba_reload_feedback_after_own_refresh() -> None:
+    result = run_node(
+        r'''
+        (async () => {
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = {};
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/orders-view.js", "utf8"));
+        const state = {selectedAccountId: "A", accountLoadGeneration: 1, selectedOrderId: "o1", orders: [{id: "o1", external_account_id: "A", symbol: "QQQ.US", status: "submitted", order_type: "limit", time_in_force: "day", quantity: 1}]};
+        const statuses = [];
+        const view = window.StocksToolOrdersView.createOrdersView({
+          state, els: {}, fetchJson: async () => ({id: "o1", external_account_id: "A", symbol: "QQQ.US", status: "filled", order_type: "limit", time_in_force: "day", quantity: 1}),
+          decodeCursorPage: () => ({items: [], cursor: null, hasMore: false}),
+          reloadAccountData: () => { state.accountLoadGeneration = 2; return new Promise((resolve) => setImmediate(() => { state.selectedAccountId = "B"; state.accountLoadGeneration = 3; state.selectedAccountId = "A"; state.accountLoadGeneration = 4; resolve({discarded: false}); })); },
+          loadActivityPage: async () => {}, ensureSelectedOrderDetail: async () => {}, loadSelectedOrderDetails: async () => {},
+          runConfirmedBrokerMutation: async () => ({executed: false}), setStatus: (message) => statuses.push(message), setActionStatus() {}, applyTradingSafetyState() {}, setBusinessDisabled() {}, matchingQuoteTime: () => "--", escapeHtml: (value) => String(value), formatMultilineText: (value) => String(value),
+          formatters: {formatCurrency: (value) => String(value), formatNumber: (value) => String(value), formatDateTime: (value) => String(value || "--"), formatPositionQuantity: (value) => String(value), journalEntryTone: () => "neutral", statusClass: () => "neutral"},
+          parsePositiveInteger: () => 1, parsePositiveNumber: () => 1, normalizeOptionalText: (value) => value, parseTags: () => [], workspace: {},
+        });
+        const result = await view.refreshOrder("o1");
+        process.stdout.write(JSON.stringify({discarded: result?.discarded === true, statuses, generation: state.accountLoadGeneration, account: state.selectedAccountId}));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        ''',
+    )
+    assert result["discarded"] is True
+    assert result["generation"] == 4
+    assert result["account"] == "A"
+    assert not any("refreshed" in message.lower() for message in result["statuses"])

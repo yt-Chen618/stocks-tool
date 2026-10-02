@@ -292,12 +292,29 @@
       applyTradingSafetyState?.();
     }
 
+    async function reloadAccountForMutation(accountId) {
+      const reloadPromise = reloadAccountData();
+      const reloadGeneration = state.accountLoadGeneration;
+      try {
+        const result = await reloadPromise;
+        return {
+          discarded: Boolean(result?.discarded) || state.selectedAccountId !== accountId || state.accountLoadGeneration !== reloadGeneration,
+        };
+      } catch (error) {
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== reloadGeneration) {
+          return { discarded: true, error };
+        }
+        throw error;
+      }
+    }
+
     async function submitOrder(button = els.submitOrder) {
       if (!state.selectedAccountId) {
         setStatus("Select a broker account before submitting an order.", "warning");
         return;
       }
       const accountId = state.selectedAccountId;
+      const accountLoadGeneration = state.accountLoadGeneration;
       try {
         const payload = buildCreateOrderPayload();
         const price = payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : payload.stop_price ? `Stop ${formatCurrency(payload.stop_price, "USD")}` : "Market / unbounded";
@@ -311,15 +328,16 @@
         });
         if (!mutation.executed) return;
         const created = mutation.result;
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true };
         state.selectedOrderId = created.id;
         els.orderRemark.value = "";
-        await reloadAccountData();
-        if (state.selectedAccountId !== accountId) return { discarded: true };
+        const reload = await reloadAccountForMutation(accountId);
+        if (reload.discarded) return reload;
         setSelectedOrder(created.id);
         setActionStatus(els.orderActionStatus, `Order submitted for ${created.symbol}.`, "success");
         setStatus(`Order submitted for ${created.symbol}.`, "success");
       } catch (error) {
-        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.orderActionStatus, error.message || "Order submission failed.", "error");
         setStatus(error.message || "Order submission failed.", "error");
@@ -335,12 +353,12 @@
         const refreshed = await fetchJson(`/orders/${encodeURIComponent(orderId)}/refresh`, { method: "POST" });
         if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true };
         state.selectedOrderId = refreshed.id;
-        await reloadAccountData();
-        if (state.selectedAccountId !== accountId) return { discarded: true };
+        const reload = await reloadAccountForMutation(accountId);
+        if (reload.discarded) return reload;
         setSelectedOrder(refreshed.id);
         setStatus(`Order ${refreshed.symbol} refreshed.`, "success");
       } catch (error) {
-        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setStatus(error.message || "Order refresh failed.", "error");
       }
@@ -359,8 +377,8 @@
         if (!mutation.executed) return;
         const canceled = mutation.result;
         state.selectedOrderId = canceled.id;
-        await reloadAccountData();
-        if (state.selectedAccountId !== accountId) return { discarded: true };
+        const reload = await reloadAccountForMutation(accountId);
+        if (reload.discarded) return reload;
         setSelectedOrder(canceled.id);
         setActionStatus(els.orderActionStatus, `Order ${canceled.symbol} canceled.`, "success");
         setStatus(`Order ${canceled.symbol} canceled.`, "success");
@@ -389,8 +407,8 @@
         const updated = mutation.result;
         state.selectedOrderId = updated.id;
         els.replaceRemark.value = "";
-        await reloadAccountData();
-        if (state.selectedAccountId !== accountId) return { discarded: true };
+        const reload = await reloadAccountForMutation(accountId);
+        if (reload.discarded) return reload;
         setSelectedOrder(updated.id);
         setActionStatus(els.orderActionStatus, `Order ${updated.symbol} updated.`, "success");
         setStatus(`Order ${updated.symbol} updated.`, "success");
