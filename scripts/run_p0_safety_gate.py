@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from regression_common import ObservedRun, build_report, emit_report, read_tail
+from regression_common import ObservedRun, build_observed_child_report, build_report, emit_report
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +58,7 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         {
             "name": "py-compile-scripts",
             "command": [sys.executable, "-m", "py_compile", *py_compile_paths],
+            "cacheable": True,
         },
         *[
             {
@@ -67,6 +68,7 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                     "--check",
                     str(ROOT / "src" / "stocks_tool" / "ui" / "static" / filename),
                 ],
+                "cacheable": True,
             }
             for filename in dashboard_js_paths
         ],
@@ -144,7 +146,7 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 ],
             }
         )
-    specs.append({"name": "git-diff-check", "command": ["git", "diff", "--check"]})
+    specs.append({"name": "git-diff-check", "command": ["git", "diff", "--check"], "cacheable": True})
     return specs
 
 
@@ -154,22 +156,7 @@ def run_child(spec: dict[str, Any], observed_run: ObservedRun) -> dict[str, Any]
         {**spec, "cwd": str(ROOT)},
         timeout_seconds=spec.get("timeout_seconds"),
     )
-    return {
-        "name": spec["name"],
-        "command": spec["command"],
-        "returncode": child["returncode"],
-        "duration_seconds": round(time.monotonic() - started, 3),
-        "status": child["status"],
-        "stdout_tail": read_tail(child["stdout_log"]),
-        "stderr_tail": read_tail(child["stderr_log"]),
-        "stdout_log": child["stdout_log"],
-        "stderr_log": child["stderr_log"],
-        "pid": child.get("pid"),
-        "start_identity": child.get("start_identity"),
-        "attempt": child.get("attempt"),
-        "reused": child.get("reused", False),
-        "timed_out": child.get("timed_out", False),
-    }
+    return build_observed_child_report(spec, child, started_monotonic=started)
 
 
 def main() -> None:

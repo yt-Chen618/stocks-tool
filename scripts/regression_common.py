@@ -6,6 +6,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,6 +14,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,8 @@ def _windows_process_start_identity(pid: int) -> str | None:
         ctypes.POINTER(FileTime),
     ]
     kernel32.GetProcessTimes.restype = ctypes.c_int
+    kernel32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.restype = ctypes.c_int
 
@@ -68,6 +72,9 @@ def _windows_process_start_identity(pid: int) -> str | None:
     kernel_time = FileTime()
     user_time = FileTime()
     try:
+        exit_code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) or exit_code.value != 259:
+            return None
         if not kernel32.GetProcessTimes(
             handle,
             ctypes.byref(creation),
@@ -75,6 +82,8 @@ def _windows_process_start_identity(pid: int) -> str | None:
             ctypes.byref(kernel_time),
             ctypes.byref(user_time),
         ):
+            return None
+        if exit_time.dwHighDateTime or exit_time.dwLowDateTime:
             return None
         value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
         return f"windows-filetime:{value}"
@@ -95,6 +104,8 @@ def process_start_identity(pid: int) -> str | None:
             if closing < 0:
                 return None
             fields = raw[closing + 2 :].split()
+            if not fields or fields[0] in {"Z", "X", "x"}:
+                return None
             # The process start time is field 22; after the comm field this is
             # index 19. Include boot_id so a reboot cannot reuse the token.
             start_ticks = fields[19]
@@ -129,28 +140,62 @@ def _json_hash(value: Any) -> str:
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
+_IGNORED_SOURCE_PARTS = {
+    ".git",
+    ".codex",
+    ".venv",
+    ".venv-m0",
+    "artifacts",
+    "output",
+    "node_modules",
+    ".playwright-browsers",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
+
+
 def _safe_relative_files(root: Path) -> list[Path]:
-    ignored_parts = {
-        ".git",
-        ".codex",
-        ".venv",
-        ".venv-m0",
-        "artifacts",
-        "output",
-        "node_modules",
-        ".playwright-browsers",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-    }
+    """List source files without walking ignored evidence, cache, or venv trees."""
+
+    root = root.resolve()
     if not root.exists():
         return []
-    return [
-        path
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and not ignored_parts.intersection(path.relative_to(root).parts) and path.name != ".env"
-    ]
+    git_files = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+        check=False,
+        capture_output=True,
+    )
+    if git_files.returncode == 0:
+        candidates = [Path(item) for item in git_files.stdout.decode("utf-8", errors="replace").split("\0") if item]
+        return [
+            path
+            for relative in candidates
+            if not _IGNORED_SOURCE_PARTS.intersection(relative.parts)
+            and relative.name != ".env"
+            and (path := root / relative).is_file()
+        ]
+
+    files: list[Path] = []
+    for current_root, directories, names in os.walk(root, followlinks=False):
+        directories[:] = [directory for directory in directories if directory not in _IGNORED_SOURCE_PARTS]
+        current = Path(current_root)
+        files.extend(
+            path
+            for name in names
+            if name != ".env" and (path := current / name).is_file()
+        )
+    return sorted(files)
 
 
 def source_fingerprint(root: Path) -> dict[str, Any]:
@@ -228,6 +273,34 @@ def _file_fingerprint(path: Path) -> str | None:
         return None
 
 
+def _installed_python_fingerprint() -> str:
+    distributions: list[tuple[str, str]] = []
+    for distribution in importlib_metadata.distributions():
+        name = distribution.metadata.get("Name") or distribution.name or ""
+        distributions.append((str(name).lower(), str(distribution.version)))
+    return _json_hash(sorted(distributions))
+
+
+def _node_version_fingerprint() -> str | None:
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        completed = subprocess.run(
+            [node, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return _json_hash({"executable": node, "version": completed.stdout.strip()})
+
+
 def environment_fingerprint(*, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     safe_environment = {
         key: os.environ.get(key)
@@ -243,7 +316,9 @@ def environment_fingerprint(*, extra: dict[str, Any] | None = None) -> dict[str,
         if os.environ.get(key) is not None
     }
     payload = {
-        "python": sys.version,
+        "python_runtime_fingerprint": _json_hash({"version": sys.version, "executable": sys.executable}),
+        "python_distributions_fingerprint": _installed_python_fingerprint(),
+        "node_version_fingerprint": _node_version_fingerprint(),
         "executable": sys.executable,
         "platform": platform.platform(),
         "environment": safe_environment,
@@ -304,7 +379,7 @@ class ObservedRun:
         self._state_lock = threading.RLock()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread: threading.Thread | None = None
-        self._lock_owned = False
+        self._lock_handle: Any | None = None
         self._last_state_flush = 0.0
         self._progress_counter = 0
         self._progress_counter_at_heartbeat = 0
@@ -384,6 +459,54 @@ class ObservedRun:
             return None
         return value if isinstance(value, dict) else None
 
+    def _write_lock_owner(self) -> None:
+        if self._lock_handle is None:
+            raise ObservabilityError("Run lock is not held.")
+        rendered = json.dumps(self._owner_record(), ensure_ascii=True).encode("utf-8") + b"\n"
+        self._lock_handle.seek(0)
+        self._lock_handle.truncate()
+        self._lock_handle.write(rendered)
+        self._lock_handle.flush()
+        os.fsync(self._lock_handle.fileno())
+
+    def _acquire_os_lock(self, handle: Any) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise RunAlreadyActiveError(f"Evidence run lock is held: {self.lock_path}") from error
+            return
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (ImportError, OSError) as error:
+            raise RunAlreadyActiveError(f"Evidence run lock is held: {self.lock_path}") from error
+
+    def _release_os_lock(self, handle: Any) -> None:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            return
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (ImportError, OSError):
+            pass
+
     @staticmethod
     def _process_record_alive(record: dict[str, Any] | None) -> bool:
         return process_identity_matches(record)
@@ -393,6 +516,39 @@ class ObservedRun:
         return self._process_record_alive(child) if isinstance(child, dict) else False
 
     def _mark_previous_run_interrupted(self, previous_owner: dict[str, Any] | None) -> None:
+        launching_children = [
+            str(child_name)
+            for child_name, child in (self._state.get("children") or {}).items()
+            if isinstance(child, dict)
+            and (
+                child.get("status") == "launching"
+                or (child.get("status") == "running" and not child.get("pid"))
+            )
+        ]
+        active_child = self._state.get("active_child")
+        if (
+            isinstance(active_child, dict)
+            and (
+                active_child.get("status") == "launching"
+                or (active_child.get("status") == "running" and not active_child.get("pid"))
+            )
+        ):
+            active_name = str(active_child.get("name") or "active-child")
+            if active_name not in launching_children:
+                launching_children.append(active_name)
+        if launching_children:
+            self._state["status"] = "needs_review"
+            self._state["next_action"] = "inspect launching child before resuming"
+            with self._state_lock:
+                self._write_state_locked(force=True)
+            self._append_event(
+                "resume_blocked",
+                reason="child_launch_identity_missing",
+                children=launching_children,
+            )
+            raise ObservabilityError(
+                f"Evidence run {self.run_id} has a child in the spawn window without a persisted PID; inspect it before resuming."
+            )
         if self._active_child_alive():
             child = self._state.get("active_child") or {}
             raise RunAlreadyActiveError(
@@ -433,54 +589,87 @@ class ObservedRun:
         if not self.owner.start_identity:
             raise ObservabilityError("Could not capture the current process start identity; refusing an unsafe run lock.")
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        if not self.lock_path.exists() and self._state.get("status") == "running":
-            previous_owner = self._state.get("owner")
-            if self._process_record_alive(previous_owner):
+        handle = self.lock_path.open("a+b")
+        try:
+            self._acquire_os_lock(handle)
+        except RunAlreadyActiveError as error:
+            existing = self._read_lock()
+            handle.close()
+            if self._process_record_alive(existing):
                 raise RunAlreadyActiveError(
-                    f"Evidence run {self.run_id} is already owned by PID {previous_owner.get('pid')}."
+                    f"Evidence run {self.run_id} is already owned by PID {existing.get('pid')}."
+                ) from error
+            raise RunAlreadyActiveError(
+                f"Evidence run lock is held and owner metadata is unavailable: {self.lock_path}"
+            ) from error
+
+        self._lock_handle = handle
+        try:
+            latest_state = self._load_state()
+            if latest_state is not None:
+                self._state = latest_state
+                if self._state.get("run_id") != self.run_id:
+                    raise ObservabilityError("Evidence state run id changed while acquiring its lock.")
+            missing_identity_children = [
+                str(child_name)
+                for child_name, child in (self._state.get("children") or {}).items()
+                if isinstance(child, dict)
+                and (
+                    child.get("status") == "launching"
+                    or (child.get("status") == "running" and (not child.get("pid") or not child.get("start_identity")))
                 )
-            self._mark_previous_run_interrupted(previous_owner)
-        while True:
-            try:
-                descriptor = os.open(
-                    self.lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-                    0o600,
+            ]
+            if missing_identity_children:
+                self._state["status"] = "needs_review"
+                self._state["next_action"] = "inspect launching child before resuming"
+                with self._state_lock:
+                    self._write_state_locked(force=True)
+                self._append_event(
+                    "resume_blocked",
+                    reason="child_identity_missing",
+                    children=missing_identity_children,
                 )
-            except FileExistsError:
-                existing = self._read_lock()
-                if self._process_record_alive(existing):
-                    raise RunAlreadyActiveError(
-                        f"Evidence run {self.run_id} is already owned by PID {existing.get('pid')}."
+                raise ObservabilityError(
+                    f"Evidence run {self.run_id} has child launch state without a persisted process identity; inspect it before resuming."
+                )
+            active_child = self._state.get("active_child")
+            if isinstance(active_child, dict) and active_child.get("status") in {"launching", "running"}:
+                if active_child.get("status") == "launching" or not active_child.get("pid") or not active_child.get("start_identity"):
+                    self._state["status"] = "needs_review"
+                    self._state["next_action"] = "inspect launching child before resuming"
+                    with self._state_lock:
+                        self._write_state_locked(force=True)
+                    self._append_event("resume_blocked", reason="child_identity_missing")
+                    raise ObservabilityError(
+                        f"Evidence run {self.run_id} has a child in the spawn window without a persisted process identity; inspect it before resuming."
                     )
-                if self._active_child_alive():
-                    child = self._state.get("active_child") or {}
+                if self._process_record_alive(active_child):
                     raise RunAlreadyActiveError(
-                        f"Evidence run {self.run_id} has a live child PID {child.get('pid')}; refusing a duplicate."
+                        f"Evidence run {self.run_id} has a live child PID {active_child.get('pid')}; refusing a duplicate."
                     )
+                if self._state.get("status") != "running":
+                    child_name = str(active_child.get("name") or "active-child")
+                    active_child["status"] = "interrupted"
+                    active_child["interrupted_at"] = utc_now_iso()
+                    active_child["next_action"] = "resume interrupted child"
+                    self._state.setdefault("children", {})[child_name] = active_child
+                    self._state["active_child"] = None
+                    self._state["next_action"] = "resume interrupted child"
+                    with self._state_lock:
+                        self._write_state_locked(force=True)
+                    self._append_event("child_interrupted", child=child_name, reason="process_exit")
+            if self._state.get("status") == "running":
                 previous_owner = self._state.get("owner")
                 if self._process_record_alive(previous_owner):
                     raise RunAlreadyActiveError(
                         f"Evidence run {self.run_id} is already owned by PID {previous_owner.get('pid')}."
                     )
-                stale_path = self.lock_path.with_name(
-                    f"{self.lock_path.name}.stale.{os.getpid()}.{uuid.uuid4().hex}"
-                )
-                try:
-                    os.replace(self.lock_path, stale_path)
-                except FileNotFoundError:
-                    continue
-                self._mark_previous_run_interrupted(existing or previous_owner)
-                continue
-            except OSError as error:
-                raise ObservabilityError(f"Could not acquire evidence lock {self.lock_path}: {error}") from error
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump(self._owner_record(), handle, ensure_ascii=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._lock_owned = True
-            return
+                self._mark_previous_run_interrupted(previous_owner)
+            self._write_lock_owner()
+        except Exception:
+            self.release()
+            raise
+        return
 
     def start(self) -> None:
         self.acquire()
@@ -529,9 +718,22 @@ class ObservedRun:
             self.children_dir / f"{safe_name}.attempt-{attempt}.stderr.log",
         )
 
-    def _reusable_child(self, name: str, command: list[str], *, cwd: Path) -> dict[str, Any] | None:
+    def _reusable_child(
+        self,
+        name: str,
+        command: list[str],
+        *,
+        cwd: Path,
+        cacheable: bool,
+    ) -> dict[str, Any] | None:
+        if not cacheable:
+            self._append_event("child_not_reusable", child=name, reason="cacheable_not_declared")
+            return None
         previous = self._state.get("children", {}).get(name)
         if not isinstance(previous, dict) or previous.get("status") != "passed":
+            return None
+        if previous.get("cacheable") is not True:
+            self._append_event("child_invalidated", child=name, reason="previous_run_not_cacheable")
             return None
         if previous.get("command_fingerprint") != self._command_fingerprint(command, cwd=cwd):
             self._append_event("child_invalidated", child=name, reason="command_or_environment_changed")
@@ -556,11 +758,13 @@ class ObservedRun:
         *,
         timeout_seconds: float | None = None,
         echo_output: bool = False,
+        cacheable: bool = False,
     ) -> dict[str, Any]:
         name = str(spec["name"])
         command = [str(value) for value in spec["command"]]
         cwd = Path(spec.get("cwd") or Path.cwd()).resolve()
-        reusable = self._reusable_child(name, command, cwd=cwd)
+        cacheable = bool(spec.get("cacheable", cacheable))
+        reusable = self._reusable_child(name, command, cwd=cwd, cacheable=cacheable)
         if reusable is not None:
             return reusable
 
@@ -569,32 +773,17 @@ class ObservedRun:
         stdout_log, stderr_log = self._child_log_paths(name, attempt)
         command_fingerprint = self._command_fingerprint(command, cwd=cwd)
         started_at = utc_now_iso()
-        self._append_event("child_started", child=name, attempt=attempt, command_fingerprint=command_fingerprint)
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        identity = ProcessIdentity(process.pid, process_start_identity(process.pid))
-        if not identity.start_identity:
-            process.terminate()
-            process.wait(timeout=5)
-            raise ObservabilityError(f"Could not capture process start identity for child '{name}'.")
         child_state = {
             "name": name,
             "attempt": attempt,
-            "status": "running",
+            "status": "launching",
             "command": command,
             "command_fingerprint": command_fingerprint,
             "source_fingerprint": self.source["fingerprint"],
             "environment_fingerprint": self.environment["fingerprint"],
-            "pid": identity.pid,
-            "start_identity": identity.start_identity,
+            "cacheable": cacheable,
+            "pid": None,
+            "start_identity": None,
             "parent_owner": self.owner.as_dict(),
             "started_at": started_at,
             "stdout_log": str(stdout_log),
@@ -606,29 +795,88 @@ class ObservedRun:
         with self._state_lock:
             self._state.setdefault("children", {})[name] = child_state
             self._state["active_child"] = child_state
-            self._state["next_action"] = f"wait for child {name}"
-            self._state["last_progress"] = {"kind": "child_started", "child": name}
+            self._state["next_action"] = f"spawn child {name}"
+            self._state["last_progress"] = {"kind": "child_launching", "child": name}
             self._state["last_progress_at"] = started_at
             self._write_state_locked(force=True)
+        self._append_event("child_launching", child=name, attempt=attempt, command_fingerprint=command_fingerprint)
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except BaseException as error:
+            completed_at = utc_now_iso()
+            child_state.update(
+                {
+                    "status": "failed",
+                    "completed_at": completed_at,
+                    "error": f"{type(error).__name__}: {error}",
+                    "next_action": "inspect child launch error",
+                }
+            )
+            with self._state_lock:
+                self._state["active_child"] = None
+                self._state["next_action"] = child_state["next_action"]
+                self._write_state_locked(force=True)
+            self._append_event("child_completed", child=name, status="failed", error=child_state["error"])
+            raise
+        identity = ProcessIdentity(process.pid, process_start_identity(process.pid))
+        if not identity.start_identity:
+            process.terminate()
+            process.wait(timeout=5)
+            child_state.update(
+                {
+                    "status": "failed",
+                    "completed_at": utc_now_iso(),
+                    "next_action": "inspect missing child process identity",
+                }
+            )
+            with self._state_lock:
+                self._state["active_child"] = None
+                self._state["next_action"] = child_state["next_action"]
+                self._write_state_locked(force=True)
+            self._append_event("child_completed", child=name, status="failed", error="missing_process_identity")
+            raise ObservabilityError(f"Could not capture process start identity for child '{name}'.")
+        child_state.update(
+            {
+                "status": "running",
+                "pid": identity.pid,
+                "start_identity": identity.start_identity,
+                "next_action": "wait for child completion",
+            }
+        )
+        with self._state_lock:
+            self._state["next_action"] = f"wait for child {name}"
+            self._state["last_progress"] = {"kind": "child_started", "child": name}
+            self._state["last_progress_at"] = utc_now_iso()
+            self._write_state_locked(force=True)
+        self._append_event("child_started", child=name, attempt=attempt, command_fingerprint=command_fingerprint)
         self._active_process = process
         output_threads: list[threading.Thread] = []
 
         def consume(stream: Any, path: Path, stream_name: str) -> None:
-            line_count = 0
+            chunk_count = 0
             byte_count = 0
-            with path.open("w", encoding="utf-8", newline="\n") as handle:
-                for line in stream:
-                    handle.write(line)
+            with path.open("wb") as handle:
+                while True:
+                    chunk = stream.read(4096)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
                     handle.flush()
-                    line_count += 1
-                    byte_count += len(line.encode("utf-8", errors="replace"))
+                    chunk_count += 1
+                    byte_count += len(chunk)
                     with self._state_lock:
                         self._progress_counter += 1
                         progress = {
                             "kind": "child_output",
                             "child": name,
                             "stream": stream_name,
-                            "line_count": line_count,
+                            "chunk_count": chunk_count,
                             "bytes": byte_count,
                         }
                         child_state["last_progress"] = progress
@@ -637,7 +885,8 @@ class ObservedRun:
                         self._state["last_progress_at"] = child_state["last_progress_at"]
                         self._write_state_locked()
                     if echo_output:
-                        print(f"[{name}/{stream_name}] {line.rstrip()}", file=sys.stderr, flush=True)
+                        sys.stderr.write(f"[{name}/{stream_name}] {chunk.decode('utf-8', errors='replace')}")
+                        sys.stderr.flush()
 
         assert process.stdout is not None
         assert process.stderr is not None
@@ -655,8 +904,10 @@ class ObservedRun:
             output_threads.append(thread)
 
         timed_out = False
+        completed_normally = False
         try:
             returncode = process.wait(timeout=timeout_seconds)
+            completed_normally = True
         except subprocess.TimeoutExpired:
             timed_out = True
             process.terminate()
@@ -665,10 +916,20 @@ class ObservedRun:
             except subprocess.TimeoutExpired:
                 process.kill()
                 returncode = process.wait(timeout=5)
+            completed_normally = True
+        except BaseException as error:
+            child_state["next_action"] = "inspect live child before resuming"
+            with self._state_lock:
+                self._state["next_action"] = child_state["next_action"]
+                self._state["last_progress"] = {"kind": "child_interrupted", "child": name}
+                self._write_state_locked(force=True)
+            self._append_event("child_interrupted", child=name, reason=type(error).__name__)
+            raise
         finally:
             for thread in output_threads:
                 thread.join(timeout=5)
-            self._active_process = None
+            if completed_normally or process.poll() is not None:
+                self._active_process = None
 
         status = "passed" if returncode == 0 and not timed_out else "failed"
         completed_at = utc_now_iso()
@@ -701,6 +962,11 @@ class ObservedRun:
         return final_state
 
     def finish(self, status: str, *, next_action: str | None = None, error: str | None = None) -> None:
+        if status == "passed" and (
+            (self._active_process is not None and self._active_process.poll() is None)
+            or self._active_child_alive()
+        ):
+            raise ObservabilityError("Cannot finish an evidence run as passed while a child process is still active.")
         if self._heartbeat_thread is not None:
             self._heartbeat_stop.set()
             self._heartbeat_thread.join(timeout=max(1.0, self.heartbeat_interval_seconds + 1))
@@ -716,15 +982,12 @@ class ObservedRun:
         self.release()
 
     def release(self) -> None:
-        if not self._lock_owned:
+        if self._lock_handle is None:
             return
-        current = self._read_lock()
-        if current and current.get("run_id") == self.run_id and current.get("pid") == self.owner.pid and current.get("start_identity") == self.owner.start_identity:
-            try:
-                self.lock_path.unlink()
-            except FileNotFoundError:
-                pass
-        self._lock_owned = False
+        handle = self._lock_handle
+        self._lock_handle = None
+        self._release_os_lock(handle)
+        handle.close()
 
     def payload(self) -> dict[str, Any]:
         with self._state_lock:
@@ -760,6 +1023,30 @@ def read_tail(path: str | Path, limit: int = 1200) -> str:
     except OSError:
         return ""
     return value[-limit:]
+
+
+def build_observed_child_report(
+    spec: dict[str, Any],
+    child: dict[str, Any],
+    *,
+    started_monotonic: float,
+) -> dict[str, Any]:
+    return {
+        "name": spec["name"],
+        "command": spec["command"],
+        "returncode": child["returncode"],
+        "duration_seconds": round(time.monotonic() - started_monotonic, 3),
+        "status": child["status"],
+        "stdout_tail": read_tail(child["stdout_log"]),
+        "stderr_tail": read_tail(child["stderr_log"]),
+        "stdout_log": child["stdout_log"],
+        "stderr_log": child["stderr_log"],
+        "pid": child.get("pid"),
+        "start_identity": child.get("start_identity"),
+        "attempt": child.get("attempt"),
+        "reused": child.get("reused", False),
+        "timed_out": child.get("timed_out", False),
+    }
 
 
 def build_report(

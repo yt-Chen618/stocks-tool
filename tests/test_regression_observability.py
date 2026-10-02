@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 import time
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -13,12 +15,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.append(str(SCRIPTS_DIR))
 
 from regression_common import (  # noqa: E402
+    ObservabilityError,
     ObservedRun,
     RunAlreadyActiveError,
     current_process_identity,
     process_identity_matches,
 )
-from run_p0_safety_gate import run_child as run_p0_child  # noqa: E402
+from run_p0_safety_gate import child_specs, run_child as run_p0_child  # noqa: E402
 from run_operator_platform_v8_gate import run_child as run_v8_child  # noqa: E402
 
 
@@ -52,10 +55,10 @@ def test_observed_child_streams_independent_logs_and_heartbeat(tmp_path: Path) -
     result: dict[str, object] = {}
     command = _command(
         "import sys, time",
-        "print('stdout-before-sleep', flush=True)",
-        "print('stderr-before-sleep', file=sys.stderr, flush=True)",
+        "sys.stdout.write('stdout-before-sleep'); sys.stdout.flush()",
+        "sys.stderr.write('stderr-before-sleep'); sys.stderr.flush()",
         "time.sleep(0.12)",
-        "print('stdout-after-sleep', flush=True)",
+        "sys.stdout.write('stdout-after-sleep'); sys.stdout.flush()",
     )
 
     thread = threading.Thread(
@@ -77,6 +80,8 @@ def test_observed_child_streams_independent_logs_and_heartbeat(tmp_path: Path) -
 
     state = json.loads((evidence_dir / "state.json").read_text(encoding="utf-8"))
     assert state["status"] == "passed"
+    assert state["environment"]["python_distributions_fingerprint"]
+    assert "node_version_fingerprint" in state["environment"]
     assert state["children"]["stream"]["pid"]
     assert state["children"]["stream"]["start_identity"]
     events = _events(evidence_dir)
@@ -115,14 +120,15 @@ def test_resume_reuses_only_matching_passed_child(tmp_path: Path) -> None:
 
     first = ObservedRun(evidence_dir, source_root=source)
     first.start()
-    first_result = first.run_child({"name": "reusable", "command": command}, echo_output=False)
+    reusable_spec = {"name": "reusable", "command": command, "cacheable": True}
+    first_result = first.run_child(reusable_spec, echo_output=False)
     first.finish("passed")
     assert first_result["reused"] is False
     assert marker.read_text(encoding="utf-8") == "x"
 
     second = ObservedRun(evidence_dir, source_root=source)
     second.start()
-    reused = second.run_child({"name": "reusable", "command": command}, echo_output=False)
+    reused = second.run_child(reusable_spec, echo_output=False)
     second.finish("passed")
     assert reused["reused"] is True
     assert marker.read_text(encoding="utf-8") == "x"
@@ -132,7 +138,7 @@ def test_resume_reuses_only_matching_passed_child(tmp_path: Path) -> None:
     )
     third = ObservedRun(evidence_dir, source_root=source)
     third.start()
-    invalidated = third.run_child({"name": "reusable", "command": changed_command}, echo_output=False)
+    invalidated = third.run_child({**reusable_spec, "command": changed_command}, echo_output=False)
     third.finish("passed")
     assert invalidated["reused"] is False
     assert marker.read_text(encoding="utf-8") == "xy"
@@ -140,7 +146,7 @@ def test_resume_reuses_only_matching_passed_child(tmp_path: Path) -> None:
     (source / "source.txt").write_text("v2\n", encoding="utf-8")
     fourth = ObservedRun(evidence_dir, source_root=source)
     fourth.start()
-    source_invalidated = fourth.run_child({"name": "reusable", "command": changed_command}, echo_output=False)
+    source_invalidated = fourth.run_child({**reusable_spec, "command": changed_command}, echo_output=False)
     fourth.finish("passed")
     assert source_invalidated["reused"] is False
     assert marker.read_text(encoding="utf-8") == "xyy"
@@ -155,11 +161,46 @@ def test_live_owner_and_live_child_cannot_be_duplicated(tmp_path: Path) -> None:
     duplicate = ObservedRun(evidence_dir, source_root=source)
     with pytest.raises(RunAlreadyActiveError):
         duplicate.start()
-    owner.lock_path.unlink()
-    missing_lock_duplicate = ObservedRun(evidence_dir, source_root=source)
-    with pytest.raises(RunAlreadyActiveError):
-        missing_lock_duplicate.start()
     owner.finish("interrupted", next_action="resume")
+
+
+def test_two_processes_contend_for_the_same_os_lock(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    source = _source_root(tmp_path)
+    helper = f"""
+import sys, time
+sys.path.insert(0, {str(SCRIPTS_DIR)!r})
+from pathlib import Path
+from regression_common import ObservedRun, RunAlreadyActiveError
+run = ObservedRun(Path({str(evidence_dir)!r}), source_root=Path({str(source)!r}), heartbeat_interval_seconds=0.05)
+try:
+    run.start()
+except RunAlreadyActiveError:
+    print('blocked', flush=True)
+    raise SystemExit(0)
+print('ready', flush=True)
+time.sleep(1.2)
+run.finish('passed')
+"""
+    first = subprocess.Popen(
+        [sys.executable, "-c", helper],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    assert first.stdout is not None
+    assert first.stdout.readline().strip() == "ready"
+    second = subprocess.run(
+        [sys.executable, "-c", helper],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+    )
+    assert second.returncode == 0
+    assert "blocked" in second.stdout
+    assert first.wait(timeout=5) == 0
 
 
 def test_stale_owner_marks_interrupted_and_resume_can_acquire(tmp_path: Path) -> None:
@@ -189,6 +230,70 @@ def test_stale_owner_marks_interrupted_and_resume_can_acquire(tmp_path: Path) ->
     events = _events(evidence_dir)
     assert any(event["event"] == "owner_lost" for event in events)
     assert any(event["event"] == "child_interrupted" for event in events)
+
+
+def test_launching_child_without_identity_blocks_resume(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    source = _source_root(tmp_path)
+    seed = ObservedRun(evidence_dir, source_root=source, run_id="launching-run")
+    seed._state["status"] = "running"
+    seed._state["owner"] = {"pid": 999999, "start_identity": "stale-owner"}
+    seed._state["active_child"] = {"name": "spawn-window", "status": "launching", "pid": None, "start_identity": None}
+    seed._write_state_locked(force=True)
+    state = json.loads((evidence_dir / "state.json").read_text(encoding="utf-8"))
+    state["owner"] = {"pid": 999999, "start_identity": "stale-owner"}
+    state["active_child"] = {"name": "spawn-window", "status": "launching", "pid": None, "start_identity": None}
+    (evidence_dir / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    resumed = ObservedRun(evidence_dir, source_root=source, run_id="launching-run")
+    with pytest.raises(ObservabilityError, match="spawn window"):
+        resumed.start()
+    state_after = json.loads((evidence_dir / "state.json").read_text(encoding="utf-8"))
+    assert state_after["status"] == "needs_review"
+
+
+def test_active_child_cannot_be_marked_passed(tmp_path: Path) -> None:
+    evidence_dir = tmp_path / "evidence"
+    runner = ObservedRun(evidence_dir, source_root=_source_root(tmp_path))
+    runner.start()
+    result: dict[str, object] = {}
+    thread = threading.Thread(
+        target=lambda: result.update(
+            runner.run_child(
+                {"name": "interruptible", "command": _command("import time; time.sleep(1.0)")},
+                echo_output=False,
+            )
+        ),
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and runner._active_process is None:
+        time.sleep(0.01)
+    assert runner._active_process is not None
+    with pytest.raises(ObservabilityError, match="still active"):
+        runner.finish("passed")
+    runner._active_process.terminate()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    runner.finish("failed", next_action="inspect child interruption")
+
+
+def test_volatile_p0_children_are_never_cacheable(tmp_path: Path) -> None:
+    specs = child_specs(
+        Namespace(
+            base_url="http://127.0.0.1:8000",
+            account_id="LBPT10087357",
+            skip_running_api_checks=True,
+        ),
+        tmp_path,
+    )
+    by_name = {spec["name"]: spec for spec in specs}
+    assert by_name["environment-preflight"].get("cacheable", False) is False
+    assert by_name["alembic-current"].get("cacheable", False) is False
+    assert by_name["order-idempotency-preflight"].get("cacheable", False) is False
+    assert by_name["py-compile-scripts"]["cacheable"] is True
+    assert by_name["git-diff-check"]["cacheable"] is True
 
 
 def test_process_identity_requires_start_token_to_avoid_pid_reuse() -> None:
