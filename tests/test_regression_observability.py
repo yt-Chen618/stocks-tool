@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import signal
@@ -457,6 +458,56 @@ def test_bounded_process_preserves_cleanup_failure_metadata(tmp_path: Path, monk
         assert result.timed_out is True
         assert result.cleanup and result.cleanup["reason"] == "blocked"
         assert "partial" in result.stdout
+    finally:
+        real_process.terminate()
+        real_process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("fault", ["timeout", "interrupt"])
+def test_observed_child_cleanup_failure_requires_review_before_resume(tmp_path: Path, monkeypatch, fault: str) -> None:
+    evidence_dir = tmp_path / f"evidence-{fault}"
+    source = _source_root(tmp_path)
+    real_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **({"start_new_session": True} if os.name != "nt" else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}),
+    )
+
+    class FaultProcess:
+        pid = real_process.pid
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+
+        @staticmethod
+        def wait(timeout=None):
+            if fault == "interrupt":
+                raise KeyboardInterrupt()
+            raise subprocess.TimeoutExpired(["fault"], timeout)
+
+        @staticmethod
+        def poll():
+            return real_process.poll()
+
+    runner = ObservedRun(evidence_dir, source_root=source)
+    runner.start()
+    monkeypatch.setattr(common.subprocess, "Popen", lambda *args, **kwargs: FaultProcess())
+    monkeypatch.setattr(common, "terminate_owned_process_tree", lambda process: {"attempted": True, "terminated": False, "reason": "blocked"})
+    try:
+        with pytest.raises((ObservabilityError, KeyboardInterrupt)):
+            runner.run_child({"name": "cleanup-fault", "command": [sys.executable, "-c", "pass"]}, timeout_seconds=0.1)
+        state = json.loads((evidence_dir / "state.json").read_text(encoding="utf-8"))
+        assert state["status"] == "needs_review"
+        assert state["active_child"]["status"] == "needs_review"
+        runner._heartbeat_stop.set()
+        if runner._heartbeat_thread is not None:
+            runner._heartbeat_thread.join(timeout=2)
+        runner.release()
+        monkeypatch.undo()
+        resumed = ObservedRun(evidence_dir, source_root=source)
+        with pytest.raises(ObservabilityError, match="operator review"):
+            resumed.start()
     finally:
         real_process.terminate()
         real_process.wait(timeout=5)

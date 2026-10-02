@@ -723,6 +723,17 @@ class ObservedRun:
                 self._state = latest_state
                 if self._state.get("run_id") != self.run_id:
                     raise ObservabilityError("Evidence state run id changed while acquiring its lock.")
+            if self._state.get("status") == "needs_review" or any(
+                isinstance(child, dict) and child.get("status") == "needs_review"
+                for child in (self._state.get("children") or {}).values()
+            ):
+                self._state["next_action"] = "operator review required before resuming"
+                with self._state_lock:
+                    self._write_state_locked(force=True)
+                self._append_event("resume_blocked", reason="cleanup_requires_operator_review")
+                raise ObservabilityError(
+                    f"Evidence run {self.run_id} requires operator review before it can resume."
+                )
             missing_identity_children = [
                 str(child_name)
                 for child_name, child in (self._state.get("children") or {}).items()
@@ -1029,6 +1040,22 @@ class ObservedRun:
         except subprocess.TimeoutExpired:
             timed_out = True
             cleanup = terminate_owned_process_tree(process)
+            if cleanup.get("terminated") is not True:
+                child_state.update(
+                    {
+                        "status": "needs_review",
+                        "cleanup": cleanup,
+                        "next_action": "operator must inspect cleanup before resuming",
+                    }
+                )
+                with self._state_lock:
+                    self._state["children"][name] = child_state
+                    self._state["active_child"] = child_state
+                    self._state["status"] = "needs_review"
+                    self._state["next_action"] = child_state["next_action"]
+                    self._write_state_locked(force=True)
+                self._append_event("child_cleanup_failed", child=name, cleanup=cleanup)
+                raise ObservabilityError(f"Timed-out child '{name}' cleanup requires operator review.")
             try:
                 returncode = process.wait(timeout=5)
             except subprocess.TimeoutExpired:
@@ -1042,17 +1069,33 @@ class ObservedRun:
             completed_normally = True
         except (KeyboardInterrupt, SystemExit) as error:
             cleanup = terminate_owned_process_tree(process)
-            cleaned = bool(cleanup and cleanup.get("terminated")) or process.poll() is not None
+            cleaned = bool(cleanup and cleanup.get("terminated"))
+            if not cleaned:
+                child_state.update(
+                    {
+                        "status": "needs_review",
+                        "cleanup": cleanup,
+                        "next_action": "operator must inspect cleanup before resuming",
+                    }
+                )
+            else:
+                child_state.update(
+                    {
+                        "status": "interrupted",
+                        "next_action": "resume after explicit interruption",
+                    }
+                )
             child_state.update(
                 {
-                    "status": "interrupted" if cleaned else "running",
                     "cleanup": cleanup,
-                    "next_action": "resume after explicit interruption" if cleaned else "inspect live child after failed cleanup",
+                    "next_action": child_state.get("next_action") or "resume after explicit interruption",
                 }
             )
             with self._state_lock:
                 self._state["children"][name] = child_state
                 self._state["active_child"] = None if cleaned else child_state
+                if not cleaned:
+                    self._state["status"] = "needs_review"
                 self._state["next_action"] = child_state["next_action"]
                 self._write_state_locked(force=True)
             self._append_event("child_interrupted", child=name, reason=type(error).__name__, cleanup=cleanup)
