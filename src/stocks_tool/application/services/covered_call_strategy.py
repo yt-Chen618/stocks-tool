@@ -550,7 +550,9 @@ class CoveredCallStrategyService:
                 self._mark_public_action_unknown(parent_action_intent_id, exc)
             raise
 
-    def _mark_public_action_unknown(self, parent_action_intent_id: str, exc: Exception) -> None:
+    def _mark_public_action_unknown(self, parent_action_intent_id: str | None, exc: Exception) -> None:
+        if parent_action_intent_id is None:
+            return
         try:
             self.order_service.mark_trade_action_unknown(parent_action_intent_id, str(exc))
         except Exception:
