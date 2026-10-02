@@ -814,6 +814,8 @@ function mutationContextIsCurrent(accountId, accountLoadGeneration) {
 
 function recordUnknownMutationLock(accountId, intent) {
   state.unknownMutationLocks ||= {};
+  state.terminalUnknownMutationIds ||= {};
+  state.terminalUnknownMutationIds[accountId] = (state.terminalUnknownMutationIds[accountId] || []).filter((id) => id !== intent.id);
   const current = Array.isArray(state.unknownMutationLocks[accountId])
     ? state.unknownMutationLocks[accountId]
     : [];
@@ -996,6 +998,9 @@ async function runConfirmedBrokerMutation(
       });
     }
     if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
+      if (isTerminalMutationError(error)) {
+        clearIdempotencyKey(actionKey, accountId);
+      }
       return { executed: false, discarded: true, error };
     }
     if (error?.code === "order_outcome_unknown") {
@@ -1229,6 +1234,8 @@ async function loadPreOpenAssessment(options = {}) {
     renderPreOpenAssessment();
     return;
   }
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   state.preOpenStatus = buildOverlayStatus(
     "loading",
     includeOptionOverlays
@@ -1239,14 +1246,17 @@ async function loadPreOpenAssessment(options = {}) {
 
   try {
     const params = new URLSearchParams();
-    params.set("external_account_id", state.selectedAccountId);
+    params.set("external_account_id", accountId);
     params.set("include_option_overlays", includeOptionOverlays ? "true" : "false");
     const assessment = await fetchJson(
       `/strategies/pre-open-risk?${params.toString()}`,
       { timeoutMs }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     applyPreOpenAssessmentResponse(assessment);
+    return { discarded: false };
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     state.preOpenStatus = classifyOverlayFailure(error, {
       label: "live macro board",
@@ -1254,6 +1264,7 @@ async function loadPreOpenAssessment(options = {}) {
       staleAt: state.preOpenAssessment?.analyzed_at,
     });
     renderPreOpenAssessment();
+    return { discarded: false, error };
   }
 }
 
@@ -1271,16 +1282,20 @@ async function saveCurrentPreOpenBoard() {
     return;
   }
 
-  setStatus(`Saving live macro board for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+
+  setStatus(`Saving live macro board for ${accountId}...`, "warning");
   updatePreOpenButtons(true);
   try {
     const result = await fetchJson(
-      `/strategies/pre-open-runs/${encodeURIComponent(state.selectedAccountId)}/capture?force=true&include_option_overlays=false`,
+      `/strategies/pre-open-runs/${encodeURIComponent(accountId)}/capture?force=true&include_option_overlays=false`,
       {
         method: "POST",
         timeoutMs: PRE_OPEN_BOARD_TIMEOUT_MS,
       }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     if (result.run) {
       state.preOpenRuns = [
         result.run,
@@ -1291,11 +1306,14 @@ async function saveCurrentPreOpenBoard() {
       renderLatestPreOpenRun();
     }
     setStatus(`Stored macro board for ${formatSessionDate(result.run?.target_session_date)}.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Saving macro board failed.", "error");
+    return { discarded: false, error };
   } finally {
-    updatePreOpenButtons(false);
+    if (mutationContextIsCurrent(accountId, accountLoadGeneration)) updatePreOpenButtons(false);
   }
 }
 
@@ -1356,34 +1374,48 @@ function applyPreOpenAssessmentResponse(assessment) {
 }
 
 async function syncAccount() {
-  setStatus(`Syncing account ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Syncing account ${accountId}...`, "warning");
   try {
-    await fetchJson(`/brokers/longbridge/account-sync/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+    await fetchJson(`/brokers/longbridge/account-sync/${encodeURIComponent(accountId)}?mode=paper`, {
       method: "POST",
     });
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await refreshAccounts();
     await loadAccountData();
-    setStatus(`Account ${state.selectedAccountId} synced.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setStatus(`Account ${accountId} synced.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     await refreshAccountsSilently();
     setStatus(error.message || "Account sync failed.", "error");
+    return { discarded: false, error };
   }
 }
 
 async function syncOrders() {
-  setStatus(`Syncing orders for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Syncing orders for ${accountId}...`, "warning");
   try {
-    await fetchJson(`/orders/sync/longbridge/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+    await fetchJson(`/orders/sync/longbridge/${encodeURIComponent(accountId)}?mode=paper`, {
       method: "POST",
     });
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await refreshAccounts();
     await loadAccountData();
-    setStatus(`Orders for ${state.selectedAccountId} synced.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setStatus(`Orders for ${accountId} synced.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     await refreshAccountsSilently();
     setStatus(error.message || "Order sync failed.", "error");
+    return { discarded: false, error };
   }
 }
 
@@ -1392,6 +1424,7 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
     setStatus("Select a broker account before updating strategy controls.", "warning");
     return;
   }
+  const accountId = state.selectedAccountId;
 
   const payload = {
     auto_entry_enabled: els.strategyAutoEntry.value === "true",
@@ -1412,7 +1445,7 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
           title: "Confirm Bull Put controls",
           summary: payload.auto_entry_enabled ? "Enable paper Bull Put entry automation" : "Update Bull Put entry controls",
           details: {
-            Account: state.selectedAccountId,
+            Account: accountId,
             Mode: "Paper",
             Symbol: payload.paused_symbols.length ? payload.paused_symbols.join(", ") : "Configured universe",
             "Side / Legs": "Protective put first / short put second",
@@ -1424,8 +1457,8 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
         },
       },
       async (idempotencyKey) => {
-        setStatus(`Saving bull put controls for ${state.selectedAccountId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+        setStatus(`Saving bull put controls for ${accountId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(accountId)}?mode=paper`, {
           method: "POST",
           headers: { "Idempotency-Key": idempotencyKey },
           body: JSON.stringify(payload),
@@ -1436,9 +1469,11 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
       return;
     }
     await loadAccountData();
-    setActionStatus(els.strategyControlsHint, `Bull put controls updated for ${state.selectedAccountId}.`, "success");
-    setStatus(`Bull put controls updated for ${state.selectedAccountId}.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setActionStatus(els.strategyControlsHint, `Bull put controls updated for ${accountId}.`, "success");
+    setStatus(`Bull put controls updated for ${accountId}.`, "success");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setActionStatus(els.strategyControlsHint, error.message || "Bull put controls update failed.", "error");
     setStatus(error.message || "Bull put controls update failed.", "error");
@@ -1451,14 +1486,15 @@ async function runStrategyScan(button = els.runStrategyScan) {
     return;
   }
 
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
-    const accountId = state.selectedAccountId;
     setActionStatus(els.strategyControlsHint, "Loading a fresh Bull Put candidate for confirmation...", "warning");
     const readiness = await fetchJson(
       `/strategies/bull-put/readiness?external_account_id=${encodeURIComponent(accountId)}&mode=paper`,
       { timeoutMs: BROKER_REQUEST_TIMEOUT_MS }
     );
-    if (state.selectedAccountId !== accountId) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
       setActionStatus(els.strategyControlsHint, "Account changed while loading the Bull Put candidate; reload before trading.", "warning");
       return;
     }
@@ -1550,11 +1586,13 @@ async function runStrategyScan(button = els.runStrategyScan) {
     }
     const result = mutation.result;
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = `Bull put paper order opened ${result?.underlying_symbol || preview.symbol}.`;
     const tone = "success";
     setActionStatus(els.strategyControlsHint, message, tone);
     setStatus(message, tone);
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setActionStatus(els.strategyControlsHint, error.message || "Bull put scan failed.", "error");
     setStatus(error.message || "Bull put scan failed.", "error");
@@ -1567,18 +1605,23 @@ async function runStrategyReview() {
     return;
   }
 
-  setStatus(`Running bull put review for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Running bull put review for ${accountId}...`, "warning");
   try {
     const result = await fetchJson(
-      `/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}/review?mode=paper&force=true`,
+      `/strategies/bull-put/runtime/${encodeURIComponent(accountId)}/review?mode=paper&force=true`,
       {
         method: "POST",
       }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = result.recommendation || result.reason || result.strategy_state?.last_review_summary || "Bull put review completed.";
     setStatus(message, result.review_status === "suggested" ? "success" : "warning");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
   }
@@ -1598,14 +1641,18 @@ async function previewZeroDteLottery() {
     return;
   }
   const direction = els.zeroDteLotteryDirection.value || "auto";
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   setStatus(`Previewing zero-DTE lottery for ${symbol}...`, "warning");
   try {
     const params = new URLSearchParams();
-    params.set("external_account_id", state.selectedAccountId);
+    params.set("external_account_id", accountId);
     params.set("symbol", symbol);
     params.set("direction", direction);
     params.set("mode", "paper");
-    state.zeroDteLotteryPreview = await fetchJson(`/strategies/zero-dte-lottery/preview?${params.toString()}`);
+    const preview = await fetchJson(`/strategies/zero-dte-lottery/preview?${params.toString()}`);
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
+    state.zeroDteLotteryPreview = preview;
     state.zeroDteLotteryScanResult = null;
     strategyView?.renderZeroDteLottery();
     const message = state.zeroDteLotteryPreview.eligible
@@ -1613,6 +1660,7 @@ async function previewZeroDteLottery() {
       : state.zeroDteLotteryPreview.reasons?.[0] || "Zero-DTE lottery preview completed without a candidate.";
     setStatus(message, state.zeroDteLotteryPreview.eligible ? "success" : "warning");
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Zero-DTE lottery preview failed.", "error");
   }
@@ -1623,8 +1671,9 @@ async function reconcileCoveredCallLifecycle(button = null) {
     return;
   }
 
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
-    const accountId = state.selectedAccountId;
     if (button) {
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
@@ -1637,20 +1686,21 @@ async function reconcileCoveredCallLifecycle(button = null) {
         timeoutMs: COVERED_CALL_LIFECYCLE_TIMEOUT_MS,
       }
     );
-    if (state.selectedAccountId !== accountId) {
-      return;
-    }
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     setStatus(`Covered-call lifecycle refreshed read-only: ${formatCoveredCallLifecycleResult(result)}.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Covered-call lifecycle refresh failed.", "error");
   } finally {
-    if (button) {
+    if (button && state.selectedAccountId === accountId) {
       button.removeAttribute("aria-busy");
       button.disabled = false;
     }
-    applyTradingSafetyState();
+    if (state.selectedAccountId === accountId) applyTradingSafetyState();
   }
 }
 
@@ -1665,6 +1715,8 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
     roll_execute: "Executing covered call roll proposal",
     roll_continue: "Continuing covered call roll proposal",
   };
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
     const requestPayload = buildStrategyProposalActionPayload(action);
     if (requestPayload.canceled) {
@@ -1697,13 +1749,16 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
       setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
       result = await sendStrategyProposalActionRequest(action, proposalId, requestPayload.body, null);
     }
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = formatStrategyProposalActionResult(action, result);
     if (isCoveredCallBrokerMutation(action)) {
       setActionStatus(els.coveredCallActionStatus, message, "success");
     }
     setStatus(message, "success");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     if (isCoveredCallBrokerMutation(action)) {
       setActionStatus(els.coveredCallActionStatus, error.message || "Covered Call action failed.", "error");

@@ -318,13 +318,17 @@
 
     async function refreshSpread(spreadId) {
       const spread = spreadById(spreadId);
+      const accountId = state.selectedAccountId;
+      const accountLoadGeneration = state.accountLoadGeneration;
       setStatus(`Refreshing spread ${spread?.underlying_symbol || spreadId}...`, "warning");
       try {
         const result = await accountLoader.refreshSpread(spreadId);
         if (result?.discarded) return;
         await loadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         setStatus(`Spread ${result.detail.underlying_symbol} refreshed.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
         console.error(error);
         setStatus(error.message || "Spread refresh failed.", "error");
       }
@@ -332,6 +336,7 @@
 
     async function monitorSpread(spreadId, button = null) {
       const spread = spreadById(spreadId);
+      const accountId = state.selectedAccountId;
       try {
         const actionKey = `bull-put-monitor:${spreadId}`;
         const mutation = await runConfirmedBrokerMutation({
@@ -361,6 +366,7 @@
         });
         if (!mutation.executed || mutation.result?.discarded) return;
         await loadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         const result = mutation.result;
         const action = result.should_close
           ? `Exit action ${formatSpreadExitReason(result.exit_reason)} evaluated for ${result.spread.underlying_symbol}.`
@@ -371,6 +377,7 @@
         setActionStatus(els.strategyControlsHint, action, tone);
         setStatus(action, tone);
       } catch (error) {
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.strategyControlsHint, error.message || "Spread monitor failed.", "error");
         setStatus(error.message || "Spread monitor failed.", "error");
@@ -379,6 +386,7 @@
 
     async function recoverClose(spreadId, formData, button = null) {
       const spread = spreadById(spreadId);
+      const accountId = state.selectedAccountId;
       const eligibility = state.recoverCloseEligibility?.[spreadId];
       if (!eligibility?.eligible || eligibility.external_account_id !== state.selectedAccountId || eligibility.mode !== "paper") {
         setStatus("Recovery close is no longer eligible. No request was sent.", "error");
@@ -432,11 +440,13 @@
         });
         if (!mutation.executed || mutation.result?.discarded) return;
         await loadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         state.bullPutLastActionDetail = { accountId: state.selectedAccountId, mode: "paper", detail: mutation.result, message: `Recovery close submitted for ${mutation.result.underlying_symbol}.` };
         renderCurrent();
         setActionStatus(els.strategyControlsHint, `Recovery close submitted for ${mutation.result.underlying_symbol}.`, "success");
         setStatus(`Recovery close submitted for ${mutation.result.underlying_symbol}.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.strategyControlsHint, error.message || "Recover close failed.", "error");
         setStatus(error.message || "Recover close failed.", "error");

@@ -38,6 +38,55 @@
       return Array.isArray(locks) ? locks : [];
     }
 
+    const TERMINAL_UNKNOWN_STATES = new Set(["rejected", "resolved_no_order"]);
+
+    async function reconcileUnknownMutationLocks(accountId, loadGeneration) {
+      const locks = currentAccountUnknownLocks(accountId);
+      if (!locks.length) return { discarded: false, cleared: [] };
+      const cleared = [];
+      for (const lock of locks) {
+        if (!isCurrentScope(accountId, loadGeneration)) return { discarded: true, cleared: [] };
+        let terminal = false;
+        for (const path of ["/ops/trading-intents", "/ops/trade-actions"]) {
+          try {
+            const detail = await fetchJson(`${path}/${encodeURIComponent(lock.id)}`);
+            if (
+              detail?.id === lock.id &&
+              detail.external_account_id === accountId &&
+              detail.mode === lock.mode &&
+              TERMINAL_UNKNOWN_STATES.has(detail.state)
+            ) {
+              terminal = true;
+              break;
+            }
+            if (detail?.id === lock.id) break;
+          } catch (error) {
+            if (error?.status !== 404) break;
+          }
+        }
+        if (terminal) cleared.push(lock.id);
+        if (terminal && lock.action_key) {
+          try {
+            window.sessionStorage.removeItem(`stocks-tool-idempotency:${accountId}:${lock.action_key}`);
+          } catch (_error) {
+            // Preserve the terminal evidence even when browser storage is unavailable.
+          }
+        }
+      }
+      if (!isCurrentScope(accountId, loadGeneration)) return { discarded: true, cleared: [] };
+      if (cleared.length) {
+        state.unknownMutationLocks ||= {};
+        state.terminalUnknownMutationIds ||= {};
+        const clearedIds = new Set(cleared);
+        state.unknownMutationLocks[accountId] = currentAccountUnknownLocks(accountId).filter((lock) => !clearedIds.has(lock.id));
+        state.terminalUnknownMutationIds[accountId] = [
+          ...(state.terminalUnknownMutationIds[accountId] || []),
+          ...cleared,
+        ].filter((id, index, ids) => ids.indexOf(id) === index);
+      }
+      return { discarded: false, cleared };
+    }
+
     function ensureActivityPages() {
       state.activityPages ||= {};
       for (const key of ["orders", "executions", "journals"]) {
@@ -583,10 +632,11 @@
           ...(Array.isArray(values.tradingIntents) ? values.tradingIntents : []),
           ...(Array.isArray(values.tradeActions) ? values.tradeActions : []),
         ].filter((intent) => unresolvedStates.has(intent?.state));
+        const terminalIds = new Set(state.terminalUnknownMutationIds?.[selectedAccountId] || []);
         const localUnknown = currentAccountUnknownLocks(selectedAccountId);
         state.unresolvedTradingIntents = [
           ...localUnknown,
-          ...backendUnresolved.filter((intent) => !localUnknown.some((candidate) => candidate.id === intent.id)),
+          ...backendUnresolved.filter((intent) => !terminalIds.has(intent.id) && !localUnknown.some((candidate) => candidate.id === intent.id)),
         ];
       }
       if ("latestSnapshot" in values) state.latestSnapshot = values.latestSnapshot;
@@ -682,6 +732,7 @@
       const optionalSpecs = requestSpecs.filter(([, required]) => !required);
       const requiredPromise = Promise.allSettled(requiredSpecs.map(([, , url]) => fetchJson(url)));
       const optionalPromise = Promise.allSettled(optionalSpecs.map(([, , url]) => fetchJson(url)));
+      const unknownCleanupPromise = reconcileUnknownMutationLocks(selectedAccountId, loadGeneration);
       const values = {};
       const errors = {};
 
@@ -729,6 +780,16 @@
       const requiredResult = await applyStage(requiredSpecs, requiredSettled);
       if (requiredResult.discarded) {
         return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
+      }
+      const unknownCleanup = await unknownCleanupPromise;
+      if (unknownCleanup.discarded) {
+        return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
+      }
+      if (unknownCleanup.cleared.length) {
+        const cleanupRender = await applyStage([], []);
+        if (cleanupRender.discarded) {
+          return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
+        }
       }
       const optionalSettled = await optionalPromise;
       const finalResult = await applyStage(optionalSpecs, optionalSettled);
@@ -783,6 +844,7 @@
       loadSpreadDetail,
       loadSpreadEligibility,
       loadSelectedOrderDetails,
+      reconcileUnknownMutationLocks,
       refreshSpread,
       monitorSpread,
       recoverCloseSpread,

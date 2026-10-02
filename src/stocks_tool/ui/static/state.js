@@ -43,6 +43,7 @@
       recoveryStatusState: "idle",
       unresolvedTradingIntents: [],
       unknownMutationLocks: {},
+      terminalUnknownMutationIds: {},
       coreDataHealthy: false,
       accountListHealthy: false,
       accountLoadGeneration: 0,

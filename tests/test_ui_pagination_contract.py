@@ -211,3 +211,43 @@ def test_account_loader_renders_required_core_before_slow_auxiliary_panels() -> 
     assert result["slowRequests"] >= 5
     assert result["renders"] == 1
     assert result["finalRenders"] >= 2
+
+
+def test_unknown_lock_cleanup_requires_exact_terminal_detail() -> None:
+    result = run_node(
+        r'''
+        (async () => {
+        const fs = require("fs");
+        const vm = require("vm");
+        const storage = new Map([["stocks-tool-idempotency:A:order-submit", "persisted"]]);
+        global.window = {sessionStorage: {removeItem: (key) => storage.delete(key)}};
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/api-client.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/account-loader.js", "utf8"));
+        const state = {
+          selectedAccountId: "A", accountLoadGeneration: 1,
+          unknownMutationLocks: {A: [
+            {id: "intent-a", external_account_id: "A", mode: "paper", action_key: "order-submit"},
+            {id: "intent-b", external_account_id: "A", mode: "paper"},
+          ]},
+          terminalUnknownMutationIds: {},
+        };
+        const fetchJson = async (url) => {
+          if (url.endsWith("/intent-a")) return {id: "intent-a", external_account_id: "A", mode: "paper", state: "rejected"};
+          if (url.endsWith("/intent-b")) return {id: "unrelated", external_account_id: "A", mode: "paper", state: "rejected"};
+          throw Object.assign(new Error("not found"), {status: 404});
+        };
+        const loader = window.StocksToolAccountLoader.createAccountLoader({
+          state, fetchJson, decodeCursorPage: window.StocksToolApiClient.decodeCursorPage,
+          createOverlayStatus: () => ({}), formatPanelLoadLabel: (key) => key,
+          renderAccountOptions() {}, renderEmptyState() {}, renderAccountState() {},
+          applyTradingSafetyState() {}, updateSyncButtons() {}, updateOrderTicketAvailability() {}, updatePreOpenButtons() {},
+        });
+        const result = await loader.reconcileUnknownMutationLocks("A", 1);
+        process.stdout.write(JSON.stringify({result, remaining: state.unknownMutationLocks.A, terminal: state.terminalUnknownMutationIds.A, keys: Array.from(storage.keys())}));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        ''',
+    )
+    assert result["result"]["cleared"] == ["intent-a"]
+    assert [lock["id"] for lock in result["remaining"]] == ["intent-b"]
+    assert result["terminal"] == ["intent-a"]
+    assert result["keys"] == []

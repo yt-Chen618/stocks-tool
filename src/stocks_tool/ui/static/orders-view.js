@@ -96,6 +96,7 @@
       if (!order) return;
       const accountId = order.external_account_id;
       const selectedId = order.id;
+      const accountLoadGeneration = state.accountLoadGeneration;
       const pageKey = kind === "executions" ? "selectedOrderExecutionPage" : "selectedOrderJournalPage";
       const page = state[pageKey] || {};
       if (!page.hasMore || page.loading) return;
@@ -110,7 +111,7 @@
         if (page.cursor) params.set("cursor", page.cursor);
         const response = await fetchJson(`${endpoint}?${params.toString()}`);
         const next = normalizePagePayload(response);
-        if (state.selectedAccountId !== accountId || state.selectedOrderId !== selectedId) {
+        if (state.selectedAccountId !== accountId || state.selectedOrderId !== selectedId || state.accountLoadGeneration !== accountLoadGeneration) {
           return;
         }
         const targetKey = kind === "executions" ? "selectedOrderExecutions" : "selectedOrderJournals";
@@ -118,6 +119,7 @@
         state[pageKey] = { cursor: next.cursor, hasMore: next.hasMore, loading: false };
         renderSelectedOrder();
       } catch (error) {
+        if (state.selectedAccountId !== accountId || state.selectedOrderId !== selectedId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
         page.loading = false;
         setStatus(error.message || `More ${kind} could not be loaded.`, "error");
         renderSelectedOrder();
@@ -295,13 +297,14 @@
         setStatus("Select a broker account before submitting an order.", "warning");
         return;
       }
+      const accountId = state.selectedAccountId;
       try {
         const payload = buildCreateOrderPayload();
         const price = payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : payload.stop_price ? `Stop ${formatCurrency(payload.stop_price, "USD")}` : "Market / unbounded";
         const boundedNotional = payload.side === "buy" && payload.limit_price ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD") : "Not bounded in ticket";
         const mutation = await runConfirmedBrokerMutation({
           actionKey: "order-submit", button, requestSignature: JSON.stringify(payload), getRequestSignature: () => JSON.stringify(payload), statusElement: els.orderActionStatus,
-          confirmation: { title: "Confirm paper order", summary: `${payload.side.toUpperCase()} ${payload.quantity} ${payload.symbol}`, details: { Account: state.selectedAccountId, Mode: "Paper", Symbol: payload.symbol, Side: payload.side.toUpperCase(), Quantity: String(payload.quantity), Price: price, "Max Risk": boundedNotional, "Quote Time": matchingQuoteTime(payload.symbol) } },
+          confirmation: { title: "Confirm paper order", summary: `${payload.side.toUpperCase()} ${payload.quantity} ${payload.symbol}`, details: { Account: accountId, Mode: "Paper", Symbol: payload.symbol, Side: payload.side.toUpperCase(), Quantity: String(payload.quantity), Price: price, "Max Risk": boundedNotional, "Quote Time": matchingQuoteTime(payload.symbol) } },
         }, async (idempotencyKey) => {
           setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
           return fetchJson("/orders/submit", { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(payload), timeoutMs: 25000 });
@@ -311,10 +314,12 @@
         state.selectedOrderId = created.id;
         els.orderRemark.value = "";
         await reloadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         setSelectedOrder(created.id);
         setActionStatus(els.orderActionStatus, `Order submitted for ${created.symbol}.`, "success");
         setStatus(`Order submitted for ${created.symbol}.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.orderActionStatus, error.message || "Order submission failed.", "error");
         setStatus(error.message || "Order submission failed.", "error");
@@ -323,14 +328,19 @@
 
     async function refreshOrder(orderId) {
       const order = selectedOrder() || state.orders.find((item) => item.id === orderId);
+      const accountId = state.selectedAccountId;
+      const accountLoadGeneration = state.accountLoadGeneration;
       setStatus(`Refreshing order ${order?.symbol || orderId}...`, "warning");
       try {
         const refreshed = await fetchJson(`/orders/${encodeURIComponent(orderId)}/refresh`, { method: "POST" });
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true };
         state.selectedOrderId = refreshed.id;
         await reloadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         setSelectedOrder(refreshed.id);
         setStatus(`Order ${refreshed.symbol} refreshed.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true, error };
         console.error(error);
         setStatus(error.message || "Order refresh failed.", "error");
       }
@@ -340,6 +350,7 @@
       const order = state.orders.find((item) => item.id === orderId);
       if (!order) { setStatus("Order not found in the current table.", "error"); return; }
       if (!isCancelableOrder(order)) { setStatus("This order can no longer be canceled.", "warning"); return; }
+      const accountId = state.selectedAccountId;
       try {
         const mutation = await runConfirmedBrokerMutation({
           actionKey: `order-cancel:${orderId}`, button, requestSignature: JSON.stringify({ order_id: orderId, action: "cancel" }), getRequestSignature: () => JSON.stringify({ order_id: orderId, action: "cancel" }), statusElement: els.orderActionStatus,
@@ -349,10 +360,12 @@
         const canceled = mutation.result;
         state.selectedOrderId = canceled.id;
         await reloadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         setSelectedOrder(canceled.id);
         setActionStatus(els.orderActionStatus, `Order ${canceled.symbol} canceled.`, "success");
         setStatus(`Order ${canceled.symbol} canceled.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.orderActionStatus, error.message || "Order cancel failed.", "error");
         setStatus(error.message || "Order cancel failed.", "error");
@@ -363,6 +376,7 @@
       const order = selectedOrder();
       if (!order) { setStatus("Select an order before replacing it.", "warning"); return; }
       if (!isReplaceableOrder(order)) { setStatus("Only working orders can be replaced.", "warning"); return; }
+      const accountId = state.selectedAccountId;
       try {
         const payload = buildReplaceOrderPayload(order);
         const actionKey = `order-replace:${order.id}`;
@@ -376,10 +390,12 @@
         state.selectedOrderId = updated.id;
         els.replaceRemark.value = "";
         await reloadAccountData();
+        if (state.selectedAccountId !== accountId) return { discarded: true };
         setSelectedOrder(updated.id);
         setActionStatus(els.orderActionStatus, `Order ${updated.symbol} updated.`, "success");
         setStatus(`Order ${updated.symbol} updated.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setActionStatus(els.orderActionStatus, error.message || "Order replace failed.", "error");
         setStatus(error.message || "Order replace failed.", "error");
@@ -389,6 +405,8 @@
     async function submitJournalEntry() {
       const order = selectedOrder();
       if (!order) { setStatus("Select an order before saving a journal entry.", "warning"); return; }
+      const accountId = state.selectedAccountId;
+      const accountLoadGeneration = state.accountLoadGeneration;
       try {
         const title = els.journalTitle.value.trim();
         const notes = els.journalNotes.value.trim();
@@ -398,6 +416,7 @@
         const payload = { external_account_id: order.external_account_id, symbol: order.symbol, entry_type: els.journalEntryType.value, title, notes, order_id: order.id, trade_plan_id: order.trade_plan_id, execution_id: execution?.id || null, tags: parseTags(els.journalTags.value) };
         setStatus(`Saving ${payload.entry_type} entry for ${order.symbol}...`, "warning");
         const created = await fetchJson("/journals", { method: "POST", body: JSON.stringify(payload) });
+        if (state.selectedAccountId !== accountId || state.accountLoadGeneration !== accountLoadGeneration) return { discarded: true };
         state.journals = [created, ...(state.journals || []).filter((entry) => entry.id !== created.id)];
         state.selectedOrderJournals = [created, ...(state.selectedOrderJournals || []).filter((entry) => entry.id !== created.id)];
         els.journalTitle.value = "";
@@ -406,6 +425,7 @@
         renderSelectedJournal();
         setStatus(`Journal entry saved for ${created.symbol}.`, "success");
       } catch (error) {
+        if (state.selectedAccountId !== accountId) return { discarded: true, error };
         console.error(error);
         setStatus(error.message || "Journal entry save failed.", "error");
       }

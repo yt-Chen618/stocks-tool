@@ -15,6 +15,10 @@
     const strategyStatusClass = formatter.strategyStatusClass || (() => "neutral");
     let requestGeneration = 0;
 
+    function isCurrentAccountContext(accountId, accountLoadGeneration) {
+      return accountId === state.selectedAccountId && accountLoadGeneration === state.accountLoadGeneration;
+    }
+
     function objectPayload(value) {
       return value && typeof value === "object" && !Array.isArray(value) ? value : {};
     }
@@ -231,11 +235,12 @@
         return;
       }
       const generation = ++requestGeneration;
+      const accountLoadGeneration = state.accountLoadGeneration;
       state.advisorStatus = createOverlayStatus("loading", `Loading advisor context for ${accountId}...`);
       renderAdvisorPanel();
       try {
         const context = await fetchJson(`/strategies/advisor-context?external_account_id=${encodeURIComponent(accountId)}&mode=paper&limit=10`);
-        if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
+        if (generation !== requestGeneration || !isCurrentAccountContext(accountId, accountLoadGeneration)) return { discarded: true };
         state.advisorContext = context;
         state.advisorDraft = null;
         const summary = objectPayload(context.covered_call_activity?.summary);
@@ -244,7 +249,7 @@
         setStatus(`Advisor context loaded for ${accountId}.`, "success");
         return { discarded: false, context };
       } catch (error) {
-        if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
+        if (generation !== requestGeneration || !isCurrentAccountContext(accountId, accountLoadGeneration)) return { discarded: true };
         console.error(error);
         state.advisorStatus = createOverlayStatus("error", error.message || "Advisor context load failed.");
         renderAdvisorPanel();
@@ -260,6 +265,7 @@
         return;
       }
       const generation = ++requestGeneration;
+      const accountLoadGeneration = state.accountLoadGeneration;
       state.advisorStatus = createOverlayStatus("loading", `Running DeepSeek advisor dry-run for ${accountId}...`, "This sends the selected account advisor context to DeepSeek.");
       renderAdvisorPanel();
       try {
@@ -268,7 +274,7 @@
           body: JSON.stringify({ external_account_id: accountId, context_limit: 10 }),
           timeoutMs: 180000,
         });
-        if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
+        if (generation !== requestGeneration || !isCurrentAccountContext(accountId, accountLoadGeneration)) return { discarded: true };
         state.advisorContext = result.context || null;
         state.advisorDraft = result;
         if (result.advisor_run) upsertAdvisorRun(result.advisor_run);
@@ -280,7 +286,7 @@
         setStatus(`DeepSeek dry-run generated ${proposalCount} proposal(s) and ${reviewCount} review(s).`, "success");
         return { discarded: false, result };
       } catch (error) {
-        if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
+        if (generation !== requestGeneration || !isCurrentAccountContext(accountId, accountLoadGeneration)) return { discarded: true };
         console.error(error);
         state.advisorStatus = createOverlayStatus("error", error.message || "DeepSeek advisor dry-run failed.");
         renderAdvisorPanel();
@@ -299,15 +305,17 @@
       }
       const accountId = state.selectedAccountId;
       const generation = ++requestGeneration;
+      const accountLoadGeneration = state.accountLoadGeneration;
       state.advisorStatus = createOverlayStatus("loading", "Recording advisor output to the local strategy ledger...");
       renderAdvisorPanel();
       try {
         const result = await fetchJson("/strategies/advisor/responses", { method: "POST", body: JSON.stringify(payload) });
-        if (generation !== requestGeneration || accountId !== state.selectedAccountId) return { discarded: true };
+        if (generation !== requestGeneration || !isCurrentAccountContext(accountId, accountLoadGeneration)) return { discarded: true };
         if (result.advisor_run) upsertAdvisorRun(result.advisor_run);
         state.advisorDraft = null;
         state.advisorStatus = createOverlayStatus("live", `Recorded ${proposalCount} advisor proposal(s) and ${reviewCount} review(s).`, "Broker orders were not submitted.");
         if (typeof reloadAccountData === "function") await reloadAccountData();
+        if (accountId !== state.selectedAccountId) return { discarded: true };
         renderAdvisorPanel();
         setStatus(`Recorded advisor output: ${proposalCount} proposal(s), ${reviewCount} review(s).`, "success");
         return { discarded: false, result };
