@@ -306,6 +306,35 @@ def test_finish_passed_rejects_failed_child(tmp_path: Path) -> None:
         runner.finish("passed")
 
 
+@pytest.mark.parametrize("failures", [2, 3])
+def test_atomic_snapshot_retries_windows_sharing_conflicts_only_twice(tmp_path: Path, monkeypatch, failures: int) -> None:
+    path = tmp_path / "state.json"
+    path.write_text('{"status":"old"}', encoding="utf-8")
+    actual_replace = common.os.replace
+    attempts = []
+
+    def sharing_conflict(source, target):
+        attempts.append(1)
+        assert json.loads(path.read_text(encoding="utf-8"))["status"] == "old"
+        if len(attempts) <= failures:
+            error = PermissionError("Windows sharing conflict")
+            error.winerror = 5
+            raise error
+        actual_replace(source, target)
+
+    monkeypatch.setattr(common.os, "replace", sharing_conflict)
+    monkeypatch.setattr(common.time, "sleep", lambda delay: None)
+    if failures == 3:
+        with pytest.raises(PermissionError):
+            common._atomic_write_json(path, {"status": "new"})
+        assert json.loads(path.read_text(encoding="utf-8"))["status"] == "old"
+    else:
+        common._atomic_write_json(path, {"status": "new"})
+        assert json.loads(path.read_text(encoding="utf-8"))["status"] == "new"
+    assert len(attempts) == 3
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_unknown_owner_probe_blocks_resume_without_os_lock(tmp_path: Path, monkeypatch) -> None:
     evidence_dir = tmp_path / "evidence"
     source = _source_root(tmp_path)

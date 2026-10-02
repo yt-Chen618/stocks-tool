@@ -426,7 +426,16 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        # Windows readers and sync/antivirus tools can briefly deny replacement.
+        # Keep the old snapshot intact and retry the same atomic rename twice.
+        for attempt in range(3):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as error:
+                if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 2:
+                    raise
+                time.sleep((0.05, 0.2)[attempt])
     finally:
         if temporary.exists():
             temporary.unlink()
