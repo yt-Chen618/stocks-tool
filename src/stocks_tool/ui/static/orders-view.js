@@ -8,6 +8,7 @@
     decodeCursorPage,
     reloadAccountData,
     loadActivityPage,
+    loadSelectedOrderDetails,
     ensureSelectedOrderDetail,
     runConfirmedBrokerMutation,
     setStatus,
@@ -71,61 +72,11 @@
       state.selectedOrderDetailLoading = true;
       state.selectedOrderDetailError = null;
       renderSelectedOrder();
-      const requests = [
-        fetchJson(`/orders/${encodeURIComponent(orderId)}`),
-        fetchJson(`/executions/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${PAGE_SIZE}`),
-        fetchJson(`/journals/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${PAGE_SIZE}`),
-      ];
-      const settled = await Promise.allSettled(requests);
-      if (generation !== detailGeneration || accountId !== state.selectedAccountId || orderId !== state.selectedOrderId) {
-        return { discarded: true };
-      }
-      const [orderResult, executionsResult, journalsResult] = settled;
-      const failures = [];
-      if (orderResult.status === "fulfilled") {
-        const detail = orderResult.value;
-        if (detail.external_account_id === accountId && detail.id === orderId) {
-          state.selectedOrderDetail = detail;
-          const rowIndex = state.orders.findIndex((order) => order.id === detail.id);
-          if (rowIndex >= 0) {
-            state.orders[rowIndex] = detail;
-          }
-        } else {
-          state.selectedOrderDetail = null;
-          failures.push("order");
-        }
-      }
-      if (executionsResult.status === "fulfilled") {
-        try {
-          const page = normalizePagePayload(executionsResult.value);
-          state.selectedOrderExecutions = page.items;
-          state.selectedOrderExecutionPage = { cursor: page.cursor, hasMore: page.hasMore, loading: false };
-        } catch (_error) {
-          failures.push("executions");
-          state.selectedOrderExecutionPage = { cursor: null, hasMore: false, loading: false };
-        }
-      } else {
-        failures.push("executions");
-      }
-      if (journalsResult.status === "fulfilled") {
-        try {
-          const page = normalizePagePayload(journalsResult.value);
-          state.selectedOrderJournals = page.items;
-          state.selectedOrderJournalPage = { cursor: page.cursor, hasMore: page.hasMore, loading: false };
-        } catch (_error) {
-          failures.push("journals");
-          state.selectedOrderJournalPage = { cursor: null, hasMore: false, loading: false };
-        }
-      } else {
-        failures.push("journals");
-      }
-      if (orderResult.status !== "fulfilled") failures.push("order");
-      state.selectedOrderDetailOrderId = orderId;
-      state.selectedOrderDetailLoading = false;
-      state.selectedOrderDetailError = failures.length ? `Detail unavailable: ${failures.join(", ")}.` : null;
+      const result = await loadSelectedOrderDetails(orderId);
+      if (generation !== detailGeneration || result?.discarded) return { discarded: true };
       renderOrders();
       renderSelectedOrder();
-      return { discarded: false, failures };
+      return { discarded: false, failures: result?.failures || [] };
     }
 
     async function loadMoreOrders() {

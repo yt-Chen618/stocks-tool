@@ -33,6 +33,11 @@
       return { cursor: null, hasMore: false, loading: false, error: null };
     }
 
+    function currentAccountUnknownLocks(accountId) {
+      const locks = state.unknownMutationLocks?.[accountId];
+      return Array.isArray(locks) ? locks : [];
+    }
+
     function ensureActivityPages() {
       state.activityPages ||= {};
       for (const key of ["orders", "executions", "journals"]) {
@@ -178,7 +183,7 @@
       try {
         const response = await fetchJson(activityUrl(kind, accountId, { cursor, orderId }));
         if (loadGeneration !== state.accountLoadGeneration || accountId !== state.selectedAccountId) {
-          return { discarded: true, page: normalizePagePayload(response) };
+          return { discarded: true };
         }
         const page = setActivityPage(kind, response, { append });
         return { discarded: false, page };
@@ -346,10 +351,93 @@
       return { discarded: false, detail };
     }
 
+    const selectedOrderDetailRequestCache = new Map();
+
+    function selectedOrderDetailCacheKey(accountId, loadGeneration, orderId) {
+      return `${accountId}::${loadGeneration}::${orderId}`;
+    }
+
+    async function loadSelectedOrderDetails(orderId, { accountId = state.selectedAccountId, previousOrder = null } = {}) {
+      if (!orderId || !accountId) return { discarded: false, order: null, failures: [] };
+      const loadGeneration = state.accountLoadGeneration;
+      const cacheKey = selectedOrderDetailCacheKey(accountId, loadGeneration, orderId);
+      let request = selectedOrderDetailRequestCache.get(cacheKey);
+      if (!request) {
+        request = (async () => {
+          const results = await Promise.allSettled([
+            fetchJson(`/orders/${encodeURIComponent(orderId)}`),
+            fetchJson(`/executions/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
+            fetchJson(`/journals/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
+          ]);
+          const failures = [];
+          let order = null;
+          let executionsPage = null;
+          let journalsPage = null;
+          const [orderResult, executionsResult, journalsResult] = results;
+          if (orderResult.status === "fulfilled") {
+            const detail = orderResult.value;
+            if (detail?.id === orderId && detail.external_account_id === accountId) {
+              order = detail;
+            } else {
+              failures.push("order");
+            }
+          } else {
+            failures.push("order");
+          }
+          if (executionsResult.status === "fulfilled") {
+            try {
+              executionsPage = normalizePagePayload(executionsResult.value);
+            } catch (_error) {
+              failures.push("executions");
+            }
+          } else {
+            failures.push("executions");
+          }
+          if (journalsResult.status === "fulfilled") {
+            try {
+              journalsPage = normalizePagePayload(journalsResult.value);
+            } catch (_error) {
+              failures.push("journals");
+            }
+          } else {
+            failures.push("journals");
+          }
+          return { order, executionsPage, journalsPage, failures };
+        })();
+        selectedOrderDetailRequestCache.set(cacheKey, request);
+      }
+      state.selectedOrderDetailLoading = true;
+      state.selectedOrderDetailError = null;
+      const result = await request;
+      if (!isCurrentScope(accountId, loadGeneration) || orderId !== state.selectedOrderId) {
+        return { ...result, discarded: true };
+      }
+      let order = result.order;
+      if (!order && previousOrder?.id === orderId && previousOrder.external_account_id === accountId) {
+        order = previousOrder;
+      }
+      if (order) {
+        state.selectedOrderDetail = order;
+        const rowIndex = state.orders.findIndex((candidate) => candidate.id === orderId);
+        if (rowIndex >= 0) state.orders[rowIndex] = order;
+      }
+      if (result.executionsPage) {
+        state.selectedOrderExecutions = result.executionsPage.items;
+        state.selectedOrderExecutionPage = { cursor: result.executionsPage.cursor, hasMore: result.executionsPage.hasMore, loading: false };
+      }
+      if (result.journalsPage) {
+        state.selectedOrderJournals = result.journalsPage.items;
+        state.selectedOrderJournalPage = { cursor: result.journalsPage.cursor, hasMore: result.journalsPage.hasMore, loading: false };
+      }
+      state.selectedOrderDetailOrderId = orderId;
+      state.selectedOrderDetailLoading = false;
+      state.selectedOrderDetailError = result.failures.length ? `Detail unavailable: ${result.failures.join(", ")}.` : null;
+      return { ...result, discarded: false, order };
+    }
+
     async function ensureSelectedOrderDetail(previousOrder = null) {
       const selectedId = state.selectedOrderId;
       const accountId = state.selectedAccountId;
-      const loadGeneration = state.accountLoadGeneration;
       if (!selectedId) {
         return null;
       }
@@ -357,39 +445,12 @@
       if (existing) {
         return existing;
       }
-      try {
-        const detail = await fetchJson(`/orders/${encodeURIComponent(selectedId)}`);
-        if (loadGeneration !== state.accountLoadGeneration || accountId !== state.selectedAccountId || selectedId !== state.selectedOrderId) {
-          return null;
-        }
-        if (accountId && detail?.external_account_id !== accountId) {
-          throw new Error("Selected order belongs to a different broker account.");
-        }
-        state.selectedOrderDetail = detail;
-        state.selectedOrderDetailOrderId = selectedId;
-        const rowIndex = state.orders.findIndex((order) => order.id === selectedId);
-        if (rowIndex >= 0) {
-          state.orders[rowIndex] = detail;
-        }
-        return detail;
-      } catch (error) {
-        if (loadGeneration !== state.accountLoadGeneration || accountId !== state.selectedAccountId || selectedId !== state.selectedOrderId) {
-          return null;
-        }
-        if (previousOrder?.id === selectedId && previousOrder.external_account_id === accountId) {
-          state.selectedOrderDetail = previousOrder;
-          state.selectedOrderDetailOrderId = selectedId;
-          state.selectedOrderDetailError = error?.message || "Selected order detail unavailable.";
-          return previousOrder;
-        }
-        state.selectedOrderId = "";
-        state.selectedOrderDetail = null;
-        state.selectedOrderDetailError = error?.message || "Selected order detail unavailable.";
-        return null;
-      }
+      const result = await loadSelectedOrderDetails(selectedId, { accountId, previousOrder });
+      return result?.order || null;
     }
 
     function resetSelectedAccountState() {
+      state.accountContextId = "";
       state.orders = [];
       state.spreads = [];
       state.bullPutHistory = [];
@@ -423,6 +484,10 @@
       state.selectedOrderId = "";
       state.selectedOrderDetail = null;
       state.selectedOrderDetailError = null;
+      state.selectedOrderExecutions = [];
+      state.selectedOrderJournals = [];
+      state.selectedOrderExecutionPage = { cursor: null, hasMore: false, loading: false };
+      state.selectedOrderJournalPage = { cursor: null, hasMore: false, loading: false };
       state.preOpenAssessment = null;
       state.preOpenStatus = createOverlayStatus("idle", "Select a broker account to load the macro board on demand.");
       state.activityPages = {
@@ -430,6 +495,7 @@
         executions: emptyActivityPage(),
         journals: emptyActivityPage(),
       };
+      state.selectedOrderDetailLoading = false;
       state.bullPutHistoryPage = emptyBullPutHistoryPage();
       state.bullPutHistory = [];
       state.bullPutHistoryDetails = {};
@@ -444,17 +510,134 @@
       renderRecoveryStatus?.(null);
     }
 
+    function mergeSettledResults(requestSpecs, settled, values, errors) {
+      settled.forEach((result, index) => {
+        const [key] = requestSpecs[index];
+        if (result.status === "fulfilled") {
+          values[key] = result.value;
+        } else {
+          console.error(result.reason);
+          errors[key] = result.reason?.message || "Request failed.";
+        }
+      });
+    }
+
+    function applyLoadedValues(values, errors, selectedAccountId) {
+      if (values.latestSnapshot === null || values.operatorStatus === null) {
+        for (const key of ["latestSnapshot", "operatorStatus"]) {
+          if (values[key] === null) {
+            delete values[key];
+            errors[key] = "Required account data was empty.";
+          }
+        }
+      }
+      if ("recoveryStatus" in values) {
+        const recovery = objectPayload(values.recoveryStatus);
+        if (
+          recovery.external_account_id !== selectedAccountId ||
+          recovery.mode !== "paper" ||
+          typeof recovery.recovery_blocked !== "boolean" ||
+          !recovery.status
+        ) {
+          delete values.recoveryStatus;
+          errors.recoveryStatus = "Recovery status did not match the selected paper account.";
+        } else {
+          state.recoveryStatus = recovery;
+          state.recoveryStatusState = "ready";
+        }
+      }
+      for (const kind of ["orders", "executions", "journals"]) {
+        if (!(kind in values)) continue;
+        try {
+          setActivityPage(kind, values[kind]);
+        } catch (error) {
+          errors[kind] = error?.message || "Paged activity response was invalid.";
+          state.activityPages[kind] = { ...emptyActivityPage(), error: errors[kind] };
+          if (kind === "orders") state.orders = [];
+          if (kind === "executions") state.executions = [];
+          if (kind === "journals") state.journals = [];
+        }
+      }
+      if ("workingSpreads" in values) {
+        try {
+          state.spreads = assertScopedSpreadList(values.workingSpreads, selectedAccountId);
+        } catch (error) {
+          errors.workingSpreads = error?.message || "Working Bull Put response was invalid.";
+          state.spreads = [];
+        }
+      }
+      if ("spreadHistory" in values) {
+        try {
+          setBullPutHistoryPage(values.spreadHistory, { accountId: selectedAccountId });
+        } catch (error) {
+          errors.spreadHistory = error?.message || "Bull Put history response was invalid.";
+          state.bullPutHistory = [];
+          state.bullPutHistoryPage = { ...emptyBullPutHistoryPage(), error: errors.spreadHistory };
+        }
+      }
+      if ("runtime" in values) state.runtime = values.runtime;
+      if ("operatorStatus" in values) state.operatorStatus = values.operatorStatus;
+      if ("tradingIntents" in values && "tradeActions" in values) {
+        const unresolvedStates = new Set(["prepared", "submitting", "broker_acknowledged", "unknown"]);
+        const backendUnresolved = [
+          ...(Array.isArray(values.tradingIntents) ? values.tradingIntents : []),
+          ...(Array.isArray(values.tradeActions) ? values.tradeActions : []),
+        ].filter((intent) => unresolvedStates.has(intent?.state));
+        const localUnknown = currentAccountUnknownLocks(selectedAccountId);
+        state.unresolvedTradingIntents = [
+          ...localUnknown,
+          ...backendUnresolved.filter((intent) => !localUnknown.some((candidate) => candidate.id === intent.id)),
+        ];
+      }
+      if ("latestSnapshot" in values) state.latestSnapshot = values.latestSnapshot;
+      if ("zeroDteLotteryRuntime" in values) state.zeroDteLotteryRuntime = values.zeroDteLotteryRuntime;
+      if ("strategyExperiment" in values) state.strategyExperiment = values.strategyExperiment || { ...EMPTY_EXPERIMENT };
+      if ("coveredCallActivity" in values) state.coveredCallActivity = values.coveredCallActivity || { ...EMPTY_COVERED_CALL };
+      if ("advisorRuns" in values) state.advisorRuns = Array.isArray(values.advisorRuns) ? values.advisorRuns : [];
+      if ("marketEvents" in values) state.marketEvents = Array.isArray(values.marketEvents) ? values.marketEvents : [];
+      if ("preOpenRuns" in values) state.preOpenRuns = Array.isArray(values.preOpenRuns) ? values.preOpenRuns : [];
+    }
+
+    function loadFailures(requestSpecs, errors, required) {
+      return requestSpecs
+        .filter(([, isRequired]) => isRequired === required)
+        .map(([key]) => errors[key] ? formatPanelLoadLabel?.(key) || key : null)
+        .filter(Boolean);
+    }
+
     async function loadAccountData() {
       const loadGeneration = ++state.accountLoadGeneration;
       const selectedAccountId = state.selectedAccountId;
+      selectedOrderDetailRequestCache.clear();
+      const accountChanged = Boolean(state.accountContextId && state.accountContextId !== selectedAccountId);
+      if (accountChanged) {
+        state.selectedOrderId = "";
+        state.selectedOrderDetailOrderId = "";
+        state.selectedOrderDetail = null;
+        state.selectedOrderDetailError = null;
+        state.orders = [];
+        state.runtime = null;
+        state.latestSnapshot = null;
+        state.operatorStatus = null;
+        state.strategyExperiment = { ...EMPTY_EXPERIMENT };
+        state.coveredCallActivity = { ...EMPTY_COVERED_CALL };
+        state.advisorRuns = [];
+        state.marketEvents = [];
+        state.executions = [];
+        state.journals = [];
+        state.preOpenRuns = [];
+        state.zeroDteLotteryRuntime = null;
+      }
+      state.accountContextId = selectedAccountId;
       const previousOrder = state.orders.find((order) => order.id === state.selectedOrderId) || null;
       state.activityPages = {
         orders: emptyActivityPage(),
         executions: emptyActivityPage(),
         journals: emptyActivityPage(),
       };
-      state.spreads = [];
+      if (accountChanged) state.spreads = [];
       state.recoverCloseEligibility = {};
+      state.unresolvedTradingIntents = [];
       if (state.bullPutLastActionDetail?.accountId !== selectedAccountId) {
         state.bullPutLastActionDetail = null;
       }
@@ -495,132 +678,64 @@
         ["journals", false, activityUrl("journals", selectedAccountId)],
         ["preOpenRuns", false, `/strategies/pre-open-runs?external_account_id=${accountId}&limit=1`],
       ];
-      const settled = await Promise.allSettled(requestSpecs.map(([, , url]) => fetchJson(url)));
+      const requiredSpecs = requestSpecs.filter(([, required]) => required);
+      const optionalSpecs = requestSpecs.filter(([, required]) => !required);
+      const requiredPromise = Promise.allSettled(requiredSpecs.map(([, , url]) => fetchJson(url)));
+      const optionalPromise = Promise.allSettled(optionalSpecs.map(([, , url]) => fetchJson(url)));
       const values = {};
       const errors = {};
-      settled.forEach((result, index) => {
-        const [key] = requestSpecs[index];
-        if (result.status === "fulfilled") {
-          values[key] = result.value;
-        } else {
-          console.error(result.reason);
-          errors[key] = result.reason?.message || "Request failed.";
+
+      const applyStage = async (specs, settled) => {
+        if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
+          return { discarded: true };
         }
-      });
-      if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
+        mergeSettledResults(specs, settled, values, errors);
+        applyLoadedValues(values, errors, selectedAccountId);
+        const requiredFailures = loadFailures(requestSpecs, errors, true);
+        const optionalFailures = loadFailures(requestSpecs, errors, false);
+        state.coreDataHealthy = state.accountListHealthy && requiredFailures.length === 0;
+        state.coreLoadFailures = requiredFailures;
+        state.panelLoadErrors = { ...errors };
+        state.selectedOrderDetailError = null;
+        if (state.orders.some((order) => order.id === state.selectedOrderId)) {
+          state.selectedOrderDetail = state.orders.find((order) => order.id === state.selectedOrderId) || null;
+          state.selectedOrderDetailOrderId = state.selectedOrderId;
+          state.selectedOrderDetailLoading = false;
+        } else if (state.selectedOrderId) {
+          await ensureSelectedOrderDetail(previousOrder);
+        }
+        if (!state.selectedOrderId) {
+          state.selectedOrderId = state.orders[0]?.id || "";
+          state.selectedOrderDetail = state.orders[0] || null;
+          state.selectedOrderDetailOrderId = state.selectedOrderId;
+          state.selectedOrderDetailLoading = false;
+        }
+        renderAccountState?.({ errors, values, requiredFailures, optionalFailures });
+        if ("recoveryStatus" in values && !errors.recoveryStatus) {
+          renderRecoveryStatus?.(state.recoveryStatus);
+        } else if (errors.recoveryStatus) {
+          state.recoveryStatus = null;
+          state.recoveryStatusState = "error";
+          renderRecoveryError?.(new Error(errors.recoveryStatus));
+        }
+        updateSyncButtons?.();
+        updateOrderTicketAvailability?.();
+        updatePreOpenButtons?.();
+        applyTradingSafetyState?.();
+        return { discarded: false, coreHealthy: state.coreDataHealthy, requiredFailures, optionalFailures };
+      };
+
+      const requiredSettled = await requiredPromise;
+      const requiredResult = await applyStage(requiredSpecs, requiredSettled);
+      if (requiredResult.discarded) {
         return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
       }
-      if (values.latestSnapshot === null || values.operatorStatus === null) {
-        for (const key of ["latestSnapshot", "operatorStatus"]) {
-          if (values[key] === null) {
-            delete values[key];
-            errors[key] = "Required account data was empty.";
-          }
-        }
+      const optionalSettled = await optionalPromise;
+      const finalResult = await applyStage(optionalSpecs, optionalSettled);
+      if (finalResult.discarded) {
+        return { coreHealthy: state.coreDataHealthy, requiredFailures: [], optionalFailures: [], discarded: true };
       }
-
-      if ("recoveryStatus" in values) {
-        const recovery = objectPayload(values.recoveryStatus);
-        if (
-          recovery.external_account_id !== selectedAccountId ||
-          recovery.mode !== "paper" ||
-          typeof recovery.recovery_blocked !== "boolean" ||
-          !recovery.status
-        ) {
-          delete values.recoveryStatus;
-          errors.recoveryStatus = "Recovery status did not match the selected paper account.";
-        } else {
-          state.recoveryStatus = recovery;
-          state.recoveryStatusState = "ready";
-        }
-      }
-
-      for (const kind of ["orders", "executions", "journals"]) {
-        if (!(kind in values)) continue;
-        try {
-          setActivityPage(kind, values[kind]);
-        } catch (error) {
-          errors[kind] = error?.message || "Paged activity response was invalid.";
-          state.activityPages[kind] = { ...emptyActivityPage(), error: errors[kind] };
-          if (kind === "orders") state.orders = [];
-          if (kind === "executions") state.executions = [];
-          if (kind === "journals") state.journals = [];
-        }
-      }
-      if ("workingSpreads" in values) {
-        try {
-          state.spreads = assertScopedSpreadList(values.workingSpreads, selectedAccountId);
-        } catch (error) {
-          errors.workingSpreads = error?.message || "Working Bull Put response was invalid.";
-          state.spreads = [];
-        }
-      }
-      if ("spreadHistory" in values) {
-        try {
-          setBullPutHistoryPage(values.spreadHistory, { accountId: selectedAccountId });
-        } catch (error) {
-          errors.spreadHistory = error?.message || "Bull Put history response was invalid.";
-          state.bullPutHistory = [];
-          state.bullPutHistoryPage = { ...emptyBullPutHistoryPage(), error: errors.spreadHistory };
-        }
-      }
-      if ("runtime" in values) state.runtime = values.runtime;
-      if ("operatorStatus" in values) state.operatorStatus = values.operatorStatus;
-      if ("tradingIntents" in values && "tradeActions" in values) {
-        const unresolvedStates = new Set(["prepared", "submitting", "broker_acknowledged", "unknown"]);
-        state.unresolvedTradingIntents = [
-          ...(Array.isArray(values.tradingIntents) ? values.tradingIntents : []),
-          ...(Array.isArray(values.tradeActions) ? values.tradeActions : []),
-        ].filter((intent) => unresolvedStates.has(intent?.state));
-      }
-      if ("latestSnapshot" in values) state.latestSnapshot = values.latestSnapshot;
-      if ("zeroDteLotteryRuntime" in values) state.zeroDteLotteryRuntime = values.zeroDteLotteryRuntime;
-      if ("strategyExperiment" in values) state.strategyExperiment = values.strategyExperiment || { ...EMPTY_EXPERIMENT };
-      if ("coveredCallActivity" in values) state.coveredCallActivity = values.coveredCallActivity || { ...EMPTY_COVERED_CALL };
-      if ("advisorRuns" in values) state.advisorRuns = Array.isArray(values.advisorRuns) ? values.advisorRuns : [];
-      if ("marketEvents" in values) state.marketEvents = Array.isArray(values.marketEvents) ? values.marketEvents : [];
-      if ("preOpenRuns" in values) state.preOpenRuns = Array.isArray(values.preOpenRuns) ? values.preOpenRuns : [];
-
-      const requiredFailures = requestSpecs
-        .filter(([key, required]) => required && errors[key])
-        .map(([key]) => formatPanelLoadLabel?.(key) || key);
-      const optionalFailures = requestSpecs
-        .filter(([key, required]) => !required && errors[key])
-        .map(([key]) => formatPanelLoadLabel?.(key) || key);
-      state.coreDataHealthy = state.accountListHealthy && requiredFailures.length === 0;
-      state.coreLoadFailures = requiredFailures;
-      state.panelLoadErrors = errors;
-      state.selectedOrderDetailError = null;
-
-      if ("preOpenRuns" in values) {
-        // The page owns the presentation of the latest stored run.
-        state.preOpenRuns = Array.isArray(values.preOpenRuns) ? values.preOpenRuns : [];
-      }
-      if (state.orders.some((order) => order.id === state.selectedOrderId)) {
-        state.selectedOrderDetail = state.orders.find((order) => order.id === state.selectedOrderId) || null;
-        state.selectedOrderDetailOrderId = state.selectedOrderId;
-      } else if (state.selectedOrderId) {
-        await ensureSelectedOrderDetail(previousOrder);
-      }
-      if (!state.selectedOrderId) {
-        state.selectedOrderId = state.orders[0]?.id || "";
-        state.selectedOrderDetail = state.orders[0] || null;
-        state.selectedOrderDetailOrderId = state.selectedOrderId;
-      }
-
-      renderAccountState?.({ errors, values, requiredFailures, optionalFailures });
-      if ("recoveryStatus" in values && !errors.recoveryStatus) {
-        renderRecoveryStatus?.(state.recoveryStatus);
-      } else if (errors.recoveryStatus) {
-        state.recoveryStatus = null;
-        state.recoveryStatusState = "error";
-        renderRecoveryError?.(new Error(errors.recoveryStatus));
-      }
-      updateSyncButtons?.();
-      updateOrderTicketAvailability?.();
-      updatePreOpenButtons?.();
-      applyTradingSafetyState?.();
-      return { coreHealthy: state.coreDataHealthy, requiredFailures, optionalFailures, discarded: false };
+      return finalResult;
     }
 
     async function refreshAccounts() {
@@ -667,6 +782,7 @@
       loadBullPutHistoryPage,
       loadSpreadDetail,
       loadSpreadEligibility,
+      loadSelectedOrderDetails,
       refreshSpread,
       monitorSpread,
       recoverCloseSpread,

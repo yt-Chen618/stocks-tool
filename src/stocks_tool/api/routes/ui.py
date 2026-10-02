@@ -30,6 +30,7 @@ def render_dashboard() -> HTMLResponse:
     watchlist_view_js_url = _asset_url("watchlist-view.js")
     account_loader_js_url = _asset_url("account-loader.js")
     bull_put_view_js_url = _asset_url("bull-put-view.js")
+    strategy_view_js_url = _asset_url("strategy-view.js")
     advisor_view_js_url = _asset_url("advisor-view.js")
     orders_view_js_url = _asset_url("orders-view.js")
     operations_recovery_js_url = _asset_url("operations-recovery-view.js")
@@ -1124,6 +1125,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{watchlist_view_js_url}" defer></script>
                 <script src="{account_loader_js_url}" defer></script>
                 <script src="{bull_put_view_js_url}" defer></script>
+                <script src="{strategy_view_js_url}" defer></script>
                 <script src="{advisor_view_js_url}" defer></script>
                 <script src="{orders_view_js_url}" defer></script>
                 <script src="{operations_recovery_js_url}" defer></script>

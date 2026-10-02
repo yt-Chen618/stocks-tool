@@ -78,6 +78,8 @@ def test_account_loader_discards_stale_detail_and_page_success_or_error() -> Non
         state.selectedAccountId = "B";
         state.accountLoadGeneration = 2;
         pending.shift().resolve({id: "old-order", external_account_id: "A"});
+        pending.shift().resolve({items: [], next_cursor: null, has_more: false, limit: 25});
+        pending.shift().resolve({items: [], next_cursor: null, has_more: false, limit: 25});
         await detailRace;
         const detailDiscarded = state.selectedOrderDetail === undefined || state.selectedOrderDetail === null;
 
@@ -105,3 +107,107 @@ def test_account_loader_discards_stale_detail_and_page_success_or_error() -> Non
         ''',
     )
     assert result == {"detailDiscarded": True, "successDiscarded": True, "errorDiscarded": True}
+
+
+def test_account_loader_deduplicates_selected_order_request_set() -> None:
+    result = run_node(
+        r'''
+        (async () => {
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = {};
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/api-client.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/account-loader.js", "utf8"));
+        const state = {
+          selectedAccountId: "A", accountLoadGeneration: 1, selectedOrderId: "order-1", orders: [],
+          activityPages: {orders: {}, executions: {}, journals: {}},
+          selectedOrderExecutions: [], selectedOrderJournals: [],
+          selectedOrderExecutionPage: {}, selectedOrderJournalPage: {},
+        };
+        const pending = [];
+        let calls = 0;
+        const fetchJson = (url) => new Promise((resolve, reject) => {
+          calls += 1;
+          pending.push({url, resolve, reject});
+        });
+        const loader = window.StocksToolAccountLoader.createAccountLoader({
+          state, fetchJson, decodeCursorPage: window.StocksToolApiClient.decodeCursorPage,
+          createOverlayStatus: () => ({}), formatPanelLoadLabel: (key) => key,
+          renderAccountOptions() {}, renderEmptyState() {}, renderAccountState() {},
+          applyTradingSafetyState() {}, updateSyncButtons() {}, updateOrderTicketAvailability() {}, updatePreOpenButtons() {},
+        });
+        const first = loader.loadSelectedOrderDetails("order-1");
+        const second = loader.loadSelectedOrderDetails("order-1");
+        pending.shift().resolve({id: "order-1", external_account_id: "A"});
+        pending.shift().resolve({items: [{id: "fill-1", order_id: "order-1"}], next_cursor: null, has_more: false, limit: 25});
+        pending.shift().resolve({items: [{id: "journal-1", order_id: "order-1"}], next_cursor: null, has_more: false, limit: 25});
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+        process.stdout.write(JSON.stringify({calls, first: firstResult.order?.id, second: secondResult.order?.id}));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        ''',
+    )
+    assert result == {"calls": 3, "first": "order-1", "second": "order-1"}
+
+
+def test_account_loader_renders_required_core_before_slow_auxiliary_panels() -> None:
+    result = run_node(
+        r'''
+        (async () => {
+        const fs = require("fs");
+        const vm = require("vm");
+        global.window = {};
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/api-client.js", "utf8"));
+        vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/account-loader.js", "utf8"));
+        const state = {
+          selectedAccountId: "A", accountLoadGeneration: 0, accountContextId: "",
+          accountListHealthy: true, selectedOrderId: "", orders: [], spreads: [], bullPutHistory: [],
+          bullPutHistoryPage: {cursor: null, hasMore: false, loading: false, error: null},
+          bullPutHistoryDetails: {}, bullPutHistoryDetailLoading: {}, bullPutHistoryDetailErrors: {},
+          recoverCloseEligibility: {}, unknownMutationLocks: {}, unresolvedTradingIntents: [],
+          activityPages: {orders: {}, executions: {}, journals: {}},
+          selectedOrderExecutions: [], selectedOrderJournals: [], selectedOrderExecutionPage: {}, selectedOrderJournalPage: {},
+        };
+        const slow = [];
+        let renders = 0;
+        const fetchJson = (url) => {
+          if (url.includes("zero-dte") || url.includes("run-cards") || url.includes("market-events") || url.includes("executions/paged") || url.includes("journals/paged") || url.includes("pre-open-runs")) {
+            return new Promise((resolve, reject) => slow.push({url, resolve, reject}));
+          }
+          if (url.includes("account-snapshots/latest")) return Promise.resolve({captured_at: "now", positions: []});
+          if (url.includes("orders/paged")) return Promise.resolve({items: [], next_cursor: null, has_more: false, limit: 25});
+          if (url.includes("working-spreads")) return Promise.resolve([]);
+          if (url.includes("bull-put/runtime")) return Promise.resolve({});
+          if (url.includes("unattended-status")) return Promise.resolve({});
+          if (url.includes("recovery-status")) return Promise.resolve({external_account_id: "A", mode: "paper", recovery_blocked: false, status: "clear"});
+          if (url.includes("trading-intents") || url.includes("trade-actions")) return Promise.resolve([]);
+          if (url.includes("strategies/experiment")) return Promise.resolve({proposals: [], runs: [], signals: [], reviews: []});
+          if (url.includes("covered-call/activity")) return Promise.resolve({summary: {}, proposals: [], runs: [], signals: [], reviews: []});
+          throw new Error(`Unexpected URL ${url}`);
+        };
+        const loader = window.StocksToolAccountLoader.createAccountLoader({
+          state, fetchJson, decodeCursorPage: window.StocksToolApiClient.decodeCursorPage,
+          createOverlayStatus: () => ({}), formatPanelLoadLabel: (key) => key,
+          renderAccountOptions() {}, renderEmptyState() {}, renderAccountState() { renders += 1; },
+          renderRecoveryLoading() {}, renderRecoveryStatus() {}, renderRecoveryError() {},
+          applyTradingSafetyState() {}, updateSyncButtons() {}, updateOrderTicketAvailability() {}, updatePreOpenButtons() {},
+        });
+        const load = loader.loadAccountData();
+        while (renders === 0) await new Promise((resolve) => setImmediate(resolve));
+        const progressive = {renders, coreHealthy: state.coreDataHealthy, recovery: state.recoveryStatusState, slowRequests: slow.length};
+        for (const pending of slow) {
+          if (pending.url.includes("executions/paged") || pending.url.includes("journals/paged")) pending.resolve({items: [], next_cursor: null, has_more: false, limit: 25});
+          else if (pending.url.includes("run-cards")) pending.resolve([]);
+          else if (pending.url.includes("market-events")) pending.resolve([]);
+          else if (pending.url.includes("pre-open-runs")) pending.resolve([]);
+          else pending.resolve({});
+        }
+        await load;
+        process.stdout.write(JSON.stringify({...progressive, finalRenders: renders}));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        ''',
+    )
+    assert result["coreHealthy"] is True
+    assert result["recovery"] == "ready"
+    assert result["slowRequests"] >= 5
+    assert result["renders"] == 1
+    assert result["finalRenders"] >= 2

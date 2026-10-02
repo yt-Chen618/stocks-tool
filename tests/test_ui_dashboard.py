@@ -100,6 +100,7 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert '/static/chart-view.js?v=' in response.text
     assert '/static/research-view.js?v=' in response.text
     assert '/static/watchlist-view.js?v=' in response.text
+    assert '/static/strategy-view.js?v=' in response.text
     assert '/static/execution-drawer.js?v=' in response.text
     assert '/static/workspace-shell.js?v=' in response.text
     assert '/static/app.js?v=' in response.text

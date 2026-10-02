@@ -72,3 +72,82 @@ def test_trading_guard_is_pure_account_mode_recovery_and_pending_gate() -> None:
     assert "request_signature_changed" in result["changed"]
     assert "account_context_changed" in result["generationChanged"]
     assert "business_disabled" in result["businessDisabled"]
+
+
+def test_late_unknown_mutation_keeps_account_scoped_lock_and_idempotency_key() -> None:
+    result = run_node(
+        r'''
+        (async () => {
+          const fs = require("fs");
+          const vm = require("vm");
+          const listeners = [];
+          const storage = new Map();
+          global.window = {
+            crypto: {randomUUID: () => "uuid-a"},
+            innerWidth: 1440,
+            matchMedia: () => ({matches: false, addEventListener() {}}),
+            sessionStorage: {
+              getItem: (key) => storage.get(key) || null,
+              setItem: (key, value) => storage.set(key, value),
+              removeItem: (key) => storage.delete(key),
+            },
+            StocksToolExecution: {setMobileReadonly() {}},
+            StocksToolI18n: {TRANSLATIONS: {}},
+            StocksToolFormatters: {},
+          };
+          global.document = {
+            addEventListener: () => {},
+            querySelectorAll: () => [],
+            body: {},
+          };
+          vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/state.js", "utf8"));
+          vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/trading-safety.js", "utf8"));
+          vm.runInThisContext(fs.readFileSync("src/stocks_tool/ui/static/app.js", "utf8"));
+          state.selectedAccountId = "A";
+          state.accountLoadGeneration = 1;
+          state.coreDataHealthy = true;
+          state.recoveryStatusState = "ready";
+          state.recoveryStatus = {external_account_id: "A", mode: "paper", recovery_blocked: false};
+          const dialog = {
+            returnValue: "confirm",
+            addEventListener: (_name, callback) => listeners.push(callback),
+            showModal: () => queueMicrotask(() => { dialog.returnValue = "confirm"; listeners.splice(0).forEach((callback) => callback()); }),
+          };
+          els.tradeConfirmDialog = dialog;
+          els.tradeConfirmTitle = {textContent: ""};
+          els.tradeConfirmSummary = {textContent: ""};
+          els.tradeConfirmDetails = {innerHTML: ""};
+          els.statusBanner = {textContent: "", className: "", classList: {remove() {}, add() {}}};
+          let rejectOperation;
+          let operationStarted = false;
+          const mutation = runConfirmedBrokerMutation({
+            actionKey: "order-submit",
+            requestSignature: "A-request",
+            confirmation: {title: "test", summary: "test", details: {}},
+            statusElement: null,
+          }, async () => {
+            operationStarted = true;
+            return new Promise((_resolve, reject) => { rejectOperation = reject; });
+          });
+          while (!operationStarted) await new Promise((resolve) => setImmediate(resolve));
+          state.selectedAccountId = "B";
+          state.accountLoadGeneration = 2;
+          rejectOperation({code: "order_outcome_unknown", intentId: "unknown-a"});
+          const outcome = await mutation;
+          process.stdout.write(JSON.stringify({
+            discarded: outcome.discarded === true,
+            currentAccount: state.selectedAccountId,
+            currentUnresolved: state.unresolvedTradingIntents,
+            oldLocks: state.unknownMutationLocks?.A || [],
+            pending: Array.from(state.pendingActionKeys),
+            idempotencyKeys: Array.from(storage.keys()),
+          }));
+        })().catch((error) => { console.error(error); process.exit(1); });
+        ''',
+    )
+    assert result["discarded"] is True
+    assert result["currentAccount"] == "B"
+    assert result["currentUnresolved"] == []
+    assert result["oldLocks"][0]["id"] == "unknown-a"
+    assert result["pending"] == []
+    assert any(key.startswith("stocks-tool-idempotency:A:order-submit") for key in result["idempotencyKeys"])

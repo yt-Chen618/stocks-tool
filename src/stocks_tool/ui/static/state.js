@@ -18,6 +18,7 @@
     return {
       accounts: [],
       selectedAccountId: "",
+      accountContextId: "",
       watchlists: [],
       orders: [],
       spreads: [],
@@ -41,6 +42,7 @@
       recoveryStatus: null,
       recoveryStatusState: "idle",
       unresolvedTradingIntents: [],
+      unknownMutationLocks: {},
       coreDataHealthy: false,
       accountListHealthy: false,
       accountLoadGeneration: 0,
