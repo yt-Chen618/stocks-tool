@@ -304,6 +304,30 @@ def test_process_identity_requires_start_token_to_avoid_pid_reuse() -> None:
     assert not process_identity_matches({"pid": current.pid})
 
 
+def test_fast_child_exit_is_not_a_missing_identity_failure(tmp_path: Path, monkeypatch) -> None:
+    import regression_common
+
+    runner = ObservedRun(tmp_path / "evidence", source_root=_source_root(tmp_path))
+    runner.start()
+    real_probe = regression_common.process_start_identity
+
+    def delayed_probe(pid, **kwargs):
+        if pid != runner.owner.pid:
+            time.sleep(0.2)
+        return real_probe(pid, **kwargs)
+
+    monkeypatch.setattr(regression_common, "process_start_identity", delayed_probe)
+    try:
+        child = runner.run_child({"name": "fast-exit", "command": [sys.executable, "-S", "-c", "pass"]})
+    except BaseException:
+        runner.finish("failed")
+        raise
+    runner.finish("passed")
+    assert child["status"] == "passed"
+    assert child["start_identity"]
+    assert not process_identity_matches(child)
+
+
 @pytest.mark.parametrize("child_runner", [run_p0_child, run_v8_child], ids=["p0", "v8"])
 def test_aggregate_child_report_keeps_legacy_fields_and_adds_stream_evidence(tmp_path: Path, child_runner) -> None:
     evidence_dir = tmp_path / "evidence"

@@ -41,7 +41,7 @@ class ProcessIdentity:
         return {"pid": self.pid, "start_identity": self.start_identity}
 
 
-def _windows_process_start_identity(pid: int) -> str | None:
+def _windows_process_start_identity(pid: int, *, include_exited: bool = False) -> str | None:
     """Return the Windows process creation FILETIME without requiring psutil."""
 
     class FileTime(ctypes.Structure):
@@ -73,7 +73,9 @@ def _windows_process_start_identity(pid: int) -> str | None:
     user_time = FileTime()
     try:
         exit_code = ctypes.c_ulong()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) or exit_code.value != 259:
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return None
+        if not include_exited and exit_code.value != 259:
             return None
         if not kernel32.GetProcessTimes(
             handle,
@@ -83,7 +85,7 @@ def _windows_process_start_identity(pid: int) -> str | None:
             ctypes.byref(user_time),
         ):
             return None
-        if exit_time.dwHighDateTime or exit_time.dwLowDateTime:
+        if not include_exited and (exit_time.dwHighDateTime or exit_time.dwLowDateTime):
             return None
         value = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
         return f"windows-filetime:{value}"
@@ -91,12 +93,17 @@ def _windows_process_start_identity(pid: int) -> str | None:
         kernel32.CloseHandle(handle)
 
 
-def process_start_identity(pid: int) -> str | None:
-    """Return a PID-reuse-safe process start token on Windows and Linux."""
+def process_start_identity(pid: int, *, include_exited: bool = False) -> str | None:
+    """Return a live process token, or capture an owned, not-yet-reaped child.
+
+    A fast child can exit before its parent reads the creation token. Only the
+    initial Popen capture includes exited processes; all recovery/liveness
+    checks still reject exited processes and Linux zombies.
+    """
 
     try:
         if os.name == "nt":
-            return _windows_process_start_identity(pid)
+            return _windows_process_start_identity(pid, include_exited=include_exited)
         if sys.platform.startswith("linux"):
             stat_path = Path(f"/proc/{pid}/stat")
             raw = stat_path.read_text(encoding="utf-8")
@@ -104,7 +111,7 @@ def process_start_identity(pid: int) -> str | None:
             if closing < 0:
                 return None
             fields = raw[closing + 2 :].split()
-            if not fields or fields[0] in {"Z", "X", "x"}:
+            if not fields or (not include_exited and fields[0] in {"Z", "X", "x"}):
                 return None
             # The process start time is field 22; after the comm field this is
             # index 19. Include boot_id so a reboot cannot reuse the token.
@@ -824,7 +831,7 @@ class ObservedRun:
                 self._write_state_locked(force=True)
             self._append_event("child_completed", child=name, status="failed", error=child_state["error"])
             raise
-        identity = ProcessIdentity(process.pid, process_start_identity(process.pid))
+        identity = ProcessIdentity(process.pid, process_start_identity(process.pid, include_exited=True))
         if not identity.start_identity:
             process.terminate()
             process.wait(timeout=5)
