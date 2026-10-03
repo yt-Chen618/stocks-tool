@@ -5,7 +5,6 @@
   let latestState = null;
   let latestResearchState = null;
   let currentWorkspace = "research";
-  let demoLanguageRequested = false;
 
   function fetchJson(url, options) {
     if (typeof window.StocksToolApiClient?.fetchJson === "function") {
@@ -184,10 +183,6 @@
   }
 
   function updateAccountState(event) {
-    if (document.body?.dataset.demo === "true" && !demoLanguageRequested && !String(document.documentElement.lang || "").toLowerCase().startsWith("zh")) {
-      demoLanguageRequested = true;
-      document.querySelector('[data-lang-option="zh"]')?.click();
-    }
     latestState = event?.detail?.state || latestState;
     syncAccountOptions(latestState);
     updateTopbar(latestState);

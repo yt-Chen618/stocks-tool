@@ -171,7 +171,12 @@ def verify_page(engine, *, resource: str, model, repository_type, method: str) -
                 scope = {"external_account_id": ACCOUNT_ID, "status": None, "mode": None, "symbol": None}
             else:
                 boundary_query = boundary_query.where(model.external_account_id == ACCOUNT_ID)
-                scope = {"external_account_id": ACCOUNT_ID, "order_id": None}
+                # Execution and journal pagers include the complete mode key in
+                # their cursor scope, even when the legacy unscoped read passes
+                # mode=None. Keep the independent deep-page fixture aligned
+                # with the repository contract; this cursor is not a production
+                # cursor emitted by the API.
+                scope = {"external_account_id": ACCOUNT_ID, "order_id": None, "mode": None}
                 if resource == "journals":
                     scope.update(trade_plan_id=None, entry_type=None)
                 elif resource == "bull_put_spreads":

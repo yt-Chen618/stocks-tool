@@ -65,9 +65,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   bindTradingViewportGuard();
   startLanguageObserver();
-  if (document.body.dataset.demo === "true") {
-    state.language = DEFAULT_LANGUAGE;
-  }
   updateLanguageControls();
   applyLanguage();
   ordersView?.syncTicketOrderFields();
@@ -75,10 +72,6 @@ document.addEventListener("DOMContentLoaded", async () => {
   window.StocksToolResearch?.init();
   await window.StocksToolWatchlists?.init();
   await loadDashboard();
-  if (document.body.dataset.demo === "true" && state.language !== DEFAULT_LANGUAGE) {
-    state.language = DEFAULT_LANGUAGE;
-    applyLanguage();
-  }
 });
 
 function initializeViewModules() {

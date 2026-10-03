@@ -28,6 +28,7 @@ from stocks_tool.application.services.orders import (  # noqa: E402
     TradingIntentConflictError,
     TradingIntentOutcomeUnknownError,
 )
+from stocks_tool.application.services.order_authorization import OrderAuthorizationService  # noqa: E402
 from stocks_tool.core.config import Settings, get_settings  # noqa: E402
 from stocks_tool.application.services.strategy_advisor_intake import StrategyAdvisorIntakeService  # noqa: E402
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService  # noqa: E402
@@ -44,6 +45,7 @@ from stocks_tool.db.models import (  # noqa: E402
     TradeActionIntentRecord,
 )
 from stocks_tool.domain.enums import (  # noqa: E402
+    AccountSnapshotProvenance,
     AssetType,
     BrokerName,
     ExecutionMode,
@@ -53,15 +55,20 @@ from stocks_tool.domain.enums import (  # noqa: E402
     TimeInForce,
 )
 from stocks_tool.domain.models import (  # noqa: E402
+    AccountSnapshot,
     BrokerOrderSnapshot,
     CreateOrderRequest,
     CreateStrategyAdvisorRunRequest,
     RecordStrategyAdvisorResponseRequest,
     StrategyAdvisorProposalDraft,
     StrategyAdvisorReviewDraft,
+    SecurityQuoteSnapshot,
 )
 from stocks_tool.repositories.sqlalchemy_broker_account_repository import (  # noqa: E402
     SQLAlchemyBrokerAccountRepository,
+)
+from stocks_tool.repositories.sqlalchemy_account_snapshot_repository import (  # noqa: E402
+    SQLAlchemyAccountSnapshotRepository,
 )
 from stocks_tool.repositories.sqlalchemy_execution_repository import (  # noqa: E402
     SQLAlchemyExecutionRepository,
@@ -119,6 +126,22 @@ class CountingBroker:
             raw_payload={"source": "p0-postgres-concurrency"},
         )
 
+    def get_quote(self, *, symbol: str, mode: ExecutionMode) -> SecurityQuoteSnapshot:
+        now = datetime.now(timezone.utc)
+        return SecurityQuoteSnapshot(
+            symbol=symbol,
+            last_done=Decimal("321.00"),
+            prev_close=Decimal("320.00"),
+            open=Decimal("320.00"),
+            high=Decimal("322.00"),
+            low=Decimal("319.00"),
+            timestamp=now,
+            volume=1000,
+            turnover=Decimal("321000"),
+            trade_status="normal",
+            data_quality="live",
+        )
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -149,6 +172,13 @@ def _order_request(*, limit_price: Decimal = Decimal("321.00")) -> CreateOrderRe
 
 
 def _service(session: Session, database_url: str, broker: CountingBroker) -> OrderService:
+    account_snapshots = SQLAlchemyAccountSnapshotRepository(session)
+    authorization = OrderAuthorizationService(
+        account_snapshots=account_snapshots,
+        market_data=broker,
+        max_snapshot_age_seconds=120,
+        clock=lambda: datetime.now(timezone.utc),
+    )
     return OrderService(
         settings=Settings(database_url=database_url),
         broker_accounts=SQLAlchemyBrokerAccountRepository(session),
@@ -158,6 +188,7 @@ def _service(session: Session, database_url: str, broker: CountingBroker) -> Ord
         longbridge_adapter=broker,
         audit_events=SQLAlchemyStrategyAuditEventRepository(session),
         intent_ledger=SQLAlchemyTradingIntentLedger(session),
+        order_authorization=authorization,
     )
 
 
@@ -429,6 +460,22 @@ def main() -> int:
                     )
                 )
                 session.commit()
+                SQLAlchemyAccountSnapshotRepository(session).create_account_snapshot(
+                    AccountSnapshot(
+                        broker=BrokerName.LONGBRIDGE,
+                        account_id=ACCOUNT_ID,
+                        mode=ExecutionMode.PAPER,
+                        provenance=AccountSnapshotProvenance.BROKER_SYNC,
+                        currency="USD",
+                        cash_balance=Decimal("100000"),
+                        net_liquidation=Decimal("100000"),
+                        buying_power=Decimal("100000"),
+                        positions=[],
+                        captured_at=datetime.now(timezone.utc),
+                        raw_payload={"source": "p0-concurrency-fixture"},
+                    ),
+                    provenance=AccountSnapshotProvenance.BROKER_SYNC,
+                )
         finally:
             temp_engine.dispose()
 

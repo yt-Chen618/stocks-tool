@@ -26,6 +26,7 @@ from stocks_tool.adapters.backtesting.lean import (
     LeanExecutionError,
     LeanLauncher,
     LeanLauncherConfig,
+    _docker_user_spec,
     _data_mounts,
     normalize_lean_result,
     safe_docker_environment,
@@ -135,6 +136,29 @@ def test_build_command_mounts_real_algorithm_config_data_and_output(tmp_path):
     assert any(LEAN_RESULT_MOUNT in value and value.endswith(",readonly=false") for value in command)
     assert any(f"quantconnect/lean@{LEAN_ENGINE_IMAGE_DIGEST}" == value for value in command)
     assert any("stocks-tool.owner=stocks-tool" in value for value in command)
+
+
+def test_docker_user_spec_is_posix_only_and_preserves_host_owner():
+    assert _docker_user_spec(host_os="posix", uid=1001, gid=1002) == "1001:1002"
+    assert _docker_user_spec(host_os="nt", uid=1001, gid=1002) is None
+
+
+def test_build_command_can_run_as_host_uid_with_owned_tmpfs(monkeypatch, tmp_path):
+    launcher = LeanLauncher()
+    context = _context(tmp_path)
+    monkeypatch.setattr(
+        "stocks_tool.adapters.backtesting.lean._docker_user_spec",
+        lambda: "1001:1002",
+    )
+    command = launcher.build_command(context)
+    user_index = command.index("--user")
+    assert command[user_index + 1] == "1001:1002"
+    tmpfs = [command[index + 1] for index, value in enumerate(command) if value == "--tmpfs"]
+    assert "/tmp:rw,nosuid,nodev,size=512m,uid=1001,gid=1002,mode=1777" in tmpfs
+    assert "/tmp/lean-cache:rw,nosuid,nodev,size=256m,uid=1001,gid=1002,mode=0700" in tmpfs
+    assert "/tmp/lean-local-share:rw,nosuid,nodev,size=128m,uid=1001,gid=1002,mode=0700" in tmpfs
+    assert "--cap-drop" in command and "ALL" in command
+    assert "--network" in command and command[command.index("--network") + 1] == "none"
 
 
 def test_build_lean_config_uses_valid_class_and_no_credentials(tmp_path):

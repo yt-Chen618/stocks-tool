@@ -192,6 +192,9 @@ class LeanLauncher:
             "stocks-tool.run-id": safe_run_id,
         }
         name = self.container_name(safe_run_id)
+        container_user = _docker_user_spec()
+        cache_target = "/tmp/lean-cache" if container_user is not None else "/root/.cache"
+        local_share_target = "/tmp/lean-local-share" if container_user is not None else "/root/.local/share"
         command = [
             self.config.docker_binary,
             "run",
@@ -214,11 +217,11 @@ class LeanLauncher:
             "--cpus",
             self.config.cpus,
             "--tmpfs",
-            f"/tmp:rw,nosuid,nodev,size={self.config.tmpfs_size}",
+            _tmpfs_mount_option("/tmp", self.config.tmpfs_size, mode="1777"),
             "--tmpfs",
-            "/root/.cache:rw,nosuid,nodev,size=256m",
+            _tmpfs_mount_option(cache_target, "256m", mode="0700"),
             "--tmpfs",
-            "/root/.local/share:rw,nosuid,nodev,size=128m",
+            _tmpfs_mount_option(local_share_target, "128m", mode="0700"),
             "--env",
             "HOME=/tmp/lean-home",
             "--env",
@@ -228,6 +231,13 @@ class LeanLauncher:
             "--env",
             "PYTHONDONTWRITEBYTECODE=1",
         ]
+        if container_user is not None:
+            # On Linux, cap-drop ALL removes root's DAC_OVERRIDE capability.
+            # Running as the host owner keeps bind-mounted temporary result
+            # directories writable without weakening the read-only/security
+            # boundary. Windows Docker Desktop keeps its existing root path.
+            user_index = command.index("--pids-limit")
+            command[user_index:user_index] = ["--user", container_user]
         for key, value in sorted(labels.items()):
             command.extend(["--label", f"{key}={value}"])
         data_mounts = _data_mounts(dataset_mount_path, staged=dataset_mount_path != dataset_path)
@@ -863,6 +873,35 @@ def _bind_mount(source: Path, target: str, *, read_only: bool) -> str:
     # Docker 29 requires mount options to be explicit key=value fields.
     option = "readonly=true" if read_only else "readonly=false"
     return f"type=bind,src={source},dst={target},{option}"
+
+
+def _docker_user_spec(
+    *,
+    host_os: str | None = None,
+    uid: int | None = None,
+    gid: int | None = None,
+) -> str | None:
+    """Return a same-owner Docker user for POSIX bind mounts only."""
+
+    if (host_os or os.name) != "posix":
+        return None
+    resolve_uid = getattr(os, "getuid", None)
+    resolve_gid = getattr(os, "getgid", None)
+    if uid is None and callable(resolve_uid):
+        uid = int(resolve_uid())
+    if gid is None and callable(resolve_gid):
+        gid = int(resolve_gid())
+    if uid is None or gid is None or uid < 0 or gid < 0:
+        return None
+    return f"{uid}:{gid}"
+
+
+def _tmpfs_mount_option(path: str, size: str, *, mode: str) -> str:
+    owner = _docker_user_spec()
+    if owner is None:
+        return f"{path}:rw,nosuid,nodev,size={size}"
+    uid, gid = owner.split(":", 1)
+    return f"{path}:rw,nosuid,nodev,size={size},uid={uid},gid={gid},mode={mode}"
 
 
 def _data_mounts(path: Path, *, staged: bool) -> list[str]:
