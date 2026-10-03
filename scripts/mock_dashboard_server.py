@@ -8,6 +8,7 @@ from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Response, status
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from mock_dashboard_fixtures import (
@@ -1564,12 +1565,20 @@ class MockDashboardState:
         self,
         external_account_id: str | None = None,
         order_id: str | None = None,
+        mode: str | None = None,
     ) -> list[dict[str, Any]]:
         rows = self.executions
         if external_account_id is not None:
             rows = [row for row in rows if row["external_account_id"] == external_account_id]
         if order_id is not None:
             rows = [row for row in rows if row["order_id"] == order_id]
+        if mode is not None:
+            orders_by_id = {order["id"]: order for order in self.orders}
+            rows = [
+                row
+                for row in rows
+                if orders_by_id.get(row["order_id"], {}).get("mode") == mode
+            ]
         return deepcopy(rows)
 
     def list_executions_page(
@@ -1577,11 +1586,16 @@ class MockDashboardState:
         external_account_id: str | None = None,
         order_id: str | None = None,
         *,
+        mode: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
         return self._page_rows(
-            self.list_executions(external_account_id=external_account_id, order_id=order_id),
+            self.list_executions(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                mode=mode,
+            ),
             limit=limit,
             cursor=cursor,
         )
@@ -1592,6 +1606,7 @@ class MockDashboardState:
         order_id: str | None = None,
         trade_plan_id: str | None = None,
         entry_type: str | None = None,
+        mode: str | None = None,
     ) -> list[dict[str, Any]]:
         rows = self.journals
         if external_account_id is not None:
@@ -1602,6 +1617,18 @@ class MockDashboardState:
             rows = [row for row in rows if row["trade_plan_id"] == trade_plan_id]
         if entry_type is not None:
             rows = [row for row in rows if row["entry_type"] == entry_type]
+        if mode is not None:
+            orders_by_id = {order["id"]: order for order in self.orders}
+            executions_by_id = {execution["id"]: execution for execution in self.executions}
+            rows = [
+                row
+                for row in rows
+                if orders_by_id.get(row.get("order_id"), {}).get("mode") == mode
+                or orders_by_id.get(
+                    executions_by_id.get(row.get("execution_id"), {}).get("order_id"),
+                    {},
+                ).get("mode") == mode
+            ]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
 
     def list_journals_page(
@@ -1611,6 +1638,7 @@ class MockDashboardState:
         trade_plan_id: str | None = None,
         entry_type: str | None = None,
         *,
+        mode: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict[str, Any]:
@@ -1620,6 +1648,7 @@ class MockDashboardState:
                 order_id=order_id,
                 trade_plan_id=trade_plan_id,
                 entry_type=entry_type,
+                mode=mode,
             ),
             limit=limit,
             cursor=cursor,
@@ -2479,7 +2508,17 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     app = FastAPI(title="Mock Stocks Tool Dashboard", docs_url="/docs", redoc_url=None)
     static_dir = ROOT / "src" / "stocks_tool" / "ui" / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    app.include_router(ui.router)
+    from mock_workbench_routes import install_workbench_routes
+
+    install_workbench_routes(app, state)
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    @app.get("/app", response_class=HTMLResponse, include_in_schema=False)
+    def mock_dashboard() -> HTMLResponse:
+        rendered = ui.render_dashboard()
+        html = rendered.body.decode("utf-8").replace(
+            "<body ", '<body data-demo="true" ', 1
+        )
+        return HTMLResponse(html, headers={"X-Stocks-Tool-Demo": "true"})
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -3060,10 +3099,20 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     def bull_put_readiness(
         external_account_id: str = Query(...),
         mode: str = Query(default="paper"),
+        symbol: str | None = Query(default=None),
     ) -> dict[str, Any]:
         if external_account_id != state.account_id or mode != "paper":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock readiness not found.")
         scanned_at = iso_now()
+        requested_symbol = (symbol or "QQQ.US").strip().upper()
+        if requested_symbol != "QQQ.US":
+            return {
+                "strategy_id": "paper_bull_put_v1", "external_account_id": external_account_id,
+                "mode": "paper", "evaluated_at": scanned_at, "ready": False,
+                "status": "blocked", "preferred_symbol": None, "previews": [],
+                "checks": [{"name": "mock_symbol_coverage", "status": "fail", "detail": f"演示数据没有 {requested_symbol} 的策略候选；不会替换成另一个标的。", "blocking": True}],
+                "next_action": f"演示数据没有 {requested_symbol} 的策略候选。",
+            }
         preview = {
             "external_account_id": external_account_id,
             "mode": "paper",
@@ -3149,13 +3198,19 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     def executions(
         external_account_id: str | None = Query(default=None),
         order_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
-        return state.list_executions(external_account_id=external_account_id, order_id=order_id)
+        return state.list_executions(
+            external_account_id=external_account_id,
+            order_id=order_id,
+            mode=mode,
+        )
 
     @app.get("/executions/paged")
     def executions_paged(
         external_account_id: str | None = Query(default=None),
         order_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=100),
         cursor: str | None = Query(default=None),
     ) -> dict[str, Any]:
@@ -3163,6 +3218,7 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
             return state.list_executions_page(
                 external_account_id=external_account_id,
                 order_id=order_id,
+                mode=mode,
                 limit=limit,
                 cursor=cursor,
             )
@@ -3175,12 +3231,14 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         order_id: str | None = Query(default=None),
         trade_plan_id: str | None = Query(default=None),
         entry_type: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
         return state.list_journals(
             external_account_id=external_account_id,
             order_id=order_id,
             trade_plan_id=trade_plan_id,
             entry_type=entry_type,
+            mode=mode,
         )
 
     @app.get("/journals/paged")
@@ -3189,6 +3247,7 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         order_id: str | None = Query(default=None),
         trade_plan_id: str | None = Query(default=None),
         entry_type: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
         limit: int = Query(default=50, ge=1, le=100),
         cursor: str | None = Query(default=None),
     ) -> dict[str, Any]:
@@ -3198,6 +3257,7 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
                 order_id=order_id,
                 trade_plan_id=trade_plan_id,
                 entry_type=entry_type,
+                mode=mode,
                 limit=limit,
                 cursor=cursor,
             )

@@ -27,7 +27,22 @@ class MarketEventIngestionService:
     def import_events(self, requests: list[CreateMarketEventRequest]) -> MarketEventImportResult:
         created_events: list[MarketEvent] = []
         skipped_duplicates = 0
+        atomic_creator = getattr(type(self.events), "create_event_if_absent", None)
+        if (
+            atomic_creator is None
+            or atomic_creator is MarketEventRepository.create_event_if_absent
+        ):
+            atomic_creator = None
+        else:
+            atomic_creator = getattr(self.events, "create_event_if_absent")
         for request in requests:
+            if callable(atomic_creator):
+                event, created = atomic_creator(request)
+                if created:
+                    created_events.append(event)
+                else:
+                    skipped_duplicates += 1
+                continue
             if self._event_exists(request):
                 skipped_duplicates += 1
                 continue

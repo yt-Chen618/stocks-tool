@@ -12,6 +12,7 @@ from stocks_tool.api.dependencies import (
     get_strategy_experiment_service,
 )
 from stocks_tool.api.idempotency import require_idempotency_key
+from stocks_tool.application.services.order_authorization import OrderAuthorizationError
 from stocks_tool.application.services.covered_call_strategy import CoveredCallStrategyService
 from stocks_tool.application.services.orders import (
     TradingIntentConflictError,
@@ -48,6 +49,13 @@ def _raise_strategy_intent_http_error(exc: TradingIntentError) -> None:
     raise HTTPException(
         status_code=409,
         detail={"code": code, "intent_id": exc.intent_id, "retryable": False},
+    ) from exc
+
+
+def _raise_order_authorization_http_error(exc: OrderAuthorizationError) -> None:
+    raise HTTPException(
+        status_code=409 if exc.code.startswith("account_snapshot_") else 422,
+        detail={"code": exc.code, "message": exc.message, "retryable": False},
     ) from exc
 
 
@@ -128,6 +136,8 @@ def execute_covered_call_proposal(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except OrderAuthorizationError as exc:
+        _raise_order_authorization_http_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:
@@ -208,6 +218,8 @@ def execute_covered_call_roll_proposal(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except OrderAuthorizationError as exc:
+        _raise_order_authorization_http_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:
@@ -243,6 +255,8 @@ def continue_covered_call_roll_proposal(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except OrderAuthorizationError as exc:
+        _raise_order_authorization_http_error(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:

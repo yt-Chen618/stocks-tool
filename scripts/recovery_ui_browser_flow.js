@@ -12,6 +12,82 @@ const { runFrontendStateBrowserChecks } = require("./frontend_state_browser_chec
 const PRIMARY_ACCOUNT = "LBPT10087357";
 const ALT_ACCOUNT = "LBPT10087357-ALT";
 
+async function waitForPaperAccountReady(page, accountId, timeoutMs, label, minimumGeneration = null) {
+  let latest = null;
+  try {
+    await waitFor(
+      async () => {
+        latest = await page.evaluate(({ accountId: expectedAccountId, minimumGeneration: expectedMinimumGeneration }) => {
+          const state = window.StocksToolWorkbenchUI?.getState?.() || null;
+          const recovery = state?.recoveryStatus || null;
+          return {
+            ready: Boolean(
+              state &&
+              state.selectedAccountId === expectedAccountId &&
+              state.accountContextId === expectedAccountId &&
+              (expectedMinimumGeneration === null || state.accountLoadGeneration > expectedMinimumGeneration) &&
+              state.coreDataHealthy === true &&
+              state.recoveryStatusState === "ready" &&
+              recovery?.external_account_id === expectedAccountId &&
+              recovery?.mode === "paper",
+            ),
+            selectedAccountId: state?.selectedAccountId || null,
+            accountContextId: state?.accountContextId || null,
+            accountLoadGeneration: state?.accountLoadGeneration ?? null,
+            minimumGeneration: expectedMinimumGeneration,
+            coreDataHealthy: state?.coreDataHealthy ?? null,
+            recoveryStatusState: state?.recoveryStatusState || null,
+            recoveryAccountId: recovery?.external_account_id || null,
+            recoveryMode: recovery?.mode || null,
+            panelLoadErrors: state?.panelLoadErrors || {},
+          };
+        }, { accountId, minimumGeneration });
+        return latest.ready;
+      },
+      timeoutMs,
+      label,
+    );
+  } catch (error) {
+    throw new Error(`${error.message}; account-ready diagnostic=${JSON.stringify(latest)}`);
+  }
+}
+
+async function waitForTradeConfirmation(page, timeoutMs, label) {
+  try {
+    await page.waitForSelector("#trade-confirm-dialog[open]", { timeout: timeoutMs });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => {
+      const state = window.StocksToolWorkbenchUI?.getState?.() || null;
+      const safety = typeof window.evaluateCurrentTradingSafety === "function"
+        ? window.evaluateCurrentTradingSafety({
+          actionKey: "m1-a-b-a",
+          accountId: state?.selectedAccountId,
+          mode: "paper",
+          requestSignature: "a-b-a",
+        })
+        : null;
+      return {
+        dialogOpen: Boolean(document.querySelector("#trade-confirm-dialog[open]")),
+        state: {
+          selectedAccountId: state?.selectedAccountId || null,
+          accountContextId: state?.accountContextId || null,
+          accountLoadGeneration: state?.accountLoadGeneration ?? null,
+          coreDataHealthy: state?.coreDataHealthy ?? null,
+          recoveryStatusState: state?.recoveryStatusState || null,
+          recoveryStatus: state?.recoveryStatus || null,
+          panelLoadErrors: state?.panelLoadErrors || {},
+        },
+        abaResult: window.__m1AbaResult || null,
+        abaInitialSafety: window.__m1AbaInitialSafety || null,
+        abaStartState: window.__m1AbaStartState || null,
+        mutationCalls: window.__m1MutationCalls ?? null,
+        safety,
+      };
+    });
+    throw new Error(`${error.message} (${label}); confirmation diagnostic=${JSON.stringify(diagnostic)}`);
+  }
+}
+
 function recoveryIntentFixture(id, overrides = {}) {
   return {
     id,
@@ -554,21 +630,43 @@ async function main() {
     });
     await waitFor(() => page.locator("#account-select").inputValue().then((value) => value === PRIMARY_ACCOUNT), timeoutMs, "primary account restore");
     recoveryMode = "clear";
+    const primaryRefreshGeneration = await page.evaluate(() => Number(window.StocksToolWorkbenchUI?.getState?.()?.accountLoadGeneration || 0));
     await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
     await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+    await waitForPaperAccountReady(page, PRIMARY_ACCOUNT, timeoutMs, "primary account ready before A-B-A confirmation", primaryRefreshGeneration);
 
     const abaRaceStart = await page.evaluate(() => {
       window.__m1MutationCalls = 0;
+      window.__m1AbaResult = null;
+      const state = window.StocksToolWorkbenchUI?.getState?.() || null;
+      window.__m1AbaStartState = {
+        selectedAccountId: state?.selectedAccountId || null,
+        accountContextId: state?.accountContextId || null,
+        accountLoadGeneration: state?.accountLoadGeneration ?? null,
+        coreDataHealthy: state?.coreDataHealthy ?? null,
+        recoveryStatusState: state?.recoveryStatusState || null,
+      };
+      window.__m1AbaInitialSafety = typeof window.evaluateCurrentTradingSafety === "function"
+        ? window.evaluateCurrentTradingSafety({
+          actionKey: "m1-a-b-a",
+          accountId: state?.selectedAccountId,
+          mode: "paper",
+          requestSignature: "a-b-a",
+        })
+        : null;
       window.__m1AbaPromise = window.runConfirmedBrokerMutation({
         actionKey: "m1-a-b-a",
         confirmation: { title: "M1 A-B-A", summary: "M1 A-B-A", details: {} },
         requestSignature: "a-b-a",
         statusElement: null,
-      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; });
+      }, async () => { window.__m1MutationCalls += 1; return { ok: true }; }).then((result) => {
+        window.__m1AbaResult = result;
+        return result;
+      });
       return true;
     });
     if (!abaRaceStart) throw new Error("Could not start A-B-A mutation.");
-    await page.waitForSelector("#trade-confirm-dialog[open]");
+    await waitForTradeConfirmation(page, timeoutMs, "A-B-A confirmation");
     await page.evaluate(() => {
       const select = document.getElementById("account-select");
       select.value = "LBPT10087357-ALT";
@@ -605,8 +703,10 @@ async function main() {
     }
 
     recoveryMode = "clear";
+    const signatureRefreshGeneration = await page.evaluate(() => Number(window.StocksToolWorkbenchUI?.getState?.()?.accountLoadGeneration || 0));
     await page.evaluate(() => document.getElementById("refresh-dashboard")?.click());
     await expectText(page.locator("#operations-recovery-panel"), "无阻塞");
+    await waitForPaperAccountReady(page, PRIMARY_ACCOUNT, timeoutMs, "primary account ready before signature confirmation", signatureRefreshGeneration);
     const signatureStart = await page.evaluate(() => {
       window.__m1MutationCalls = 0;
       window.__m1RequestSignature = "old-signature";

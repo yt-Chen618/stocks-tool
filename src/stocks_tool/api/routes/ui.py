@@ -19,6 +19,7 @@ def _asset_url(filename: str) -> str:
 def render_dashboard() -> HTMLResponse:
     app_css_url = _asset_url("app.css")
     workspace_css_url = _asset_url("workspace.css")
+    workbench_redesign_css_url = _asset_url("workbench-redesign.css")
     lifecycle_warning_js_url = _asset_url("lifecycle-warning.js")
     api_client_js_url = _asset_url("api-client.js")
     formatters_js_url = _asset_url("formatters.js")
@@ -38,6 +39,14 @@ def render_dashboard() -> HTMLResponse:
     operations_recovery_css_url = _asset_url("operations-recovery-view.css")
     execution_drawer_js_url = _asset_url("execution-drawer.js")
     workspace_shell_js_url = _asset_url("workspace-shell.js")
+    workbench_ui_js_url = _asset_url("workbench-ui.js")
+    research_case_js_url = _asset_url("research-case-view.js")
+    portfolio_workbench_js_url = _asset_url("portfolio-workbench.js")
+    market_timeline_js_url = _asset_url("market-timeline-view.js")
+    market_session_comparison_js_url = _asset_url("market-session-comparison-view.js")
+    strategy_backtest_js_url = _asset_url("strategy-backtest-view.js")
+    strategy_readiness_js_url = _asset_url("strategy-readiness-view.js")
+    advisor_audit_js_url = _asset_url("advisor-audit-view.js")
     app_js_url = _asset_url("app.js")
     return HTMLResponse(
         dedent(
@@ -51,10 +60,11 @@ def render_dashboard() -> HTMLResponse:
                 <link rel="stylesheet" href="{app_css_url}" />
                     <link rel="stylesheet" href="{workspace_css_url}" />
                     <link rel="stylesheet" href="{operations_recovery_css_url}" />
+                    <link rel="stylesheet" href="{workbench_redesign_css_url}" />
               </head>
               <body data-workspace="research" data-sidebar-collapsed="false">
                 <div id="app-shell" class="workbench-shell">
-                  <aside id="workspace-sidebar" class="workspace-sidebar" aria-label="Research workspaces">
+                  <aside id="workspace-sidebar" class="workspace-sidebar" aria-label="研究工作区">
                     <div class="sidebar-brand">
                       <div class="brand-mark">ST</div>
                       <div class="sidebar-brand-copy">
@@ -65,26 +75,28 @@ def render_dashboard() -> HTMLResponse:
                         <span aria-hidden="true">&#8249;</span>
                       </button>
                     </div>
-                    <nav id="workspace-nav" class="workspace-nav" aria-label="Workbench sections" role="tablist" aria-orientation="vertical">
-                      <button id="research-workspace-tab" type="button" role="tab" data-workspace-option="research" aria-label="Research Desk" aria-controls="research-section" aria-selected="true"><span class="nav-glyph" aria-hidden="true">R</span><span class="sidebar-label">Research Desk</span></button>
-                      <button id="strategy-workspace-tab" type="button" role="tab" data-workspace-option="strategy" aria-label="Strategy Lab" aria-controls="strategy-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">S</span><span class="sidebar-label">Strategy Lab</span></button>
-                      <button id="macro-workspace-tab" type="button" role="tab" data-workspace-option="macro" aria-label="Macro and Events" aria-controls="macro-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">M</span><span class="sidebar-label">Macro &amp; Events</span></button>
-                      <button id="portfolio-workspace-tab" type="button" role="tab" data-workspace-option="portfolio" aria-label="Portfolio" aria-controls="portfolio-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">P</span><span class="sidebar-label">Portfolio</span></button>
-                      <button id="operations-workspace-tab" type="button" role="tab" data-workspace-option="operations" aria-label="Operations" aria-controls="account-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">O</span><span class="sidebar-label">Operations</span></button>
+                    <nav id="workspace-nav" class="workspace-nav" aria-label="工作区列表" role="tablist" aria-orientation="vertical">
+                      <button id="research-workspace-tab" type="button" role="tab" data-workspace-option="research" aria-label="研究" aria-controls="research-section" aria-selected="true"><span class="nav-glyph" aria-hidden="true">R</span><span class="sidebar-label" data-label-zh="研究">Research Desk</span></button>
+                      <button id="strategy-workspace-tab" type="button" role="tab" data-workspace-option="strategy" aria-label="策略" aria-controls="strategy-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">S</span><span class="sidebar-label" data-label-zh="策略">Strategy Lab</span></button>
+                      <button id="macro-workspace-tab" type="button" role="tab" data-workspace-option="macro" aria-label="市场" aria-controls="macro-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">M</span><span class="sidebar-label" data-label-zh="市场">Macro &amp; Events</span></button>
+                      <button id="portfolio-workspace-tab" type="button" role="tab" data-workspace-option="portfolio" aria-label="持仓" aria-controls="portfolio-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">P</span><span class="sidebar-label" data-label-zh="持仓">Portfolio</span></button>
+                      <button id="operations-workspace-tab" type="button" role="tab" data-workspace-option="operations" aria-label="运行与安全" aria-controls="account-section" aria-selected="false"><span class="nav-glyph" aria-hidden="true">O</span><span class="sidebar-label" data-label-zh="状态">Operations</span></button>
                     </nav>
                     <div class="sidebar-foot"><span class="mode-pill">Paper First</span><span class="sidebar-label">LBPT10087357</span></div>
                   </aside>
 
                   <div class="workbench-main">
                   <header class="workspace-topbar">
-                    <div class="topbar-context" aria-label="Account and market data context">
-                      <span class="context-item"><span>Account</span><strong id="topbar-account-context">LBPT10087357</strong></span>
-                      <span class="mode-pill">Paper</span>
+                    <div class="topbar-context" aria-label="账户和市场数据上下文">
+                      <label class="topbar-account-picker"><span>Account</span><select id="topbar-account-select" aria-label="Select broker account"><option value="LBPT10087357">LBPT10087357 / USD</option></select></label>
+                      <strong id="topbar-account-context" class="topbar-account-context">LBPT10087357</strong>
+                      <span id="topbar-mode-context" class="mode-pill">Paper / Simulated</span>
                       <span class="context-item"><span>Data</span><time id="topbar-data-time">Waiting</time></span>
+                      <span id="topbar-reason-context" class="topbar-reason" data-tone="warning">Select an account to begin.</span>
                     </div>
                     <div id="status-banner" class="status-banner topbar-status" role="status" aria-live="polite" aria-atomic="true">Ready</div>
                     <div class="topbar-actions">
-                      <div class="language-switch" aria-label="Language">
+                      <div class="language-switch" aria-label="语言">
                         <button class="lang-option" type="button" data-lang-option="zh">中文</button>
                         <button class="lang-option" type="button" data-lang-option="en">EN</button>
                       </div>
@@ -98,12 +110,13 @@ def render_dashboard() -> HTMLResponse:
                     <div id="desktop-trading-notice" class="desktop-trading-notice" role="note">
                       Broker-writing actions are disabled on screens 780px wide or smaller. The execution drawer remains available for read-only review.
                     </div>
+                    <div id="demo-data-banner" role="note">演示数据：以下内容来自本地模拟数据，不代表当前纸账户或券商实时证据。</div>
                     <section id="research-section" class="band research-band" data-workspace-panel="research" role="tabpanel" aria-labelledby="research-workspace-tab">
                       <div class="band-header research-header">
                         <div>
                           <span class="section-kicker">Shared Symbol Context</span>
                           <h1>Research Desk</h1>
-                          <p class="section-summary">Quotes and account context render first; technicals fill in progressively without blocking the table.</p>
+                           <p class="section-summary">先看标的和证据，再看解释与下一步；数据不完整时直接标出。</p>
                         </div>
                         <div class="segmented-control" role="tablist" aria-label="Research view">
                           <button id="research-table-tab" type="button" role="tab" data-research-view="table" aria-selected="true" aria-controls="research-table-view">Screener</button>
@@ -117,7 +130,7 @@ def render_dashboard() -> HTMLResponse:
                         <button id="manage-watchlist-button" class="icon-button" type="button" aria-haspopup="dialog" aria-controls="watchlist-dialog">Manage Watchlist</button>
                         <label class="field"><span>Source</span><select id="research-source-filter"><option value="">All Sources</option></select></label>
                         <label class="field"><span>Event Window</span><select id="research-event-filter"><option value="">Any Event Window</option><option value="7">Next 7 Days</option><option value="30">Next 30 Days</option><option value="none">No Upcoming Event</option></select></label>
-                        <label class="field compact-field"><span>Position</span><select id="research-held-filter"><option value="">All</option><option value="held">Held</option><option value="not-held">Not Held</option></select></label>
+                         <label class="field compact-field"><span>Position</span><select id="research-held-filter"><option value="">All</option><option value="held">Held</option><option value="not-held">Not Held</option></select><small id="research-held-filter-status" class="research-filter-status" hidden></small></label>
                         <label class="field compact-field"><span>Strategy</span><select id="research-strategy-filter"><option value="">All</option><option value="active">Active</option><option value="none">None</option></select></label>
                       </div>
 
@@ -185,6 +198,44 @@ def render_dashboard() -> HTMLResponse:
                           </div>
                         </section>
                       </div>
+                      <aside id="research-explanation-panel" class="workbench-explanation research-explanation-panel" aria-live="polite">
+                        <div class="workbench-explanation-header">
+                          <div><span class="section-kicker">证据解释</span><h2 id="research-explanation-title">请选择一个标的</h2></div>
+                          <span id="research-explanation-status" class="workbench-status-chip" data-tone="warning">等待选择</span>
+                        </div>
+                        <div class="workbench-explanation-body">
+                          <p id="research-explanation-summary" class="workbench-explanation-summary">研究表和图表共享同一标的。选择一行后，这里会解释数据、证据缺口和下一步。</p>
+                          <dl id="research-explanation-facts" class="workbench-facts"></dl>
+                          <ul id="research-explanation-reasons" class="workbench-explanation-list"><li>没有标的就没有策略判断。</li></ul>
+                        </div>
+                        <details class="research-case-controls workbench-raw-details">
+                          <summary>保存、加载与比较</summary>
+                        <div class="workbench-inline-form">
+                          <label class="field"><span>筛选名称</span><input id="research-screen-name" type="text" maxlength="80" placeholder="例如：趋势观察" /></label>
+                          <label class="field"><span>档案标题</span><input id="research-case-title-input" type="text" maxlength="120" placeholder="例如：QQQ 研究档案" /></label>
+                          <label class="field field-wide"><span>研究假设</span><input id="research-case-thesis-input" type="text" maxlength="240" placeholder="写下你要验证的事实" /></label>
+                          <label class="field"><span>已保存筛选</span><select id="research-screen-select"><option value="">暂无已保存筛选</option></select></label>
+                          <label class="field"><span>已保存档案</span><select id="research-case-select"><option value="">暂无已保存档案</option></select></label>
+                          <label class="field field-wide"><span>候选对比</span><input id="research-compare-symbols" type="text" maxlength="200" placeholder="QQQ.US, SMH.US" /></label>
+                        </div>
+                        <div class="workbench-task-row">
+                          <button id="research-save-screen" class="table-action" type="button" data-research-case-action="screen">保存筛选</button>
+                          <button id="research-save-case" class="table-action" type="button" data-research-case-action="case">保存研究档案</button>
+                          <button id="research-load-screen" class="table-action" type="button">加载筛选</button>
+                          <button id="research-load-case" class="table-action" type="button">加载档案</button>
+                          <button id="research-load-more-screens" class="table-action" type="button" hidden>加载更多筛选</button>
+                          <button id="research-load-more-cases" class="table-action" type="button" hidden>加载更多档案</button>
+                          <button id="research-compare-button" class="table-action" type="button">比较候选</button>
+                          <button id="research-evaluate-strategy" class="table-action primary" type="button" data-research-case-action="evaluate">打开策略评估</button>
+                        </div>
+                        <div id="research-compare-result" class="workbench-research-case-status" role="status" aria-live="polite"></div>
+                        <p id="research-case-status" class="workbench-research-case-status" role="status" aria-live="polite"></p>
+                        </details>
+                      </aside>
+                      <section id="research-immutable-case-panel" class="workbench-card" hidden aria-live="polite">
+                        <header class="workbench-card-header"><div><span class="section-kicker">历史证据</span><h2>已保存研究档案</h2><p>这是保存时的不可变快照，不会随当前行情刷新。</p></div><button id="research-close-case" class="table-action" type="button">返回实时研究</button></header>
+                        <div class="workbench-explanation-body"><p id="research-immutable-case-summary" class="workbench-explanation-summary"></p><div id="research-immutable-case-chart" class="workbench-chart"><div class="workbench-chart-empty">选择档案后查看保存时历史图表。</div></div><dl id="research-immutable-case-facts" class="workbench-facts"></dl><ul id="research-immutable-case-warnings" class="workbench-explanation-list"></ul></div>
+                      </section>
                     </section>
 
                     <section id="account-section" class="band account-band" data-workspace-panel="operations" role="tabpanel" aria-labelledby="operations-workspace-tab" hidden>
@@ -291,6 +342,29 @@ def render_dashboard() -> HTMLResponse:
                           <button type="button" role="tab" data-strategy-tab="experiments" aria-selected="false">Experiments / Advisor</button>
                         </div>
                       </div>
+
+                      <section class="strategy-workbench-grid workbench-hero" aria-label="策略风险与解释">
+                        <article class="workbench-card">
+                          <header class="workbench-card-header">
+                            <div><span class="section-kicker">风险预算</span><h2>策略占用与余量</h2><p>只读汇总当前持仓、策略和未解决意图；不授权订单。</p></div>
+                            <span id="strategy-risk-status" class="workbench-status-chip" data-tone="warning">等待数据</span>
+                          </header>
+                          <div id="strategy-risk-bars" class="workbench-bar-list"><div class="workbench-blocked"><div><strong>暂未计算</strong><br />选择账户后加载策略风险预算。</div></div></div>
+                        </article>
+                        <aside id="strategy-explanation-panel" class="workbench-explanation">
+                          <div class="workbench-explanation-header"><div><span class="section-kicker">策略解释</span><h2 id="strategy-explanation-title">等待策略评估</h2></div><span id="strategy-explanation-status" class="workbench-status-chip" data-tone="warning">等待数据</span></div>
+                          <div class="workbench-explanation-body"><p id="strategy-explanation-summary" class="workbench-explanation-summary">这里会说明当前为什么可以继续、为什么被阻塞，以及使用了哪些数据。</p><dl id="strategy-explanation-facts" class="workbench-facts"></dl><ul id="strategy-explanation-reasons" class="workbench-explanation-list"><li>风险预算和回测都不会自动提交订单。</li></ul></div>
+                          <div class="workbench-task-row"><label class="field"><span>评估标的</span><input id="strategy-evaluation-symbol" type="text" maxlength="32" placeholder="QQQ.US" /></label><button id="strategy-readiness-button" class="table-action" type="button">运行只读评估</button><button id="strategy-canary-button" class="table-action" type="button" disabled>申请纸账户 Canary</button></div>
+                          <p id="strategy-evaluation-status" class="workbench-backtest-status" role="status" aria-live="polite"></p>
+                        </aside>
+                      </section>
+                      <section id="strategy-backtest-panel" class="workbench-card" aria-label="历史回测">
+                        <header class="workbench-card-header"><div><span class="section-kicker">历史回测</span><h2>完整可用历史</h2><p>使用本地可用数据；覆盖不足时明确显示，不用估算值填补。</p></div><span id="backtest-status" class="workbench-status-chip" data-tone="warning">等待运行</span></header>
+                        <div class="workbench-inline-form"><label class="field"><span>策略 / Strategy</span><select id="backtest-strategy"><option value="bull_put">牛市看跌 / Bull Put</option><option value="covered_call">备兑看涨 / Covered Call</option><option value="zero_dte">零日期权（仅预览） / Zero-DTE</option></select></label><label class="field"><span>数据集</span><select id="backtest-dataset"><option value="">正在读取已注册数据集…</option></select></label><label class="field"><span>标的</span><input id="backtest-symbols" type="text" value="QQQ" placeholder="QQQ,SPY" /></label><label class="field"><span>开始日期</span><input id="backtest-start-date" type="date" value="2020-01-01" /></label><label class="field"><span>结束日期</span><input id="backtest-end-date" type="date" value="2026-09-30" /></label><label class="field"><span>数据分段</span><select id="backtest-period-segment"><option value="composite">组合区间（跨样本外需冻结）</option><option value="development">开发</option><option value="validation">验证</option><option value="holdout">留出（需冻结）</option></select></label><label class="field"><span>验证冻结来源</span><select id="backtest-freeze-source-run-id"><option value="">无（仅适用于不含样本外的区间）</option></select></label><label class="field"><span>初始资金</span><input id="backtest-initial-cash" type="number" min="1" step="1000" value="100000" /></label><label class="field"><span>每合约费用</span><input id="backtest-fee-per-contract" type="number" min="0" step="0.01" value="0" /></label><label class="field"><span>滑点（基点）</span><input id="backtest-slippage-bps" type="number" min="0" step="0.1" value="0" /></label><label class="field backtest-covered-call-field"><span>初始股票批次</span><input id="backtest-initial-stock-symbol" type="text" placeholder="Covered Call 标的" /></label><label class="field backtest-covered-call-field"><span>初始股数</span><input id="backtest-initial-stock-quantity" type="number" min="0" step="1" placeholder="例如 100" /></label><label class="field backtest-covered-call-field"><span>取得价格</span><input id="backtest-initial-stock-price" type="number" min="0" step="0.01" placeholder="每股成本" /></label><label class="field backtest-covered-call-field"><span>取得费用</span><input id="backtest-initial-stock-fee" type="number" min="0" step="0.01" value="0" placeholder="默认 0，仅在明确确认时使用" /></label><button id="backtest-run-button" class="table-action primary" type="button">创建历史回测</button><button id="backtest-start-button" class="table-action" type="button" disabled>开始运行选中任务</button><button id="backtest-cancel-button" class="table-action" type="button" disabled>取消选中任务</button><button id="backtest-compare-button" class="table-action" type="button" disabled>比较两次运行</button></div>
+                        <p class="workbench-backtest-status">日期、标的、费用和滑点都会写入回测清单；系统不会自动缩短日期范围。</p>
+                        <div class="table-shell"><table class="workbench-data-table"><thead><tr><th>运行</th><th>策略</th><th>数据集</th><th>状态</th><th>时间</th><th>结果</th></tr></thead><tbody id="backtest-runs-body"><tr><td colspan="6" class="empty-row">没有历史回测记录。先选择数据集并显式运行。</td></tr></tbody></table></div>
+                        <aside id="backtest-explanation-panel" class="workbench-explanation" style="margin: 0 18px 18px;"><div class="workbench-explanation-header"><div><span class="section-kicker">回测解释</span><h3>结果边界与表现</h3></div><span id="backtest-explanation-status" class="workbench-status-chip" data-tone="warning">等待选择</span></div><div class="workbench-explanation-body"><p id="backtest-explanation-summary" class="workbench-explanation-summary">回测结果只使用明确选择的数据集和参数。</p><div id="backtest-result-chart" class="workbench-chart"><div class="workbench-chart-empty">选择一条回测运行后查看净值曲线。</div></div><dl id="backtest-explanation-facts" class="workbench-facts"></dl></div></aside>
+                      </section>
 
                       <div class="strategy-layout">
                         <section class="panel panel-span-2" data-strategy-category="bull-put">
@@ -610,6 +684,11 @@ def render_dashboard() -> HTMLResponse:
                               <div id="advisor-output-card" class="strategy-note-body empty">
                                 Advisor context is available on demand. DeepSeek dry-run sends the selected account context outside the local app.
                               </div>
+                              <section id="advisor-audit-panel" class="workbench-card" aria-label="Advisor 审计" style="margin-top: 14px;">
+                                <header class="workbench-card-header"><div><span class="section-kicker">审计证据</span><h3>Advisor 运行复核</h3><p>读取本地审计记录，不会再次调用模型。</p></div><button id="advisor-audit-load" class="table-action" type="button">查看审计</button></header>
+                                <p id="advisor-audit-status" class="workbench-advisor-status" role="status" aria-live="polite"></p>
+                                <div class="advisor-audit-layout"><div id="advisor-audit-list" class="advisor-audit-list"><div class="workbench-blocked"><div><strong>等待读取</strong><br />点击“查看审计”加载本地记录。</div></div></div><div id="advisor-audit-detail" class="advisor-audit-detail"></div></div>
+                              </section>
                             </article>
                           </div>
                         </section>
@@ -785,6 +864,17 @@ def render_dashboard() -> HTMLResponse:
                         <div><span class="section-kicker">On Demand</span><h2>Macro &amp; Event Board</h2></div>
                         <p class="section-summary">Market events and option overlays load only when requested.</p>
                       </div>
+                      <section class="market-workbench-grid workbench-hero" aria-label="市场事件时间线">
+                        <article class="workbench-card"><header class="workbench-card-header"><div><span class="section-kicker">事件时间线</span><h2>市场催化剂</h2><p>按时间查看已保存的事件和来源。</p></div><button id="market-timeline-refresh" class="table-action" type="button">刷新时间线</button></header><div id="market-event-timeline" class="workbench-timeline"><div class="workbench-blocked"><div><strong>暂未加载</strong><br />选择账户后读取事件时间线。</div></div></div></article>
+                        <aside id="market-explanation-panel" class="workbench-explanation"><div class="workbench-explanation-header"><div><span class="section-kicker">市场解释</span><h2>为什么现在值得看</h2></div><span id="market-explanation-status" class="workbench-status-chip" data-tone="warning">等待数据</span></div><div class="workbench-explanation-body"><p id="market-explanation-summary" class="workbench-explanation-summary">事件是背景证据，不会自动变成交易建议。</p><dl id="market-explanation-facts" class="workbench-facts"></dl></div><div class="workbench-task-row"><button id="market-load-preopen-board" class="table-action primary" type="button">加载实时市场板</button><button id="market-load-preopen-overlays" class="table-action" type="button">加载期权叠加层</button><button id="market-save-preopen-board" class="table-action" type="button" disabled>保存当前板面</button></div></aside>
+                      </section>
+                      <section id="market-session-comparison-panel" class="workbench-card market-session-comparison-panel" aria-label="盘前收盘盘后对照">
+                        <header class="workbench-card-header"><div><span class="section-kicker">盘前 / 收盘 / 盘后</span><h2>市场时段对照</h2><p>盘前基准、常规收盘参考和盘后报价并排显示；缺口不会用 0 填补。</p></div><span id="market-session-comparison-status" class="workbench-status-chip" data-tone="warning" role="status" aria-live="polite">等待读取</span></header>
+                        <div class="workbench-inline-form"><label class="field"><span>标的</span><input id="market-session-comparison-symbol" type="text" maxlength="32" value="QQQ.US" /></label><label class="field field-wide"><span>已保存的对照</span><select id="market-session-comparison-saved-select" aria-label="选择已保存的市场时段对照"><option value="">选择标的后读取历史记录</option></select></label><button id="market-session-comparison-refresh" class="table-action" type="button">读取最新对照</button><button id="market-session-comparison-capture" class="table-action primary" type="button">采集并记录时段报价</button><button id="market-session-comparison-load-more" class="table-action" type="button" disabled>加载更多历史记录</button></div>
+                        <div id="market-session-comparison-summary" class="market-session-comparison-summary"><div class="market-session-evidence-card"><span>盘前基准</span><strong>--</strong><small>尚未读取</small></div><div class="market-session-evidence-card"><span>常规收盘</span><strong>--</strong><small>尚未读取</small></div><div class="market-session-evidence-card"><span>盘后报价</span><strong>--</strong><small>尚未读取</small></div></div>
+                        <div id="market-session-comparison-explanation" class="workbench-explanation-body"><p class="workbench-explanation-summary">读取后会说明两段变化、来源、时区和证据缺口。</p></div>
+                        <details class="workbench-raw-details"><summary>查看原始时段证据</summary><pre id="market-session-comparison-raw">暂无原始证据。</pre></details>
+                      </section>
                       <div id="macro-workspace-grid" class="strategy-layout"></div>
                     </section>
 
@@ -795,7 +885,24 @@ def render_dashboard() -> HTMLResponse:
                           <h2>Holdings Overview</h2>
                         </div>
                       </div>
-                      <div id="positions-summary-strip" class="mini-metric-strip">
+                      <section class="portfolio-workbench-grid workbench-hero" aria-label="持仓表现与解释">
+                        <article class="workbench-card">
+                          <header class="workbench-card-header"><div><span class="section-kicker">历史表现</span><h2>净清算值曲线</h2><p>按保存的账户快照绘制，日期缺口会直接标出。</p></div><span class="workbench-data-badge" data-quality="unknown">等待数据</span></header>
+                          <div id="portfolio-equity-chart" class="workbench-chart"><div class="workbench-chart-empty">选择账户后加载历史净值。</div></div>
+                        </article>
+                        <aside id="portfolio-explanation-panel" class="workbench-explanation">
+                          <div class="workbench-explanation-header"><div><span class="section-kicker">持仓解释</span><h2>当前组合发生了什么</h2></div><span id="portfolio-explanation-status" class="workbench-status-chip" data-tone="warning">等待数据</span></div>
+                          <div class="workbench-explanation-body"><p id="portfolio-explanation-summary" class="workbench-explanation-summary">这里会解释净值、盈亏、回撤和数据时间，不会用估算值填补缺口。</p><dl id="portfolio-explanation-facts" class="workbench-facts"></dl></div>
+                          <div class="workbench-task-row"><button class="table-action" type="button" id="portfolio-refresh-analytics">刷新组合分析</button><button class="table-action" type="button" id="portfolio-open-research">打开持仓研究</button></div>
+                        </aside>
+                      </section>
+                      <section class="portfolio-workbench-grid workbench-two-column" aria-label="持仓风险">
+                        <article class="workbench-card"><header class="workbench-card-header"><div><span class="section-kicker">持仓分布</span><h2>当前持仓与权重</h2></div></header><div class="table-shell"><table class="workbench-data-table"><thead><tr><th>标的</th><th>类型</th><th>数量</th><th>市值</th><th>权重</th></tr></thead><tbody id="portfolio-analytics-body"><tr><td colspan="5" class="empty-row">暂无持仓证据。</td></tr></tbody></table></div></article>
+                        <article class="workbench-card"><header class="workbench-card-header"><div><span class="section-kicker">组合风险</span><h2>集中度与策略暴露</h2><p>缺少明确分母时显示无法计算；策略暴露单独列出。</p></div></header><div id="portfolio-risk-bars" class="workbench-bar-list"><div class="workbench-blocked"><div><strong>缺少风险数据</strong><br />选择账户后读取。</div></div></div><div class="workbench-explanation-body"><h3>策略暴露</h3><div id="portfolio-strategy-exposures" class="workbench-bar-list"></div></div><div id="portfolio-linked-review" class="workbench-explanation-body"><p class="workbench-explanation-summary">关联策略、订单和日志会显示在这里。</p><ul id="portfolio-linked-review-list" class="workbench-explanation-list"></ul></div></article>
+                      </section>
+                       <details id="portfolio-raw-snapshot" class="workbench-raw-details">
+                        <summary>查看原始持仓快照</summary>
+                       <div id="positions-summary-strip" class="mini-metric-strip">
                         <article class="mini-metric-tile">
                           <span class="metric-label">Open Positions</span>
                           <strong class="mini-metric-value">--</strong>
@@ -813,7 +920,7 @@ def render_dashboard() -> HTMLResponse:
                           <strong class="mini-metric-value">--</strong>
                         </article>
                       </div>
-                      <div class="table-shell">
+                       <div class="table-shell">
                         <table class="data-table">
                           <thead>
                             <tr>
@@ -830,7 +937,8 @@ def render_dashboard() -> HTMLResponse:
                             <tr><td colspan="7" class="empty-row">No positions in latest snapshot.</td></tr>
                           </tbody>
                         </table>
-                      </div>
+                       </div>
+                       </details>
                     </section>
 
                   </main>
@@ -1132,6 +1240,14 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{trading_safety_js_url}" defer></script>
                 <script src="{execution_drawer_js_url}" defer></script>
                 <script src="{workspace_shell_js_url}" defer></script>
+                <script src="{workbench_ui_js_url}" defer></script>
+                <script src="{research_case_js_url}" defer></script>
+                <script src="{portfolio_workbench_js_url}" defer></script>
+                <script src="{market_timeline_js_url}" defer></script>
+                <script src="{market_session_comparison_js_url}" defer></script>
+                <script src="{strategy_backtest_js_url}" defer></script>
+                <script src="{strategy_readiness_js_url}" defer></script>
+                <script src="{advisor_audit_js_url}" defer></script>
                 <script src="{app_js_url}" defer></script>
               </body>
             </html>

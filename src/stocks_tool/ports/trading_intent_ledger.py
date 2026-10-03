@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from datetime import datetime
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, TradingIntentState, TradingOperation
 from stocks_tool.domain.models import (
@@ -21,6 +21,14 @@ class TradeActionIntentConflictError(RuntimeError):
     def __init__(self, intent_id: str) -> None:
         super().__init__("Trade action idempotency key was already used for a different request.")
         self.intent_id = intent_id
+
+
+class ReconciliationCursor(NamedTuple):
+    """Stable keyset position for one bounded unresolved-intent pass."""
+
+    updated_at: datetime
+    created_at: datetime
+    intent_id: str
 
 
 class TradingIntentLedger(Protocol):
@@ -168,6 +176,29 @@ class TradingIntentLedger(Protocol):
         operations: Collection[TradingOperation] | None = None,
         limit: int | None = 100,
     ) -> list[BrokerOrderIntent]:
+        ...
+
+    def get_reconciliation_high_watermark(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        states: Collection[TradingIntentState],
+    ) -> ReconciliationCursor | None:
+        """Return the latest key visible at the start of a bounded pass."""
+        ...
+
+    def list_reconciliation_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        states: Collection[TradingIntentState],
+        high_watermark: ReconciliationCursor,
+        cursor: ReconciliationCursor | None = None,
+        limit: int = 100,
+    ) -> list[BrokerOrderIntent]:
+        """Read one fair, keyset-bounded unresolved-intent page."""
         ...
 
     def count_intents(

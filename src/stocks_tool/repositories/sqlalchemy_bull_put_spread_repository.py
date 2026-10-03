@@ -2,7 +2,7 @@ from collections.abc import Collection
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import or_, select, tuple_
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from stocks_tool.application.services.strategy_lifecycle import bull_put_lifecycle_summary
@@ -174,6 +174,87 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         except Exception:
             self.session.rollback()
             raise
+
+    def count_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        statuses: Collection[SpreadStatus] | None = None,
+        underlying_symbol: str | None = None,
+        underlying_symbols: Collection[str] | None = None,
+        manual_action_required: bool | None = None,
+        closed_since: datetime | None = None,
+        entry_attempt_start: datetime | None = None,
+        entry_attempt_end: datetime | None = None,
+    ) -> int:
+        query = select(func.count(BullPutSpreadRecord.id)).where(
+            BullPutSpreadRecord.external_account_id == external_account_id,
+            BullPutSpreadRecord.execution_mode == mode.value,
+        )
+        if statuses is not None:
+            values = [status.value for status in statuses]
+            if not values:
+                return 0
+            query = query.where(BullPutSpreadRecord.status.in_(values))
+        if underlying_symbol is not None:
+            query = query.where(
+                BullPutSpreadRecord.underlying_symbol == underlying_symbol.strip().upper()
+            )
+        if underlying_symbols is not None:
+            values = [symbol.strip().upper() for symbol in underlying_symbols if symbol.strip()]
+            if not values:
+                return 0
+            query = query.where(BullPutSpreadRecord.underlying_symbol.in_(values))
+        if manual_action_required is not None:
+            query = query.where(
+                BullPutSpreadRecord.manual_action_required.is_(manual_action_required)
+            )
+        if closed_since is not None:
+            query = query.where(BullPutSpreadRecord.closed_at > closed_since)
+        entry_attempt_at = func.coalesce(
+            BullPutSpreadRecord.entry_started_at,
+            BullPutSpreadRecord.created_at,
+        )
+        if entry_attempt_start is not None:
+            query = query.where(entry_attempt_at >= entry_attempt_start)
+        if entry_attempt_end is not None:
+            query = query.where(entry_attempt_at < entry_attempt_end)
+        return int(self.session.execute(query).scalar_one() or 0)
+
+    def get_oldest_closed_at(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+    ) -> datetime | None:
+        return self.session.execute(
+            select(func.min(BullPutSpreadRecord.closed_at)).where(
+                BullPutSpreadRecord.external_account_id == external_account_id,
+                BullPutSpreadRecord.execution_mode == mode.value,
+                BullPutSpreadRecord.status == SpreadStatus.CLOSED.value,
+                BullPutSpreadRecord.closed_at.is_not(None),
+            )
+        ).scalar_one_or_none()
+
+    def list_closed_spreads_since(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        closed_since: datetime,
+    ) -> list[BullPutSpread]:
+        query = (
+            select(BullPutSpreadRecord)
+            .where(
+                BullPutSpreadRecord.external_account_id == external_account_id,
+                BullPutSpreadRecord.execution_mode == mode.value,
+                BullPutSpreadRecord.status == SpreadStatus.CLOSED.value,
+                BullPutSpreadRecord.closed_at >= closed_since,
+            )
+            .order_by(BullPutSpreadRecord.closed_at.desc(), BullPutSpreadRecord.id.desc())
+        )
+        return [self._to_domain(record) for record in self.session.execute(query).scalars().all()]
 
     def update_spread(
         self,

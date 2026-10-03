@@ -488,6 +488,7 @@ class BullPutPreOpenResearch:
             self.journal_writer(
                 CreateJournalEntryRequest(
                     external_account_id=external_account_id,
+                    mode=ExecutionMode.PAPER,
                     symbol=assessment.preferred_vehicle or self._default_strategy_symbol(),
                     entry_type=JournalEntryType.NOTE,
                     title=f"Pre-open downside assessment for {assessment.target_session_date.isoformat()}",
@@ -565,6 +566,7 @@ class BullPutPreOpenResearch:
             self.journal_writer(
                 CreateJournalEntryRequest(
                     external_account_id=external_account_id,
+                    mode=ExecutionMode.PAPER,
                     symbol=stored.assessment.preferred_vehicle or self._default_strategy_symbol(),
                     entry_type=JournalEntryType.REVIEW,
                     title=f"Opening follow-through review for {stored.target_session_date.isoformat()}",

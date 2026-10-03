@@ -12,7 +12,17 @@ The project is intentionally scoped around:
 
 It does not attempt live autonomous trading in the current phase.
 
-The current schema requires `alembic upgrade head` through revision `20261002_0019`. The October 2026 changes harden unknown-order evidence, atomic Advisor records and scheduler leases, add indexed history pages, and separate strategy orchestration and dashboard account state. See `docs/runtime-operations.md` for migration and recovery, and `docs/project-wide-optimization-campaign.md` for the active implementation and acceptance scope. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+The current source requires `alembic upgrade head` through revision `20261004_0025`. Back up an existing database and validate the upgrade in an isolated restored database first. October 4 adds snapshot mode/provenance, mode-scoped strategy runtime and journals, durable research and market-session records, isolated offline-backtest records and concurrent event deduplication. Legacy snapshots with unverified mode remain preserved and cannot authorize an opening order. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+
+The active upgrade and requirement-by-requirement acceptance are documented in `docs/professional-workbench-upgrade.md` and `docs/session-summary.md`. Earlier campaign results are historical evidence, not proof that the current working source has passed. See `docs/runtime-operations.md` for migration and recovery.
+
+### Personal workbench upgrade
+
+中文操作说明：[工作台使用说明](docs/workbench-guide.zh.md)。
+
+The Chinese-first interface keeps five workspaces: 研究, 策略, 市场, 持仓, and 运行与安全. Charts and tables have visible explanations, evidence time/source and explicit next actions. Named research screens and immutable research cases persist in PostgreSQL. Portfolio reads distinguish raw NAV changes from investment returns and disclose unavailable cash flows, fees, Greeks and unverified history.
+
+Offline backtesting is a separate local compute adapter. It does not receive broker credentials or write the application's orders, executions or trading intents. Bull Put, Covered Call and Zero-DTE research use simulated orders inside LEAN, with explicit fill, cost and lifecycle models. This does not unlock the broker Zero-DTE routes. No paid dataset subscription is required for the software, but no authorized multi-year options dataset is currently available: genuine 2020-01-01 through 2026-09-30 historical validation remains `BLOCKED_DATA`. Fixture runs are software checks and cannot establish strategy performance. A broker paper-order canary requires separate authorization.
 
 ## Current status
 
@@ -29,6 +39,7 @@ This repository currently contains:
 - a preview-only `zero_dte_lottery_v1` research workflow; all execution and auto-order surfaces are P0-locked until expiration handling exists
 - a local market-event calendar for earnings and macro risk windows, including CSV import and a first FMP provider adapter
 - a pre-open downside board with SPY / QQQ option-chain analysis for directional long-put checks
+- an immutable market-session comparison that records a saved pre-open baseline against the same trading day's regular-close reference and post-market quote
 - a background paper-account reconciliation loop for account snapshots, orders, and open bull put spreads
 - a read-only operator status endpoint for unattended paper posture and lifecycle warnings
 - an order-linked journal and review workflow for trade notes
@@ -130,6 +141,10 @@ Then open:
 - `PATCH /watchlists/{watchlist_id}`
 - `PATCH /watchlists/{watchlist_id}/items/{item_id}`
 - `DELETE /watchlists/{watchlist_id}/items/{item_id}`
+- `POST /market-session-comparisons`
+- `GET /market-session-comparisons`
+- `GET /market-session-comparisons/latest`
+- `GET /market-session-comparisons/{comparison_id}`
 - `GET /strategies/bull-put/preview?external_account_id=LBPT10087357&symbol=QQQ.US&mode=paper`
 - `GET /strategies/bull-put/readiness?external_account_id=LBPT10087357&mode=paper`
 - `GET /strategies/pre-open-risk`
@@ -236,6 +251,7 @@ The bull put spread workflow is currently paper-only:
 - runtime state: daily entry count, daily realized PnL, last scan result, last skip reason, last review summary, last action, and paused symbols are stored in `bull_put_strategy_runtime`
 - journaling: the strategy now writes entry, close, scan-skip, and parameter-review notes into the existing journal workflow
 - pre-open run persistence: the strategy now stores one structured pre-open assessment per target U.S. session date, auto-journals the captured read, and records opening follow-through at `09:30 / 09:45 / 10:00 ET`
+- market-session comparison: `POST /market-session-comparisons` reads the server-side pre-open signal, Longbridge regular-close reference, and `post_market_quote` for the same U.S. trading day, then saves one immutable local comparison. It is broker-read-only, never submits an order, keeps missing/stale evidence empty instead of zero, and exposes bounded account/mode/symbol history through `GET /market-session-comparisons` plus `/latest` and ID detail. The regular-close reference is only valid at the true exchange close (`16:00 ET`, or `13:00 ET` on a confirmed half day); it is not an auction-price guarantee. Migration `20261004_0025` is required before using the persisted table.
 - holiday handling: the pre-open assessment now distinguishes normal Mondays from exchange holidays, so `2026-05-25` Memorial Day correctly rolls the next regular open to `2026-05-26 09:30 ET`
 - dashboard: the `/` workbench now shows a real-time macro board for QQQ / SPY downside checks, including plain-put action guidance, gap-chase risk, opening checkpoints, optional reference-put liquidity summaries, optional deeper option-chain analysis with front / next expiry ATM IV, put-skew, term-slope, and liquid-strike summaries, plus a separate stored opening follow-through review for the selected broker account, alongside bull put strategy controls, last skip reason, latest review, recent strategy notes, bull put spread summary cards, and per-spread `refresh` / `monitor` controls
 - historical dashboard load behavior: before the 2026-08-10 research workstation, account snapshots, orders, spreads, runtime state, executions, journals, and the latest stored pre-open run rendered first while `Quick Quote` and the real-time macro board were manual. `Quick Quote` is now removed; Research Desk renders its batch quote/account context first and fills daily-bar technicals progressively.

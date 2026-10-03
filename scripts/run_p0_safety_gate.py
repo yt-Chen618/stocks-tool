@@ -134,6 +134,16 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 str(evidence_dir / "recovery-ui.json"),
             ],
         },
+        {
+            "name": "workbench-features",
+            "timeout_seconds": 600,
+            "command": [
+                sys.executable,
+                str(ROOT / "scripts" / "run_workbench_feature_regression.py"),
+                "--json-output",
+                str(evidence_dir / "workbench-features.json"),
+            ],
+        },
     ]
     if not args.skip_running_api_checks:
         specs.append(

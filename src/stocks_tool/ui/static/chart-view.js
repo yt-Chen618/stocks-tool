@@ -141,14 +141,14 @@
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
-      title: "SMA20",
+      title: document.documentElement.lang.startsWith("zh") ? "20日均价" : "SMA20",
     });
     const sma50Series = chart.addSeries(library.LineSeries, {
       color: COLORS.sma50,
       lineWidth: 2,
       priceLineVisible: false,
       lastValueVisible: false,
-      title: "SMA50",
+      title: document.documentElement.lang.startsWith("zh") ? "50日均价" : "SMA50",
     });
 
     chart.priceScale("right").applyOptions({ scaleMargins: { top: 0.08, bottom: 0.28 } });
@@ -183,6 +183,9 @@
       if (destroyed) {
         return false;
       }
+      const chinese = document.documentElement.lang.startsWith("zh");
+      sma20Series.applyOptions({ title: chinese ? "20日均价" : "SMA20" });
+      sma50Series.applyOptions({ title: chinese ? "50日均价" : "SMA50" });
       const normalized = normalizeBars(bars);
       chart.applyOptions({
         localization: { locale: renderOptions.locale || document.documentElement.lang || "zh-CN" },

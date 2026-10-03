@@ -111,9 +111,11 @@
       chartView: byId("research-chart-view"),
       tableBody: byId("research-table-body"),
       search: byId("research-search"),
+      watchlist: byId("research-watchlist-select"),
       source: byId("research-source-filter"),
       event: byId("research-event-filter"),
       held: byId("research-held-filter"),
+      heldFilterStatus: byId("research-held-filter-status"),
       strategy: byId("research-strategy-filter"),
       closeAboveSma20: byId("research-trend-close-sma20"),
       sma20AboveSma50: byId("research-trend-sma20-sma50"),
@@ -270,6 +272,35 @@
     }
   }
 
+  function applySavedScreen(screen) {
+    const configuration = screen?.configuration && typeof screen.configuration === "object" ? screen.configuration : {};
+    const defaults = cloneDefaultState();
+    persisted.filters = { ...defaults.filters, ...(configuration.filters || {}) };
+    persisted.sort = {
+      ...defaults.sort,
+      ...(configuration.sort || {}),
+      direction: configuration.sort?.direction === "desc" ? "desc" : "asc",
+    };
+    persisted.view = VALID_VIEWS.has(configuration.view) ? configuration.view : defaults.view;
+    const savedRange = configuration.history_range;
+    persisted.range = VALID_RANGES.has(savedRange) ? savedRange : defaults.range;
+    persisted.columnSet = VALID_COLUMN_SETS.has(configuration.column_set || configuration.columnSet)
+      ? (configuration.column_set || configuration.columnSet)
+      : defaults.columnSet;
+    persisted.selectedSymbol = normalizeSymbol(configuration.selected_symbol);
+    if (configuration.watchlist_id && runtime.elements.watchlist) {
+      runtime.elements.watchlist.value = configuration.watchlist_id;
+      runtime.watchlistId = configuration.watchlist_id;
+    }
+    persistState();
+    restoreControls();
+    updateSourceOptions();
+    ensureSelection();
+    renderAll();
+    if (persisted.view === "chart") void loadSelectedChart();
+    return true;
+  }
+
   async function refresh(options = {}) {
     if (!runtime.initialized && !init()) {
       return false;
@@ -327,6 +358,7 @@
     runtime.generatedAt = universe?.generated_at || null;
     runtime.dataQuality = universe?.data_quality || null;
     runtime.warnings = Array.isArray(universe?.warnings) ? universe.warnings : [];
+    setHeldFilterAvailability();
     runtime.technicalsComplete = runtime.rows.length === 0;
     ensureSelection();
     updateSourceOptions();
@@ -462,6 +494,17 @@
     renderProgress();
     renderRowsAndList();
     renderSelectedDetails();
+    notifyResearchState();
+  }
+
+  function notifyResearchState() {
+    try {
+      window.dispatchEvent(new CustomEvent("stocks-tool:research-state", {
+        detail: { state: getState() },
+      }));
+    } catch (_error) {
+      // Research remains usable when a host does not provide CustomEvent.
+    }
   }
 
   function renderRowsAndList() {
@@ -505,7 +548,7 @@
       appendCell(row, item.symbol, "always", "research-symbol-cell");
       appendCell(row, formatMoney(quoteLast(item.quote)), "overview", "numeric");
       appendCell(row, formatSignedPercent(item.dayChangePct), "overview", toneClass(item.dayChangePct));
-      appendCell(row, item.sources.join(" · ") || "--", "overview");
+      appendCell(row, item.sources.map(formatSource).join(" · ") || "--", "overview");
       appendCell(row, formatMoney(item.position_market_value), "overview", "numeric");
       appendCell(row, formatSignedPercent(item.technicals?.return_20d_pct), "momentum", toneClass(item.technicals?.return_20d_pct));
       appendCell(row, formatSignedPercent(item.technicals?.return_60d_pct), "momentum", toneClass(item.technicals?.return_60d_pct));
@@ -658,6 +701,7 @@
     persisted.columnSet = columnSet;
     persistState();
     renderColumnState();
+    notifyResearchState();
   }
 
   function setSort(key) {
@@ -672,6 +716,7 @@
     persistState();
     renderSortState();
     renderRowsAndList();
+    notifyResearchState();
   }
 
   function setRange(range) {
@@ -681,6 +726,7 @@
     persisted.range = range;
     persistState();
     renderRangeState();
+    notifyResearchState();
     if (persisted.view === "chart") {
       void loadSelectedChart();
     }
@@ -703,6 +749,7 @@
     persistState();
     renderRowsAndList();
     renderSelectedDetails();
+    notifyResearchState();
     if (persisted.view === "chart" && options.loadChart !== false) {
       void loadSelectedChart();
     }
@@ -859,6 +906,9 @@
     if (!normalized || normalized === "all" || normalized === "any") {
       return true;
     }
+    if (runtime.warnings.includes("account_snapshot_unavailable")) {
+      return true;
+    }
     const held = (toNumber(row.position_quantity) || 0) !== 0;
     return ["held", "yes", "true", "only"].includes(normalized) ? held : !held;
   }
@@ -952,6 +1002,7 @@
     const selectionChanged = ensureSelection(getVisibleRows());
     renderRowsAndList();
     renderSelectedDetails();
+    notifyResearchState();
     if (selectionChanged && persisted.view === "chart") {
       void loadSelectedChart();
     }
@@ -983,7 +1034,7 @@
     for (const source of sources) {
       const option = document.createElement("option");
       option.value = source;
-      option.textContent = source;
+      option.textContent = formatSource(source);
       select.appendChild(option);
     }
     select.value = sources.includes(selected) ? selected : "";
@@ -1013,6 +1064,29 @@
       button.setAttribute("aria-disabled", String(disabled));
       button.title = disabled
         ? text("技术指标批次完成后可排序", "Sorting is available after all technical batches complete")
+        : "";
+    }
+  }
+
+  function setHeldFilterAvailability() {
+    const unavailable = runtime.warnings.includes("account_snapshot_unavailable");
+    const select = runtime.elements.held;
+    const hint = runtime.elements.heldFilterStatus;
+    if (select) {
+      select.disabled = unavailable;
+      select.setAttribute("aria-disabled", String(unavailable));
+      select.title = unavailable
+        ? text("暂无可信账户快照，持仓情况未知；此筛选已停用。", "No trusted account snapshot; holding status is unknown and this filter is disabled.")
+        : "";
+    }
+    if (unavailable && persisted.filters.held) {
+      persisted.filters.held = "";
+      persistState();
+    }
+    if (hint) {
+      hint.hidden = !unavailable;
+      hint.textContent = unavailable
+        ? text("持仓情况未知，不能判断已持仓/未持仓。", "Holding status is unknown; held/not-held cannot be determined.")
         : "";
     }
   }
@@ -1176,18 +1250,45 @@
   }
 
   function formatStrategies(states) {
+    const label = (value) => {
+      const raw = String(value || "");
+      const known = {
+        bull_put_pool: text("牛市看跌标的池", "Bull Put pool"),
+        zero_dte_pool: text("零日期权标的池", "Zero-DTE pool"),
+        covered_call_active: text("备兑看涨持仓", "Covered Call active"),
+        bull_put_spread: text("牛市看跌价差", "Bull Put spread"),
+        strategy_proposal: text("策略提案", "Strategy proposal"),
+        bull_put_ready: text("牛市看跌价差：可继续评估", "Bull Put: ready for evaluation"),
+        zero_dte_preview_only: text("零日期权：仅供研究", "Zero-DTE: research only"),
+      };
+      if (known[raw]) return known[raw];
+      const prefix = raw.split(":", 1)[0];
+      const prefixLabel = known[prefix];
+      return prefixLabel ? `${prefixLabel}${raw.slice(prefix.length)}` : raw;
+    };
     if (Array.isArray(states)) {
       const labels = states.map((state) => typeof state === "string"
         ? state
         : state?.strategy || state?.name || state?.kind || state?.status).filter(Boolean);
-      return labels.join(" · ") || "--";
+      return labels.map(label).join(" · ") || "--";
     }
     if (states && typeof states === "object") {
       const labels = Object.entries(states).filter(([, value]) => value !== null && value !== false && value !== "")
-        .map(([key, value]) => typeof value === "string" ? `${key}: ${value}` : key);
+        .map(([key, value]) => typeof value === "string" ? `${label(key)}: ${label(value)}` : label(key));
       return labels.join(" · ") || "--";
     }
     return states ? String(states) : "--";
+  }
+
+  function formatSource(source) {
+    const labels = {
+      watchlist: text("自选列表", "Watchlist"),
+      position: text("已有持仓", "Position"),
+      bull_put_pool: text("牛市看跌候选池", "Bull Put pool"),
+      zero_dte_pool: text("零日期权研究池", "Zero-DTE research pool"),
+      bull_put_spread: text("当前价差持仓", "Active spread"),
+    };
+    return labels[source] || source;
   }
 
   function noteText(notes) {
@@ -1207,11 +1308,11 @@
     const labels = [];
     if (technicals.close_above_sma20 !== null) {
       labels.push(technicals.close_above_sma20
-        ? text("收盘>SMA20", "Close>SMA20")
-        : text("收盘≤SMA20", "Close≤SMA20"));
+        ? text("收盘高于20日均价", "Close>SMA20")
+        : text("收盘不高于20日均价", "Close≤SMA20"));
     }
     if (technicals.sma20_above_sma50 !== null) {
-      labels.push(technicals.sma20_above_sma50 ? "SMA20>SMA50" : "SMA20≤SMA50");
+      labels.push(technicals.sma20_above_sma50 ? text("20日均价高于50日均价", "SMA20>SMA50") : text("20日均价不高于50日均价", "SMA20≤SMA50"));
     }
     return labels.join(" · ") || "--";
   }
@@ -1268,5 +1369,5 @@
     return isChinese() ? chinese : english;
   }
 
-  window.StocksToolResearch = { init, refresh, selectSymbol, getState };
+  window.StocksToolResearch = { init, refresh, selectSymbol, getState, applySavedScreen };
 })();

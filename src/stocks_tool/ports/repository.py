@@ -3,6 +3,7 @@ from collections.abc import Collection, Iterator
 from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
     BrokerName,
     ExecutionMode,
     JournalEntryType,
@@ -117,6 +118,13 @@ class MarketEventRepository(ABC):
     def create_event(self, request: CreateMarketEventRequest) -> MarketEvent:
         raise NotImplementedError
 
+    def create_event_if_absent(
+        self,
+        request: CreateMarketEventRequest,
+    ) -> tuple[MarketEvent, bool]:
+        """Create an event atomically when the repository supports dedupe."""
+        return self.create_event(request), True
+
     @abstractmethod
     def list_events(
         self,
@@ -174,20 +182,31 @@ class BrokerAccountRepository(ABC):
 
 class AccountSnapshotRepository(ABC):
     @abstractmethod
-    def create_account_snapshot(self, snapshot: AccountSnapshot) -> AccountSnapshot:
+    def create_account_snapshot(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        provenance: AccountSnapshotProvenance,
+    ) -> AccountSnapshot:
         raise NotImplementedError
 
     @abstractmethod
     def get_latest_account_snapshot(
         self,
+        *,
         external_account_id: str,
+        mode: ExecutionMode,
+        trusted_only: bool,
     ) -> AccountSnapshot | None:
         raise NotImplementedError
 
     @abstractmethod
     def list_account_snapshots(
         self,
+        *,
         external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        trusted_only: bool = False,
     ) -> list[AccountSnapshot]:
         raise NotImplementedError
 
@@ -279,6 +298,8 @@ class ExecutionRepository(ABC):
         self,
         external_account_id: str | None = None,
         order_id: str | None = None,
+        *,
+        mode: ExecutionMode | None = None,
     ) -> list[Execution]:
         raise NotImplementedError
 
@@ -288,6 +309,7 @@ class ExecutionRepository(ABC):
         *,
         external_account_id: str | None = None,
         order_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> CursorPage[Execution]:
@@ -310,6 +332,8 @@ class JournalRepository(ABC):
         order_id: str | None = None,
         trade_plan_id: str | None = None,
         entry_type: JournalEntryType | None = None,
+        *,
+        mode: ExecutionMode | None = None,
     ) -> list[JournalEntry]:
         raise NotImplementedError
 
@@ -321,6 +345,7 @@ class JournalRepository(ABC):
         order_id: str | None = None,
         trade_plan_id: str | None = None,
         entry_type: JournalEntryType | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> CursorPage[JournalEntry]:
@@ -370,6 +395,41 @@ class BullPutSpreadRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def count_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        statuses: Collection[SpreadStatus] | None = None,
+        underlying_symbol: str | None = None,
+        underlying_symbols: Collection[str] | None = None,
+        manual_action_required: bool | None = None,
+        closed_since: datetime | None = None,
+        entry_attempt_start: datetime | None = None,
+        entry_attempt_end: datetime | None = None,
+    ) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_oldest_closed_at(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+    ) -> datetime | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_closed_spreads_since(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        closed_since: datetime,
+    ) -> list[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
     def update_spread(
         self,
         spread: BullPutSpread,
@@ -385,6 +445,7 @@ class BullPutStrategyRuntimeRepository(ABC):
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         raise NotImplementedError
@@ -394,6 +455,7 @@ class BullPutStrategyRuntimeRepository(ABC):
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         raise NotImplementedError
@@ -740,6 +802,7 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         source: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 20,
     ) -> list[StrategyAdvisorRun]:
         raise NotImplementedError

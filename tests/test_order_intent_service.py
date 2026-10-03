@@ -143,14 +143,22 @@ def intent(
 def service(ledger: Mock, adapter: Mock) -> OrderService:
     accounts = Mock()
     accounts.get_by_external_account_id.return_value = broker_account()
+    if ledger is not None:
+        ledger.list_intents.return_value = []
+    authorization = Mock()
+    authorization.authorize_manual_entry.return_value = None
+    authorization.authorize_exposure_increasing_replace.return_value = None
+    orders = Mock()
+    orders.list_orders.return_value = []
     return OrderService(
         settings=Settings(),
         broker_accounts=accounts,
         trade_plans=Mock(),
-        orders=Mock(),
+        orders=orders,
         executions=Mock(),
         longbridge_adapter=adapter,
         intent_ledger=ledger,
+        order_authorization=authorization,
     )
 
 

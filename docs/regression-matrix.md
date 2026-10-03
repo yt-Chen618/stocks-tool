@@ -1,6 +1,6 @@
 # Regression Matrix
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 Run the smallest relevant test first, then the broader gates before treating an optimization slice as done.
 
@@ -13,6 +13,51 @@ Resume by rerunning the same command with the same evidence directory after insp
 Fault timeouts apply per child, not to the campaign: static/environment checks default to 120 seconds, pytest/PostgreSQL/recovery checks to 600 seconds, and the complete mock matrix to 1,800 seconds. Browser wrappers have a separate 300-second default process deadline; real-refresh deadlines also allow the requested iteration count. Browser-step deadlines remain in effect. Owned process trees are checked by PID/start identity before cleanup, including Linux descendants in separate sessions. Mock-server output goes to diagnostic log files, avoiding unconsumed pipes. Cleanup or identity failures require inspection and cannot justify a successful validation claim.
 
 CI runs on PR updates, `main` pushes and manual dispatch, and checks out the exact PR head. Its concurrency group cancels only an older run for the same PR/ref. Uploaded evidence includes P0, history-query, strategy-query, deterministic Bull Put flow and screenshots. A saved workflow, local pass, or previous-head green run does not prove final remote acceptance.
+
+## Professional Workbench Gates
+
+`scripts/run_regression.py workbench-features` drives the real mock DOM through
+research selection, save/reload and immutable case capture, comparison, portfolio,
+events, Advisor and backtest read surfaces. It checks new-panel account races,
+explicit paper activity scope, missing-data explanations and three viewport sizes.
+It records zero broker mutations and hashes all served UI assets before/after;
+source drift invalidates the run. This gate is included in `p0-safety`.
+
+`scripts/run_regression.py p6-query` uses isolated PostgreSQL for 100k-intent keyset
+and fairness evidence, concurrent event deduplication, and legacy duplicate reuse
+beyond the first batch. Old records remain untouched; no broker is called.
+
+`scripts/lean_offline_smoke.py` is a separate actual-engine gate. It never pulls an
+image, downloads market data or contacts a broker. Provision the pinned official
+image first. `BLOCKED_ENV`, fixture simulation, and genuine historical validation
+are distinct outcomes. Synthetic data cannot satisfy the multi-year data gate.
+
+The engine matrix includes `--registered-fixture` for native equity and two
+explicit option contracts, and `--registered-fixture --partial-fill-fixture` for
+limited quote size, fill-forward rejection and incomplete-leg state. Lifecycle
+fixtures exercise stock split/dividend accounting and standard option expiry
+behavior. Record raw input rows separately from repeated/fill-forward observations;
+those observation counts are not independent historical samples. Compare repeat
+runs on normalized trades, equity and lifecycle events rather than elapsed time.
+
+Use `--lifecycle-fixture --lifecycle-scenario` with `split_dividend`,
+`covered_call_assignment`, or `long_call_exercise` for each actual-engine case.
+Split warnings and applied splits are counted separately. Option event counts
+also distinguish the contract exercise/assignment from underlying stock delivery.
+
+`scripts/lean_strategy_smoke.py` exercises the canonical Bull Put, Covered Call
+and Zero-DTE algorithms through registered CSV staging and the pinned engine's
+option-chain reader. It requires candidates and filled entry/exit orders, checks
+remaining positions and order groups, and repeats the same input to compare
+semantic results. Run it only after the local image is available; the script
+does not provision images or use broker credentials. This gate runs in the Linux
+LEAN CI job alongside the independent lifecycle fixtures. Zero-DTE warmup,
+half-day cutoff, partial entry cancellation and settlement also have focused
+fake-event tests in `tests/test_lean_zero_dte_simulation.py`.
+
+CI additionally checks the Windows process paths from a Unicode checkout and
+runs the actual offline LEAN fixture in an independent Linux job. All artifacts
+must match the PR head; a skipped or blocked engine gate is not a passing result.
 
 ## Reproducible Environment Gates
 
@@ -133,6 +178,34 @@ For the 2026-08-10 workstation change, cover the following before treating the U
 - Browser behavior: screener filters/sort/column groups, table/chart selected-symbol synchronization, chart range persistence, watchlist edits and stale-data retention, native drawer focus/Escape behavior, and the symbol-only research-to-ticket prefill boundary.
 - Safety behavior: confirmation cancellation, idempotency replay, double-click exact-once submit, unknown-outcome lock, Zero-DTE Preview Only, and broker-write disablement at `<=780px` while read-only drawer review remains available.
 - Capture the current shell at 1440px, 1024px, and 760px in the mock browser workflow. The existing 18-scenario posture matrix remains required, along with `real-ui-refresh` and `p0-safety`; do not weaken either gate for degraded Longbridge conditions.
+
+### Market-session comparison coverage
+
+The market-session comparison is a read-only broker observation plus an immutable
+local save. Run the focused contract tests with:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_market_session_comparison.py tests\test_mock_workbench_contracts.py tests\test_ui_dashboard.py -q
+```
+
+The focused cases must cover:
+
+- a true premarket baseline from a saved `PreOpenAssessmentRun`, with the selected
+  symbol and account/mode scope preserved;
+- regular-close evidence only after the true exchange close (`16:00 ET`, or `13:00 ET`
+  for a confirmed half day), with same-day daily-bar fallback explicitly labelled;
+- post-market quote evidence from `post_market_quote.last_done`;
+- missing, stale, future, cross-day, timezone-unknown, currency-unknown and
+  pre-close observations remaining unavailable instead of becoming zero;
+- immutable capture and cursor-bounded account/mode/symbol history;
+- idempotent retries using the same account/mode/capture key and original request
+  fingerprint, with a `409` for a changed request and a fresh observation when no
+  capture key is supplied;
+- no broker mutation and no dependency on a client-supplied price or session label.
+
+Migration `20261004_0025` is part of the schema contract. Apply and verify it in an
+isolated or approved database after retention evidence; do not treat a fixture or a
+saved UI card as proof of a live market close or post-market quote.
 
 ## Paper Strategy Gates
 

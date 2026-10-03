@@ -90,6 +90,10 @@ async function main() {
 
     await page.locator("[data-lang-option='en']").click();
     await expectText(page.locator("#research-section"), "Research Desk");
+    await page.click("#refresh-dashboard");
+    await page.waitForFunction(
+      () => document.documentElement.lang === "en" && document.querySelector("[data-lang-option='en']")?.getAttribute("aria-pressed") === "true",
+    );
 
     await page.click("#manage-watchlist-button");
     await page.waitForSelector("#watchlist-dialog[open]");

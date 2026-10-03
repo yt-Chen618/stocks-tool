@@ -1,6 +1,6 @@
 # API Route Inventory
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 This inventory groups public routes by bounded context. Paths are part of the compatibility surface for the dashboard and regression scripts.
 
@@ -9,14 +9,50 @@ This inventory groups public routes by bounded context. Paths are part of the co
 - `GET /`
 - `GET /app`
 - `GET /health`
+- `GET /health/live`
+- `GET /health/ready`
 - `GET /docs`
 
+## Portfolio and Offline Backtests
+
+- `GET /portfolio/analytics`
+- `GET /portfolio/risk`
+- `GET|POST /backtests/datasets`
+- `GET /backtests/datasets/{dataset_id}`
+- `POST /backtests/datasets/{dataset_id}/validate`
+- `GET|POST /backtests`
+- `GET /backtests/{run_id}`
+- `POST /backtests/{run_id}/start`
+- `POST /backtests/{run_id}/cancel`
+- `POST /backtests/compare`
+
+Portfolio reads default to paper mode. Analytics accept `start`, `end` and bounded
+`max_points`; risk currently describes current persisted exposures, and rejects
+historical `as_of` requests rather than combining historical balances with current
+strategy state. Unknown currencies, cash flows, fees and Greeks are explicit gaps.
+
+Backtests operate on registered local datasets and separate run/result tables.
+They have no broker execution mode or implicit account holdings. Formal runs
+covering the holdout period require a frozen validation reference. Dataset
+registration and a queued job are not evidence of a successful simulation.
+
 ## Research and Plans
+
+New screen/case/timeline reads return bounded cursor envelopes, with `limit`
+at most 100. Timeline ranges are at most 366 days. Capturing a case is an
+explicit server read of the selected symbol and configuration; subsequent GETs
+read the immutable saved evidence and do not call a provider.
 
 - `POST /research/rank`
 - `GET /research/universe`
 - `GET /research/technicals`
 - `GET /research/symbols/{symbol}/history`
+- `GET|POST /research/screens`
+- `GET|PATCH /research/screens/{screen_id}`
+- `POST /research/screens/{screen_id}/copy`
+- `GET|POST /research/cases`
+- `GET /research/cases/{case_id}`
+- `GET /research/timeline`
 - `POST /plans/draft`
 - `POST /plans/validate`
 
@@ -152,6 +188,37 @@ Only Preview is executable in P0. The execute route, `force=true` scan, and atte
 - `GET /strategies/pre-open-runs`
 - `POST /strategies/pre-open-runs/{external_account_id}/capture`
 - `POST /strategies/pre-open-runs/{external_account_id}/review`
+
+## Market-Session Comparison
+
+- `POST /market-session-comparisons`
+- `GET /market-session-comparisons`
+- `GET /market-session-comparisons/latest`
+- `GET /market-session-comparisons/{comparison_id}`
+
+The comparison capture is broker-read-only but persists an immutable local row. It
+accepts an account, `mode`, `symbol`, and optional `pre_open_run_id` / `capture_key`.
+The server resolves a true premarket assessment for the same target trading day;
+client-supplied prices are never accepted as evidence. The regular-close reference
+uses a Longbridge quote observed at or after the exchange close, or a validated
+same-day daily-bar close when that is the available reference. The close boundary is
+`16:00 ET`, or `13:00 ET` on a confirmed U.S. half day. A quote observed before that
+boundary cannot be labelled regular close.
+
+The post-market leg uses `post_market_quote.last_done`. Missing, stale, future,
+cross-day, timezone-unknown, or currency-unknown evidence remains missing and the
+corresponding percentage is not calculated; it is never replaced with zero. The
+response carries `baseline_evidence`, `regular_close_evidence`,
+`post_market_evidence`, reason codes, field explanations, and both
+`pre_to_regular_close_pct` and `regular_close_to_after_hours_pct` when valid.
+
+Comparison history is account/mode/symbol scoped and uses the opaque bounded cursor
+contract with `limit=1..100`. Capture idempotency is scoped to account and mode. A
+retry with the same `capture_key` and original request fingerprint replays the
+immutable comparison; reusing that key with a different symbol, mode, or baseline
+returns `409`. Omitting `capture_key` creates a new observation. Migration
+`20261004_0025` is required for the persisted table; operator rollout must be
+verified separately from this route contract.
 
 ## Operator
 

@@ -8,7 +8,12 @@ from stocks_tool.db.models import (
     BrokerAccountRecord,
     PositionSnapshotRecord,
 )
-from stocks_tool.domain.enums import AssetType, BrokerName
+from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
+    AssetType,
+    BrokerName,
+    ExecutionMode,
+)
 from stocks_tool.domain.models import AccountSnapshot, PositionSnapshot
 from stocks_tool.ports.repository import AccountSnapshotRepository
 
@@ -17,7 +22,12 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def create_account_snapshot(self, snapshot: AccountSnapshot) -> AccountSnapshot:
+    def create_account_snapshot(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        provenance: AccountSnapshotProvenance,
+    ) -> AccountSnapshot:
         broker_account = self.session.execute(
             select(BrokerAccountRecord).where(
                 BrokerAccountRecord.broker == snapshot.broker.value,
@@ -29,6 +39,8 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
             broker_account_id=broker_account.id if broker_account is not None else None,
             broker=snapshot.broker.value,
             external_account_id=snapshot.account_id,
+            execution_mode=snapshot.mode.value if snapshot.mode is not None else None,
+            provenance=provenance.value,
             currency=snapshot.currency,
             cash_balance=snapshot.cash_balance,
             net_liquidation=snapshot.net_liquidation,
@@ -66,15 +78,25 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
 
     def get_latest_account_snapshot(
         self,
+        *,
         external_account_id: str,
+        mode: ExecutionMode,
+        trusted_only: bool,
     ) -> AccountSnapshot | None:
         query = (
             select(AccountSnapshotRecord)
             .options(selectinload(AccountSnapshotRecord.positions))
-            .where(AccountSnapshotRecord.external_account_id == external_account_id)
+            .where(
+                AccountSnapshotRecord.external_account_id == external_account_id,
+                AccountSnapshotRecord.execution_mode == mode.value,
+            )
             .order_by(AccountSnapshotRecord.captured_at.desc())
             .limit(1)
         )
+        if trusted_only:
+            query = query.where(
+                AccountSnapshotRecord.provenance == AccountSnapshotProvenance.BROKER_SYNC.value
+            )
         record = self.session.execute(query).scalars().unique().first()
         if record is None:
             return None
@@ -82,7 +104,10 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
 
     def list_account_snapshots(
         self,
+        *,
         external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        trusted_only: bool = False,
     ) -> list[AccountSnapshot]:
         query = (
             select(AccountSnapshotRecord)
@@ -91,6 +116,12 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
         )
         if external_account_id is not None:
             query = query.where(AccountSnapshotRecord.external_account_id == external_account_id)
+        if mode is not None:
+            query = query.where(AccountSnapshotRecord.execution_mode == mode.value)
+        if trusted_only:
+            query = query.where(
+                AccountSnapshotRecord.provenance == AccountSnapshotProvenance.BROKER_SYNC.value
+            )
 
         records = self.session.execute(query).scalars().unique().all()
         return [self._to_domain(record) for record in records]
@@ -101,6 +132,10 @@ class SQLAlchemyAccountSnapshotRepository(AccountSnapshotRepository):
             id=record.id,
             broker=BrokerName(record.broker),
             account_id=record.external_account_id,
+            mode=ExecutionMode(record.execution_mode) if record.execution_mode is not None else None,
+            provenance=AccountSnapshotProvenance(
+                record.provenance or AccountSnapshotProvenance.LEGACY_UNKNOWN.value
+            ),
             currency=record.currency,
             cash_balance=Decimal(record.cash_balance),
             net_liquidation=Decimal(record.net_liquidation),

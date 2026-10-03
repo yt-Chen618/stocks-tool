@@ -8,6 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 
 from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
     AssetType,
     BrokerName,
     CatalystType,
@@ -123,6 +124,8 @@ class AccountSnapshot(BaseModel):
     id: str | None = None
     broker: BrokerName
     account_id: str
+    mode: ExecutionMode | None = None
+    provenance: AccountSnapshotProvenance = AccountSnapshotProvenance.LEGACY_UNKNOWN
     currency: str = "USD"
     cash_balance: Decimal
     net_liquidation: Decimal
@@ -145,6 +148,8 @@ class AccountSnapshotPositionSummary(BaseModel):
 
 class AccountSnapshotSummary(BaseModel):
     account_id: str
+    mode: ExecutionMode | None = None
+    provenance: AccountSnapshotProvenance = AccountSnapshotProvenance.LEGACY_UNKNOWN
     currency: str = "USD"
     cash_balance: Decimal
     net_liquidation: Decimal
@@ -156,6 +161,8 @@ class AccountSnapshotSummary(BaseModel):
     def from_snapshot(cls, snapshot: AccountSnapshot) -> "AccountSnapshotSummary":
         return cls(
             account_id=snapshot.account_id,
+            mode=snapshot.mode,
+            provenance=snapshot.provenance,
             currency=snapshot.currency,
             cash_balance=snapshot.cash_balance,
             net_liquidation=snapshot.net_liquidation,
@@ -352,6 +359,7 @@ class Execution(BaseModel):
 
 class CreateJournalEntryRequest(BaseModel):
     external_account_id: str
+    mode: ExecutionMode | None = None
     symbol: str
     entry_type: JournalEntryType
     title: str = Field(min_length=1, max_length=120)
@@ -365,6 +373,7 @@ class CreateJournalEntryRequest(BaseModel):
 class JournalEntry(BaseModel):
     id: str
     external_account_id: str
+    mode: ExecutionMode | None = None
     symbol: str
     entry_type: JournalEntryType
     title: str

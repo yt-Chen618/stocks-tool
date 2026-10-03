@@ -5,7 +5,12 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_account_snapshot_repository
-from stocks_tool.domain.enums import AssetType, BrokerName
+from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
+    AssetType,
+    BrokerName,
+    ExecutionMode,
+)
 from stocks_tool.domain.models import AccountSnapshot, PositionSnapshot
 from stocks_tool.main import app
 
@@ -15,6 +20,8 @@ def build_account_snapshot() -> AccountSnapshot:
         id="snapshot-1",
         broker=BrokerName.LONGBRIDGE,
         account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        provenance=AccountSnapshotProvenance.BROKER_SYNC,
         currency="USD",
         cash_balance=Decimal("1912916.09"),
         net_liquidation=Decimal("1916789.09"),
@@ -65,7 +72,9 @@ def test_get_latest_account_snapshot_returns_summary() -> None:
     assert "raw_payload" not in body
     assert "raw_payload" not in body["positions"][0]
     repository.get_latest_account_snapshot.assert_called_once_with(
-        external_account_id="LBPT10087357"
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        trusted_only=False,
     )
 
 
@@ -84,3 +93,45 @@ def test_get_latest_account_snapshot_returns_null_when_missing() -> None:
 
     assert response.status_code == 200
     assert response.json() is None
+
+
+def test_public_snapshot_upload_assigns_server_provenance() -> None:
+    repository = Mock()
+    uploaded = build_account_snapshot().model_copy(
+        update={"provenance": AccountSnapshotProvenance.PUBLIC_UPLOAD}
+    )
+    repository.create_account_snapshot.return_value = uploaded
+
+    client = with_account_snapshot_repository(repository)
+    try:
+        response = client.post(
+            "/account-snapshots",
+            json=build_account_snapshot()
+            .model_copy(
+                update={"provenance": AccountSnapshotProvenance.BROKER_SYNC}
+            )
+            .model_dump(mode="json"),
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 201
+    repository.create_account_snapshot.assert_called_once()
+    call = repository.create_account_snapshot.call_args
+    assert call.kwargs["provenance"] is AccountSnapshotProvenance.PUBLIC_UPLOAD
+
+
+def test_new_upload_without_mode_defaults_to_paper_but_stays_untrusted() -> None:
+    repository = Mock()
+    repository.create_account_snapshot.side_effect = lambda snapshot, **kwargs: snapshot.model_copy(
+        update={"provenance": kwargs["provenance"]}
+    )
+    payload = build_account_snapshot().model_dump(mode="json", exclude={"mode"})
+    client = with_account_snapshot_repository(repository)
+    try:
+        response = client.post("/account-snapshots", json=payload)
+    finally:
+        clear_overrides()
+    assert response.status_code == 201
+    assert response.json()["mode"] == "paper"
+    assert response.json()["provenance"] == "public_upload"

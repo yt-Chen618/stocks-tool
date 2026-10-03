@@ -99,6 +99,7 @@ function initializeViewModules() {
     updateOrderTicketAvailability: () => ordersView?.updateOrderTicketAvailability(),
     updatePreOpenButtons,
   });
+  window.StocksToolAccountLoaderRuntime = accountLoader;
   bullPutView = window.StocksToolBullPutView?.createBullPutView({
     state,
     els,
@@ -292,6 +293,7 @@ function renderEmptyAccountState() {
   ordersView?.updateOrderTicketAvailability();
   updatePreOpenButtons();
   applyTradingSafetyState();
+  notifyWorkbenchAccountState("empty");
 }
 
 function renderAccountDataState({ errors, requiredFailures, optionalFailures }) {
@@ -322,6 +324,17 @@ function renderAccountDataState({ errors, requiredFailures, optionalFailures }) 
   }
   void requiredFailures;
   void optionalFailures;
+  notifyWorkbenchAccountState("loaded");
+}
+
+function notifyWorkbenchAccountState(reason) {
+  try {
+    window.dispatchEvent(new CustomEvent("stocks-tool:account-state", {
+      detail: { state, reason },
+    }));
+  } catch (_error) {
+    // The legacy dashboard remains usable when the enhanced surface is absent.
+  }
 }
 
 function wireEvents() {
@@ -694,6 +707,10 @@ function translateText(text, dictionary) {
   }
 
   const dynamicRules = [
+    [/^Loading account (.+)\.\.\.$/, "正在读取账户 $1..."],
+    [/^Account (.+) loaded\.$/, "账户 $1 已读取。"],
+    [/^Account loaded with auxiliary failures: (.+)\.$/, "账户已读取；以下辅助信息暂不可用：$1。"],
+    [/^Core account data is stale: (.+)\.$/, "核心账户数据已陈旧：$1。"],
     [/^Refreshing covered-call lifecycle for (.+)\.\.\.$/, "正在刷新 $1 的备兑看涨生命周期..."],
     [/^Covered-call lifecycle refreshed: (.+)\.$/, "备兑看涨生命周期已刷新：$1。"],
     [/^Live macro board refreshed (.+)\.$/, "实时宏观板已于 $1 刷新。"],
@@ -704,6 +721,9 @@ function translateText(text, dictionary) {
     [/^(.+) proxies \/ option overlays skipped$/, "$1 个代理 / 已跳过期权叠加层"],
     [/^(.+) proxies \/ (.+) puts \/ (.+) chain layers$/, "$1 个代理 / $2 个看跌快照 / $3 个期权链层"],
     [/^Syncing account (.+)\.\.\.$/, "正在同步账户 $1..."],
+    [/^Core account data is stale: (.+)\. Broker-writing actions are disabled\.$/, "核心账户数据已陈旧：$1。券商写操作已锁定。"],
+    [/^Core account data updated\. Auxiliary panels unavailable: (.+)\.$/, "核心账户数据已更新；辅助面板暂不可用：$1。"],
+    [/^Trading blocked: (.+) unresolved trading intent\(s\) require reconciliation\.$/, "交易已阻塞：$1 个订单意图需要核对。"],
     [/^Account (.+) synced\.$/, "账户 $1 已同步。"],
     [/^Syncing orders for (.+)\.\.\.$/, "正在同步 $1 的订单..."],
     [/^Orders for (.+) synced\.$/, "$1 的订单已同步。"],
@@ -3680,8 +3700,14 @@ function setStatus(message, tone = "") {
     message = `Required account data is stale. Broker-writing actions are disabled. ${message}`;
     tone = "error";
   }
+  if (document.body?.dataset.demo === "true") {
+    const translated = translateText(String(message || ""), TRANSLATIONS.zh || {});
+    if (translated) message = translated;
+    if (String(message).startsWith("Dashboard updated.")) message = "页面已更新。策略面板优先加载，宏观数据按需读取。";
+    if (String(message).includes("strategy lifecycle warning")) message = "有策略生命周期警告需要人工复核。";
+  }
   els.statusBanner.textContent = message;
-  els.statusBanner.className = "status-banner";
+  els.statusBanner.className = "status-banner topbar-status";
   if (tone) {
     els.statusBanner.classList.add(tone);
   }

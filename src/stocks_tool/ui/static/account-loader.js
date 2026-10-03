@@ -224,6 +224,8 @@
       });
       if (kind === "orders") {
         params.set("mode", "paper");
+      } else {
+        params.set("mode", "paper");
       }
       if (cursor) {
         params.set("cursor", cursor);
@@ -474,8 +476,8 @@
         request = (async () => {
           const results = await Promise.allSettled([
             fetchJson(`/orders/${encodeURIComponent(orderId)}`),
-            fetchJson(`/executions/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
-            fetchJson(`/journals/paged?external_account_id=${encodeURIComponent(accountId)}&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
+            fetchJson(`/executions/paged?external_account_id=${encodeURIComponent(accountId)}&mode=paper&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
+            fetchJson(`/journals/paged?external_account_id=${encodeURIComponent(accountId)}&mode=paper&order_id=${encodeURIComponent(orderId)}&limit=${ACTIVITY_PAGE_SIZE}`),
           ]);
           const failures = [];
           let order = null;
@@ -884,6 +886,31 @@
       }
     }
 
+    async function loadWorkspaceReads(requestSpecs, { accountId = state.selectedAccountId, loadGeneration = state.accountLoadGeneration } = {}) {
+      if (!accountId || !Array.isArray(requestSpecs) || !requestSpecs.length) {
+        return { discarded: false, values: {}, errors: {}, accountId, loadGeneration };
+      }
+      const settled = await Promise.allSettled(
+        requestSpecs.map((spec) => fetchJson(typeof spec === "string" ? spec : spec.url, typeof spec === "string" ? undefined : spec.options)),
+      );
+      if (!isCurrentScope(accountId, loadGeneration)) {
+        return { discarded: true, values: {}, errors: {}, accountId, loadGeneration };
+      }
+      const values = {};
+      const errors = {};
+      const errorObjects = {};
+      settled.forEach((result, index) => {
+        const spec = requestSpecs[index];
+        const key = typeof spec === "string" ? String(index) : spec.key || String(index);
+        if (result.status === "fulfilled") values[key] = result.value;
+        else {
+          errors[key] = result.reason?.message || "Request failed.";
+          errorObjects[key] = result.reason;
+        }
+      });
+      return { discarded: false, values, errors, errorObjects, accountId, loadGeneration };
+    }
+
     function applyAccounts(accounts) {
       state.accounts = Array.isArray(accounts) ? accounts : [];
       if (!state.selectedAccountId && state.accounts.length > 0) {
@@ -912,6 +939,7 @@
       ensureSelectedOrderDetail,
       refreshAccounts,
       refreshAccountsSilently,
+      loadWorkspaceReads,
       applyAccounts,
       normalizePagePayload,
       activityUrl,

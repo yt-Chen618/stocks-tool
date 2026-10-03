@@ -75,7 +75,13 @@ class FakeAccountSnapshots:
     def __init__(self, snapshot: AccountSnapshot | None) -> None:
         self.snapshot = snapshot
 
-    def get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot | None:
+    def get_latest_account_snapshot(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        trusted_only: bool,
+    ) -> AccountSnapshot | None:
         return self.snapshot
 
 
@@ -495,11 +501,14 @@ def build_service(
     adapter: Mock | None = None,
     market_events: FakeMarketEvents | None = None,
     audit_events: Mock | None = None,
+    order_authorization: Mock | None = None,
 ) -> CoveredCallStrategyService:
     if order_service is not None:
         order_service.has_unresolved_intents.return_value = False
         order_service.list_orders.return_value = []
         order_service.list_trading_intents.return_value = []
+    order_authorization = order_authorization or Mock()
+    order_authorization.require_current_account_snapshot.return_value = None
     return CoveredCallStrategyService(
         settings=Settings(),
         broker_accounts=FakeBrokerAccounts(),
@@ -507,6 +516,7 @@ def build_service(
         experiments=experiments or FakeExperiments(),
         longbridge_adapter=adapter or build_adapter(),
         order_service=order_service,
+        order_authorization=order_authorization,
         market_events=market_events,
         audit_events=audit_events,
         authorization_clock=lambda: NOW,

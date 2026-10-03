@@ -23,6 +23,11 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert 'id="research-table-body"' in response.text
     assert 'id="research-chart-container"' in response.text
     assert 'id="research-watchlist-select"' in response.text
+    assert 'id="market-session-comparison-panel"' in response.text
+    assert 'id="market-session-comparison-summary"' in response.text
+    assert 'id="market-session-comparison-explanation"' in response.text
+    assert 'id="market-session-comparison-saved-select"' in response.text
+    assert 'id="market-session-comparison-load-more"' in response.text
     assert 'id="manage-watchlist-button"' in response.text
     assert 'id="watchlist-dialog"' in response.text
     assert 'id="execution-drawer"' in response.text
@@ -98,6 +103,7 @@ def test_dashboard_includes_holdings_and_order_sections() -> None:
     assert '/static/state.js?v=' in response.text
     assert '/static/vendor/lightweight-charts-5.2.0.standalone.production.js?v=' in response.text
     assert '/static/chart-view.js?v=' in response.text
+    assert '/static/market-session-comparison-view.js?v=' in response.text
     assert '/static/research-view.js?v=' in response.text
     assert '/static/watchlist-view.js?v=' in response.text
     assert '/static/strategy-view.js?v=' in response.text

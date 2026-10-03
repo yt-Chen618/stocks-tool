@@ -17,6 +17,7 @@ from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.reconciliation import ReconciliationCoordinator, ReconciliationScheduler
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
     AssetType,
     BrokerName,
     ExecutionMode,
@@ -186,6 +187,8 @@ def build_account_snapshot() -> AccountSnapshot:
         id="snapshot-1",
         broker=BrokerName.LONGBRIDGE,
         account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        provenance=AccountSnapshotProvenance.BROKER_SYNC,
         currency="USD",
         cash_balance=Decimal("12000.00"),
         net_liquidation=Decimal("15300.00"),
@@ -799,6 +802,9 @@ def test_sync_account_marks_syncing_then_success() -> None:
     assert first_call.kwargs["status"] == ReconciliationStatus.SYNCING
     assert second_call.kwargs["status"] == ReconciliationStatus.SUCCESS
     assert second_call.kwargs["synced_at"] == snapshot.captured_at
+    create_call = account_snapshots.create_account_snapshot.call_args
+    assert create_call.kwargs["provenance"] is AccountSnapshotProvenance.BROKER_SYNC
+    assert create_call.args[0].mode is ExecutionMode.PAPER
 
 
 def test_sync_account_marks_error_on_failure() -> None:
@@ -827,6 +833,40 @@ def test_sync_account_marks_error_on_failure() -> None:
     second_call = broker_accounts.update_account_sync_state.call_args_list[1]
     assert second_call.kwargs["status"] == ReconciliationStatus.ERROR
     assert second_call.kwargs["error"] == "quote bridge offline"
+
+
+@pytest.mark.parametrize(
+    ("update", "message"),
+    [
+        ({"account_id": "different-account"}, "different account"),
+        ({"mode": ExecutionMode.LIVE}, "different execution mode"),
+        ({"captured_at": datetime(2030, 1, 1, tzinfo=timezone.utc)}, "future"),
+    ],
+)
+def test_sync_account_rejects_untrusted_snapshot_identity_before_persist(
+    update: dict,
+    message: str,
+) -> None:
+    adapter = Mock()
+    broker_accounts = Mock()
+    account_snapshots = Mock()
+    broker_account = build_broker_account()
+    broker_accounts.get_by_external_account_id.return_value = broker_account
+    adapter.build_account_snapshot.return_value = build_account_snapshot().model_copy(update=update)
+    service = LongbridgeIntegrationService(
+        adapter=adapter,
+        broker_accounts=broker_accounts,
+        account_snapshots=account_snapshots,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        service.sync_account(
+            external_account_id=broker_account.external_account_id,
+            mode=ExecutionMode.PAPER,
+        )
+
+    account_snapshots.create_account_snapshot.assert_not_called()
+    assert broker_accounts.update_account_sync_state.call_args_list[-1].kwargs["status"] == ReconciliationStatus.ERROR
 
 
 def test_sync_today_orders_marks_syncing_then_success() -> None:

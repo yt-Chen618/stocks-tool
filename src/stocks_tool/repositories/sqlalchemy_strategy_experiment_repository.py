@@ -1094,6 +1094,7 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
         *,
         external_account_id: str | None = None,
         source: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 20,
     ) -> list[StrategyAdvisorRun]:
         query = (
@@ -1105,6 +1106,8 @@ class SQLAlchemyStrategyExperimentRepository(StrategyExperimentRepository):
             query = query.where(StrategyAdvisorRunRecord.external_account_id == external_account_id)
         if source is not None:
             query = query.where(StrategyAdvisorRunRecord.source == source.strip().lower())
+        if mode is not None:
+            query = query.where(StrategyAdvisorRunRecord.execution_mode == mode.value)
         return [self._to_advisor_run(record) for record in self.session.execute(query).scalars().all()]
 
     def _resolve_broker_account_id(self, external_account_id: str) -> str | None:

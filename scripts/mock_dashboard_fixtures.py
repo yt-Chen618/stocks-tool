@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from math import log, sqrt
+from statistics import stdev
 from typing import Any
 
 
@@ -72,8 +74,10 @@ def build_mock_research_universe(
 ) -> dict[str, Any]:
     mock_quote = build_mock_quote(MOCK_SYMBOL)
     mock_quote["data_quality"] = "live"
+    mock_quote["timestamp"] = "2026-06-10T20:00:00Z"
+    mock_quote["prev_close"] = "399.65"
     qqq_quote = build_mock_quote("QQQ.US")
-    qqq_quote.update({"last_done": "510.00", "prev_close": "505.00", "open": "506.00", "data_quality": "live"})
+    qqq_quote.update({"last_done": "510.00", "prev_close": "509.65", "open": "509.20", "high": "511.20", "low": "508.50", "timestamp": "2026-06-10T20:00:00Z", "data_quality": "live"})
     return {
         "mode": "paper",
         "external_account_id": account_id,
@@ -116,22 +120,25 @@ def build_mock_research_universe(
 
 def build_mock_research_technicals(symbols: list[str]) -> dict[str, Any]:
     results = []
-    for index, symbol in enumerate(symbols):
+    for symbol in symbols:
+        bars = build_mock_research_history(symbol, "3m")["bars"]
+        closes = [float(bar["close"]) for bar in bars]
+        returns = [log(right / left) for left, right in zip(closes[-21:-1], closes[-20:])]
         results.append(
             {
                 "symbol": symbol.upper(),
                 "status": "ok",
                 "warning": None,
-                "latest_bar_at": "2026-06-10T20:00:00Z",
-                "return_20d_pct": 4.2 - index,
-                "return_60d_pct": 9.8 - index,
-                "sma20": str(395 + index * 100),
-                "sma50": str(388 + index * 100),
+                "latest_bar_at": bars[-1]["timestamp"],
+                "return_20d_pct": (closes[-1] / closes[-21] - 1) * 100,
+                "return_60d_pct": (closes[-1] / closes[-61] - 1) * 100,
+                "sma20": bars[-1]["sma20"],
+                "sma50": bars[-1]["sma50"],
                 "close_above_sma20": True,
                 "sma20_above_sma50": True,
-                "realized_volatility_20d_pct": 22.4 + index,
-                "average_volume_20d": 1_250_000 + index * 100_000,
-                "average_turnover_20d": str(500_000_000 + index * 50_000_000),
+                "realized_volatility_20d_pct": stdev(returns) * sqrt(252) * 100,
+                "average_volume_20d": sum(bar["volume"] for bar in bars[-21:-1]) / 20,
+                "average_turnover_20d": str(sum(float(bar["turnover"]) for bar in bars[-21:-1]) / 20),
             }
         )
     return {"mode": "paper", "generated_at": iso_now(), "results": results}
@@ -139,15 +146,24 @@ def build_mock_research_technicals(symbols: list[str]) -> dict[str, Any]:
 
 def build_mock_research_history(symbol: str, range_value: str) -> dict[str, Any]:
     count = {"3m": 66, "6m": 132, "1y": 252}[range_value]
-    start = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 10, 20, tzinfo=timezone.utc)
+    dates = []
+    day = end
+    while len(dates) < count:
+        if day.weekday() < 5:
+            dates.append(day)
+        day -= timedelta(days=1)
+    dates.reverse()
+    last_close = 510.0 if symbol.upper() == "QQQ.US" else 400.0
     bars = []
     closes: list[float] = []
     for index in range(count):
-        close = 380.0 + index * 0.35
+        close = last_close - (count - 1 - index) * 0.35
         closes.append(close)
         sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
         sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else None
-        timestamp = start + timedelta(days=index)
+        timestamp = dates[index]
+        volume = 999_000 + (252 - count + index) * 1_000
         bars.append(
             {
                 "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
@@ -155,8 +171,8 @@ def build_mock_research_history(symbol: str, range_value: str) -> dict[str, Any]
                 "high": f"{close + 1.2:.2f}",
                 "low": f"{close - 1.5:.2f}",
                 "close": f"{close:.2f}",
-                "volume": 1_000_000 + index * 1_000,
-                "turnover": f"{close * (1_000_000 + index * 1_000):.2f}",
+                "volume": volume,
+                "turnover": f"{close * volume:.2f}",
                 "sma20": f"{sma20:.2f}" if sma20 is not None else None,
                 "sma50": f"{sma50:.2f}" if sma50 is not None else None,
             }

@@ -12,6 +12,14 @@ from stocks_tool.adapters.brokers.longbridge import (
     LongbridgeDependencyError,
     LongbridgeOrderNotAcceptedError,
 )
+from stocks_tool.application.services.order_authorization import (
+    OrderActionClass,
+    OrderAuthorizationError,
+    OrderAuthorizationService,
+    action_class_from_intent,
+    classify_order_action,
+    is_exposure_increasing_replace,
+)
 from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
@@ -50,12 +58,22 @@ from stocks_tool.ports.repository import (
 )
 from stocks_tool.ports.broker_gateway import BrokerOrderGateway
 from stocks_tool.ports.trading_intent_ledger import (
+    ReconciliationCursor,
     TradeActionIntentConflictError,
     TradingIntentLedger,
 )
 
 
 logger = logging.getLogger(__name__)
+
+RECONCILIATION_PAGE_SIZE = 100
+RECONCILIATION_CYCLE_LIMIT = 500
+RECONCILIATION_STATES = (
+    TradingIntentState.PREPARED,
+    TradingIntentState.SUBMITTING,
+    TradingIntentState.UNKNOWN,
+    TradingIntentState.BROKER_ACKNOWLEDGED,
+)
 
 
 class TradingIntentError(RuntimeError):
@@ -90,6 +108,7 @@ class OrderService:
         longbridge_adapter: BrokerOrderGateway,
         audit_events: StrategyAuditEventRepository | None = None,
         intent_ledger: TradingIntentLedger | None = None,
+        order_authorization: OrderAuthorizationService | None = None,
     ) -> None:
         self.settings = settings
         self.broker_accounts = broker_accounts
@@ -99,6 +118,7 @@ class OrderService:
         self.longbridge_adapter = longbridge_adapter
         self.audit_events = audit_events
         self.intent_ledger = intent_ledger or getattr(orders, "trading_intent_ledger", None)
+        self.order_authorization = order_authorization
 
     def list_orders(
         self,
@@ -309,21 +329,70 @@ class OrderService:
                 warnings=["Trading intent ledger is unavailable."],
             )
 
-        unresolved_by_id = {}
-        for state in (
-            TradingIntentState.PREPARED,
-            TradingIntentState.SUBMITTING,
-            TradingIntentState.UNKNOWN,
-            TradingIntentState.BROKER_ACKNOWLEDGED,
-        ):
-            for intent in self.intent_ledger.list_intents(
+        warnings: list[str] = []
+        intents: list[BrokerOrderIntent] = []
+        ledger_type = type(self.intent_ledger)
+        supports_bounded_reconciliation = all(
+            callable(getattr(ledger_type, method_name, None))
+            for method_name in (
+                "get_reconciliation_high_watermark",
+                "list_reconciliation_intents",
+            )
+        )
+        if supports_bounded_reconciliation:
+            high_watermark = self.intent_ledger.get_reconciliation_high_watermark(
                 external_account_id=external_account_id,
                 mode=mode,
-                state=state,
-                limit=500,
-            ):
-                unresolved_by_id[intent.id] = intent
-        intents = list(unresolved_by_id.values())
+                states=RECONCILIATION_STATES,
+            )
+            cursor: ReconciliationCursor | None = None
+            while high_watermark is not None and len(intents) < RECONCILIATION_CYCLE_LIMIT:
+                page_limit = min(
+                    RECONCILIATION_PAGE_SIZE,
+                    RECONCILIATION_CYCLE_LIMIT - len(intents),
+                )
+                page = self.intent_ledger.list_reconciliation_intents(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    states=RECONCILIATION_STATES,
+                    high_watermark=high_watermark,
+                    cursor=cursor,
+                    limit=page_limit,
+                )
+                if not page:
+                    break
+                intents.extend(page)
+                last = page[-1]
+                cursor = ReconciliationCursor(
+                    updated_at=last.updated_at,
+                    created_at=last.created_at,
+                    intent_id=last.id,
+                )
+                if len(page) < page_limit:
+                    break
+            if len(intents) == RECONCILIATION_CYCLE_LIMIT:
+                warnings.append(
+                    "Reconciliation cycle capped at 500 unresolved intents; "
+                    "remaining intents will be revisited in a later cycle."
+                )
+        else:
+            # Keep lightweight test doubles and older repository adapters
+            # compatible while the SQL implementation uses bounded keysets.
+            unresolved_by_id = {}
+            for state in RECONCILIATION_STATES:
+                for intent in self.intent_ledger.list_intents(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    state=state,
+                    limit=RECONCILIATION_CYCLE_LIMIT,
+                ):
+                    unresolved_by_id[intent.id] = intent
+            intents = list(unresolved_by_id.values())[:RECONCILIATION_CYCLE_LIMIT]
+            if len(unresolved_by_id) > RECONCILIATION_CYCLE_LIMIT:
+                warnings.append(
+                    "Reconciliation cycle capped at 500 unresolved intents; "
+                    "remaining intents will be revisited in a later cycle."
+                )
         if not intents:
             return TradingIntentReconciliationResult(
                 external_account_id=external_account_id,
@@ -401,7 +470,6 @@ class OrderService:
         }
         unique_remote_orders.update(exact_remote_orders)
         resolved_ids: list[str] = []
-        warnings: list[str] = []
         for intent in intents:
             matches = [
                 snapshot
@@ -541,6 +609,37 @@ class OrderService:
             return replay
 
         intent_id = prepared.intent.id
+        try:
+            action_class = classify_order_action(action_context)
+            if action_class in {OrderActionClass.MANUAL_ENTRY, OrderActionClass.STRATEGY_ENTRY}:
+                if self.order_authorization is None:
+                    raise OrderAuthorizationError(
+                        "order_authorization_unavailable",
+                        "Opening broker authorization is unavailable; the order was not submitted.",
+                    )
+                if action_class == OrderActionClass.MANUAL_ENTRY:
+                    if self._has_other_unresolved_intents(
+                        external_account_id=request.external_account_id,
+                        mode=request.mode,
+                        excluded_intent_id=intent_id,
+                    ):
+                        raise OrderAuthorizationError(
+                            "manual_entry_unresolved_intent",
+                            "Manual entry is blocked while another broker intent remains unresolved.",
+                        )
+                    self.order_authorization.authorize_manual_entry(
+                        request=request,
+                        reserved_quantity=self._working_order_reservation(request),
+                        reserved_notional=self._working_order_reserved_notional(request),
+                    )
+            elif action_class == OrderActionClass.UNKNOWN:
+                raise OrderAuthorizationError(
+                    "order_action_unclassified",
+                    "The broker order action is not classified as an approved entry or protective action.",
+                )
+        except OrderAuthorizationError as exc:
+            self.intent_ledger.mark_rejected(intent_id, str(exc))
+            raise
         self.intent_ledger.mark_submitting(intent_id)
         broker_request = request.model_copy(
             update={"remark": self._remark_with_marker(broker_marker, request.remark)}
@@ -789,6 +888,38 @@ class OrderService:
         if replay is not None:
             return replay
         assert intent_id is not None
+        try:
+            action_class = self._action_class_for_order(order)
+            if action_class == OrderActionClass.PROTECTIVE:
+                if request.quantity > order.quantity:
+                    raise OrderAuthorizationError(
+                        "protective_replace_quantity_exceeded",
+                        "A protective order replacement cannot exceed the original order quantity.",
+                    )
+            elif is_exposure_increasing_replace(order, request, action_class):
+                if self.order_authorization is None:
+                    raise OrderAuthorizationError(
+                        "order_authorization_unavailable",
+                        "Opening broker authorization is unavailable; the replacement was not submitted.",
+                    )
+                if self._has_other_unresolved_intents(
+                    external_account_id=order.external_account_id,
+                    mode=order.mode,
+                    excluded_intent_id=intent_id,
+                ):
+                    raise OrderAuthorizationError(
+                        "manual_entry_unresolved_intent",
+                        "Exposure-increasing replacement is blocked while another broker intent remains unresolved.",
+                    )
+                self.order_authorization.authorize_exposure_increasing_replace(
+                    order=order,
+                    request=request,
+                    reserved_quantity=self._working_order_reservation_for_order(order),
+                    reserved_notional=self._working_order_reserved_notional_for_order(order),
+                )
+        except OrderAuthorizationError as exc:
+            self.intent_ledger.mark_rejected(intent_id, str(exc))
+            raise
         marker = self._broker_marker(
             external_account_id=order.external_account_id,
             mode=order.mode,
@@ -939,6 +1070,170 @@ class OrderService:
         )
         replay = self._resolve_prepared_intent(prepared, request_hash=request_hash)
         return (None, replay) if replay is not None else (prepared.intent.id, None)
+
+    def _action_class_for_order(self, order: Order) -> str:
+        if self.intent_ledger is None or order.order_intent_id is None:
+            return OrderActionClass.UNKNOWN
+        intent = self.intent_ledger.get_intent(order.order_intent_id)
+        return action_class_from_intent(intent)
+
+    def _has_other_unresolved_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        excluded_intent_id: str,
+    ) -> bool:
+        if self.intent_ledger is None:
+            return True
+        try:
+            unresolved = self.intent_ledger.list_intents(
+                external_account_id=external_account_id,
+                mode=mode,
+                states=RECONCILIATION_STATES,
+                limit=None,
+            )
+        except Exception as exc:
+            raise OrderAuthorizationError(
+                "manual_entry_intent_state_unavailable",
+                "Unresolved broker-intent state could not be verified; manual entry is blocked.",
+            ) from exc
+        if not isinstance(unresolved, list):
+            # A real ledger always returns a list.  A missing/invalid read must
+            # fail closed instead of allowing a manual broker mutation.
+            return True
+        return any(intent.id != excluded_intent_id for intent in unresolved)
+
+    def _working_order_reservation(self, request: CreateOrderRequest) -> Decimal:
+        try:
+            working_orders = self.orders.list_orders(
+                external_account_id=request.external_account_id,
+                mode=request.mode,
+                symbol=request.symbol,
+                statuses={
+                    OrderStatus.CREATED,
+                    OrderStatus.SUBMITTED,
+                    OrderStatus.PARTIALLY_FILLED,
+                },
+            )
+        except Exception as exc:
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; manual entry is blocked.",
+            ) from exc
+        if not isinstance(working_orders, list):
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; manual entry is blocked.",
+            )
+        reserved = sum(
+            (Decimal(order.quantity) for order in working_orders if order.side == request.side),
+            start=Decimal("0"),
+        )
+        return reserved
+
+    def _working_order_reservation_for_order(self, order: Order) -> Decimal:
+        try:
+            working_orders = self.orders.list_orders(
+                external_account_id=order.external_account_id,
+                mode=order.mode,
+                symbol=order.symbol,
+                statuses={
+                    OrderStatus.CREATED,
+                    OrderStatus.SUBMITTED,
+                    OrderStatus.PARTIALLY_FILLED,
+                },
+            )
+        except Exception as exc:
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; replacement is blocked.",
+            ) from exc
+        if not isinstance(working_orders, list):
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; replacement is blocked.",
+            )
+        return sum(
+            (
+                Decimal(candidate.quantity)
+                for candidate in working_orders
+                if candidate.id != order.id and candidate.side == order.side
+            ),
+            start=Decimal("0"),
+        )
+
+    def _working_order_reserved_notional(self, request: CreateOrderRequest) -> Decimal:
+        try:
+            working_orders = self.orders.list_orders(
+                external_account_id=request.external_account_id,
+                mode=request.mode,
+                symbol=request.symbol,
+                statuses={
+                    OrderStatus.CREATED,
+                    OrderStatus.SUBMITTED,
+                    OrderStatus.PARTIALLY_FILLED,
+                },
+            )
+        except Exception as exc:
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; manual entry is blocked.",
+            ) from exc
+        if not isinstance(working_orders, list):
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; manual entry is blocked.",
+            )
+        multiplier = Decimal("100") if request.asset_type == AssetType.OPTION else Decimal("1")
+        reserved = Decimal("0")
+        for candidate in working_orders:
+            if candidate.side != request.side:
+                continue
+            price = candidate.limit_price if candidate.limit_price is not None else candidate.stop_price
+            if price is None or price <= Decimal("0"):
+                raise OrderAuthorizationError(
+                    "manual_entry_reservation_unbounded",
+                    "An existing working order has unbounded exposure; manual entry is blocked.",
+                )
+            reserved += Decimal(candidate.quantity) * price * multiplier
+        return reserved
+
+    def _working_order_reserved_notional_for_order(self, order: Order) -> Decimal:
+        try:
+            working_orders = self.orders.list_orders(
+                external_account_id=order.external_account_id,
+                mode=order.mode,
+                symbol=order.symbol,
+                statuses={
+                    OrderStatus.CREATED,
+                    OrderStatus.SUBMITTED,
+                    OrderStatus.PARTIALLY_FILLED,
+                },
+            )
+        except Exception as exc:
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; replacement is blocked.",
+            ) from exc
+        if not isinstance(working_orders, list):
+            raise OrderAuthorizationError(
+                "manual_entry_reservation_unavailable",
+                "Working-order reservation evidence is unavailable; replacement is blocked.",
+            )
+        multiplier = Decimal("100") if order.asset_type == AssetType.OPTION else Decimal("1")
+        reserved = Decimal("0")
+        for candidate in working_orders:
+            if candidate.id == order.id or candidate.side != order.side:
+                continue
+            price = candidate.limit_price if candidate.limit_price is not None else candidate.stop_price
+            if price is None or price <= Decimal("0"):
+                raise OrderAuthorizationError(
+                    "manual_entry_reservation_unbounded",
+                    "An existing working order has unbounded exposure; replacement is blocked.",
+                )
+            reserved += Decimal(candidate.quantity) * price * multiplier
+        return reserved
 
     def _run_broker_mutation(
         self,

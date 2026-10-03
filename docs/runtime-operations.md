@@ -241,6 +241,69 @@ The report is read-only and always records `broker_order_submit_allowed=false`, 
 
 Trade authorization uses stricter evidence than previews. Covered Call open and replacement roll-open require live underlying and selected-option snapshots no older than `COVERED_CALL_STRATEGY__TRADE_AUTHORIZATION_MAX_QUOTE_AGE_SECONDS` (default `15`), then recheck contract identity, liquidity, and covered shares. Bull Put locked execution likewise refreshes its underlying and both selected legs. Risk-reducing Covered Call buyback remains allowed before replacement-leg authorization; if refresh fails after the buyback fills, the roll stops at manual action instead of guessing a replacement order.
 
+## Professional workbench operations
+
+`/health/live` reports process liveness. `/health/ready` reports dependency and
+read-only service readiness; it never grants permission to trade. Requests receive
+an `X-Request-ID` for joining a displayed failure to server diagnostics. Error
+responses do not expose connection URLs or provider credentials.
+
+Before schema upgrades, make a new custom-format backup and manifest. The backup
+and restore tools use an explicit `DATABASE_URL` environment value and never load
+`.env`. With the existing local PostgreSQL container, the commands are:
+
+```powershell
+.venv\Scripts\python.exe scripts\backup_database.py --docker-container stocks-tool-postgres --output-dir artifacts\database-backups
+.venv\Scripts\python.exe scripts\restore_database.py --docker-container stocks-tool-postgres --manifest <new-manifest-path> --target-database stocks_tool_restore_<unique-suffix>
+```
+
+The target must be a new isolated database. Restore verifies table content,
+constraints, and column metadata; it cannot overwrite the operator database.
+Apply migrations to the isolated copy and compare the original-column projection
+before upgrading the operator database. Keep ambiguous historical snapshot modes
+unknown. For application rollback, first use read-only service operation; do not
+delete history or guess how mixed-mode records should be merged during downgrade.
+For that read-only recovery session, override all Longbridge and advisor
+credential environment variables with empty values, and disable reconciliation,
+backtest dispatch and market-data prewarm in the process environment. Do not edit
+the saved `.env`, or reconnect broker credentials to older code that cannot
+enforce the new mode/provenance contract. Prefer inspecting the isolated restored
+database with the current read models over downgrading mixed-mode business data.
+
+Backtest data belongs under `BACKTEST_DATA_ROOT` (default `data/backtesting`).
+`BACKTEST_RESULT_ROOT` defaults to `artifacts/backtests/results`. Both are separate
+from broker records. Review local provider licensing and canonical file schemas
+before registering a dataset; the application never purchases or downloads data.
+
+```powershell
+.venv\Scripts\python.exe scripts\backtest.py doctor --require-docker
+.venv\Scripts\python.exe scripts\backtest.py register <dataset-registration.json>
+.venv\Scripts\python.exe scripts\backtest.py validate <dataset-id> --strategy bull_put
+.venv\Scripts\python.exe scripts\backtest.py run <backtest-request.json>
+```
+
+The default `run` waits for a terminal state; `--queue` explicitly requests a
+durable queued task. The application dispatcher leases one job at a time. Set
+`BACKTEST_DISPATCHER_ENABLED=false` for read-only verification processes. Cancelling
+or shutting down affects only the exact container owned by that job. Interrupted
+or ownership-unknown runs do not become successful results.
+
+Provision the digest in `adapters/backtesting/engine_lock.py` from the official
+QuantConnect image before running. The launcher uses `--pull never`, no network,
+read-only input mounts and a separate output directory. The smoke command
+`scripts/lean_offline_smoke.py` is a software fixture check, not historical strategy
+validation. Missing licensed full-range data remains `BLOCKED_DATA`.
+
+The canonical quote contract carries observation/availability times and explicit
+bid/ask sizes. Trade volume is not quoted liquidity. Missing sizes, stale quotes
+or fill-forward quotes cannot authorize a simulated fill. The LEAN fill model
+uses ask for buys and bid for sells, limits each fill to observed size, and
+records partial legs before a strategy becomes active. Supported corporate-action
+imports include stock splits and cash dividends; unsupported actions fail closed
+instead of disappearing from results. Standard option contracts use a 100-share
+multiplier; unsupported adjusted-contract models require an explicit extension
+and new validation before formal history can pass.
+
 ## Artifact Guidance
 
 Generated screenshots and JSON reports belong under `artifacts/` or `output/`. Keep the latest useful pass/fail evidence locally, but do not treat generated artifacts as source unless a test fixture explicitly needs them.

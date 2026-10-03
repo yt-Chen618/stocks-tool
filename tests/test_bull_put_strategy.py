@@ -13,6 +13,7 @@ from stocks_tool.application.services.orders import (
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
     AssetType,
     BrokerName,
     ExecutionMode,
@@ -72,6 +73,8 @@ def build_account_snapshot(
         id="snapshot-1",
         broker=BrokerName.LONGBRIDGE,
         account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        provenance=AccountSnapshotProvenance.BROKER_SYNC,
         currency="USD",
         cash_balance=Decimal("25000"),
         net_liquidation=net_liquidation,
@@ -595,7 +598,7 @@ def build_service(
     order_service.has_unresolved_intents.return_value = False
     broker_accounts.get_by_external_account_id.return_value = build_broker_account()
     current_account_snapshot = account_snapshot or build_account_snapshot()
-    account_snapshots.list_account_snapshots.return_value = [current_account_snapshot]
+    account_snapshots.get_latest_account_snapshot.return_value = current_account_snapshot
     account_snapshots.create_account_snapshot.return_value = current_account_snapshot
     adapter.build_account_snapshot.return_value = current_account_snapshot
     order_service.reconcile_unresolved_intents.return_value = Mock(unresolved_intents=0)
@@ -725,14 +728,19 @@ def build_service(
     spreads.update_spread.side_effect = lambda spread, **kwargs: spread
     runtime_states = Mock()
     pre_open_runs = Mock()
-    runtime_store: dict[str, object] = {}
+    runtime_store: dict[tuple[str, str, str], object] = {}
     pre_open_store: dict[tuple[str, date, str], object] = {}
 
-    def get_runtime_state(*, external_account_id: str, strategy_id: str = "paper_bull_put_v1"):
-        return runtime_store.get((external_account_id, strategy_id))
+    def get_runtime_state(
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        strategy_id: str = "paper_bull_put_v1",
+    ):
+        return runtime_store.get((external_account_id, strategy_id, mode.value))
 
     def upsert_runtime_state(state):
-        runtime_store[(state.external_account_id, state.strategy_id)] = state
+        runtime_store[(state.external_account_id, state.strategy_id, state.mode.value)] = state
         return state
 
     runtime_states.get_runtime_state.side_effect = get_runtime_state
