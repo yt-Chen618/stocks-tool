@@ -67,9 +67,9 @@ def _time(value: Any, *, field: str, naive_timezone=timezone.utc) -> datetime:
 def observed_at(contract_or_quote: Any) -> datetime | None:
     """Return the source observation time without substituting ``now``.
 
-    ``OptionContract.Time`` is the timestamp of the last contract data update
-    in LEAN 18100.  A missing/zero timestamp is represented as ``None`` so the
-    caller can keep the candidate visible while refusing it for execution.
+    A missing/zero timestamp is represented as ``None``. Callers selecting
+    contracts must supply the real QuoteBar end time after rejecting fill-forward
+    data: LEAN's per-slice OptionContract.Time alone does not prove freshness.
     """
 
     raw = _value(contract_or_quote, "timestamp", "time", "Time", "end_time", "EndTime")

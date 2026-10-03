@@ -45,6 +45,16 @@ Use `--lifecycle-fixture --lifecycle-scenario` with `split_dividend`,
 Split warnings and applied splits are counted separately. Option event counts
 also distinguish the contract exercise/assignment from underlying stock delivery.
 
+`scripts/lean_strategy_smoke.py` exercises the canonical Bull Put, Covered Call
+and Zero-DTE algorithms through registered CSV staging and the pinned engine's
+option-chain reader. It requires candidates and filled entry/exit orders, checks
+remaining positions and order groups, and repeats the same input to compare
+semantic results. Run it only after the local image is available; the script
+does not provision images or use broker credentials. This gate runs in the Linux
+LEAN CI job alongside the independent lifecycle fixtures. Zero-DTE warmup,
+half-day cutoff, partial entry cancellation and settlement also have focused
+fake-event tests in `tests/test_lean_zero_dte_simulation.py`.
+
 CI additionally checks the Windows process paths from a Unicode checkout and
 runs the actual offline LEAN fixture in an independent Linux job. All artifacts
 must match the PR head; a skipped or blocked engine gate is not a passing result.

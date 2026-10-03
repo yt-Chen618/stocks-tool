@@ -190,6 +190,9 @@ jobs:
       - name: Verify long call exercise
         timeout-minutes: 10
         run: .venv/bin/python scripts/lean_offline_smoke.py --lifecycle-fixture --lifecycle-scenario long_call_exercise --output artifacts/ci-lean/lean-exercise.json
+      - name: Qualify canonical strategy candidates and order lifecycles
+        timeout-minutes: 15
+        run: .venv/bin/python scripts/lean_strategy_smoke.py --output artifacts/ci-lean/lean-strategy-smoke.json
       - name: Save LEAN source identity
         if: always()
         run: |

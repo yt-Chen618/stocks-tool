@@ -134,6 +134,7 @@ def stage_registered_dataset(
     else:
         warnings.append("underlying_bars_unavailable")
 
+    security_master = rows_by_category.get("security_master", [])
     option_rows = rows_by_category.get("option_quotes", [])
     option_rows += rows_by_category.get("option_trades", [])
     option_rows += rows_by_category.get("open_interest", [])
@@ -141,7 +142,10 @@ def stage_registered_dataset(
     if rejected_options:
         warnings.append(f"future_information_rejected:options:{rejected_options}")
     if option_rows:
-        option_files = _write_option_files(staging_root, option_rows)
+        option_files = _write_option_files(
+            staging_root,
+            option_rows,
+        )
         files_created.extend(option_files)
         if not any("_quote_american.zip" in path for path in option_files):
             warnings.append("option_quote_unavailable")
@@ -162,7 +166,6 @@ def stage_registered_dataset(
     else:
         warnings.append("corporate_actions_unavailable")
 
-    security_master = rows_by_category.get("security_master", [])
     if security_master:
         map_files, master_warnings = _write_map_files(staging_root, security_master)
         files_created.extend(map_files)
@@ -254,6 +257,44 @@ def _decimal(value: str, default: Decimal | None = None) -> Decimal | None:
         return Decimal(str(value).strip())
     except (InvalidOperation, TypeError, ValueError):
         return default
+
+
+def _plain_decimal(value: Decimal) -> str:
+    """Render a Decimal without scientific notation for LEAN CSV readers."""
+
+    rendered = format(value, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"
+
+
+def _universe_cutoff(day: date) -> datetime:
+    """Return the exchange-local midnight cutoff for a chain snapshot."""
+
+    return datetime.combine(day, datetime.min.time(), NEW_YORK)
+
+
+def _causal_universe_row(rows: Iterable[Mapping[str, str]], day: date) -> Mapping[str, str] | None:
+    """Choose the latest contract snapshot known before this session opens.
+
+    LEAN reads an option universe at the start of the session.  A same-session
+    quote cannot populate that file without look-ahead, so rows whose
+    ``available_at`` is missing or after local midnight are excluded.  Minute
+    quote/trade files remain the source for the actual intraday observation.
+    """
+
+    cutoff = _universe_cutoff(day)
+    candidates: list[tuple[datetime, Mapping[str, str]]] = []
+    for row in rows:
+        available = _parse_datetime(row.get("available_at") or row.get("as_of"))
+        if available is None:
+            continue
+        local_available = available.astimezone(NEW_YORK)
+        if local_available <= cutoff:
+            candidates.append((local_available, row))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _scaled_price(value: str, default: Decimal = Decimal("0")) -> int:
@@ -445,12 +486,16 @@ def _write_equity_minute(root: Path, rows: Iterable[Mapping[str, str]]) -> list[
     return created
 
 
-def _write_option_files(root: Path, rows: Iterable[Mapping[str, str]]) -> list[str]:
+def _write_option_files(
+    root: Path,
+    rows: Iterable[Mapping[str, str]],
+) -> list[str]:
     # Canonical options are staged into LEAN's documented minute quote/trade/
     # open-interest layout.  Rows lacking a contract identity are retained by
     # the dataset validator but cannot be silently converted into a security.
     grouped: dict[tuple[str, date, str, str, str], list[Mapping[str, str]]] = defaultdict(list)
     universe: dict[tuple[str, date], dict[tuple[str, str, str], Mapping[str, str]]] = defaultdict(dict)
+    metadata_rows: dict[tuple[str, tuple[str, str, str]], list[Mapping[str, str]]] = defaultdict(list)
     archives: dict[tuple[str, date, str], dict[str, str]] = defaultdict(dict)
     for row in rows:
         underlying = _native_symbol(row.get("underlying") or row.get("underlying_symbol") or "")
@@ -460,7 +505,18 @@ def _write_option_files(root: Path, rows: Iterable[Mapping[str, str]]) -> list[s
         right = _right(row.get("right") or row.get("option_right") or "")
         if underlying and day and expiry and strike is not None and right:
             grouped[(underlying, day, expiry.isoformat(), str(strike), right)].append(row)
-            universe[(underlying, day)][(expiry.isoformat(), str(strike), right)] = row
+            contract_key = (expiry.isoformat(), str(strike), right)
+            metadata_rows[(underlying, contract_key)].append(dict(row))
+            existing = universe[(underlying, day)].get(contract_key)
+            if existing is None:
+                universe[(underlying, day)][contract_key] = dict(row)
+            else:
+                # Quote rows carry Greeks/IV and trade rows carry last price;
+                # merge both instead of letting the later trade row erase the
+                # chain fields required by OptionUniverse.Reader.
+                for key, value in row.items():
+                    if value and not existing.get(key):
+                        existing[key] = value
     created: list[str] = []
     for (underlying, day, expiry_text, strike_text, right), values in grouped.items():
         expiry = date.fromisoformat(expiry_text)
@@ -500,6 +556,12 @@ def _write_option_files(root: Path, rows: Iterable[Mapping[str, str]]) -> list[s
         target.parent.mkdir(parents=True, exist_ok=True)
         _write_zip_entries(target, entries)
         created.append(relative.as_posix())
+    # The pinned LEAN 2.5.0.0 runtime bundled in the verified image uses the
+    # expiry/strike/right universe reader.  Calling ``OptionUniverse.to_csv``
+    # inside that exact image returns this schema; the newer symbol_id /
+    # symbol_value schema from current online source is not accepted by this
+    # fixed engine and silently produces an empty OptionFilterUniverse.
+    # Keep this adapter bound to the engine actually executed by the launcher.
     universe_header = "#expiry,strike,right,open,high,low,close,volume,open_interest,implied_volatility,delta,gamma,vega,theta,rho"
     for (underlying, day), contracts in universe.items():
         relative = Path("option") / "usa" / "universes" / underlying.lower() / f"{day.strftime('%Y%m%d')}.csv"
@@ -507,24 +569,32 @@ def _write_option_files(root: Path, rows: Iterable[Mapping[str, str]]) -> list[s
         target.parent.mkdir(parents=True, exist_ok=True)
         lines = [universe_header]
         for (expiry, strike, right), row in sorted(contracts.items()):
+            expiry_date = date.fromisoformat(expiry)
+            metadata = _causal_universe_row(metadata_rows[(underlying, (expiry, strike, right))], day)
+            if metadata is None:
+                # An absent row is safer than replaying a quote that was only
+                # observed later in the session.  The minute contract files
+                # remain available; a formal run must report the missing
+                # causal universe snapshot through its data-quality gate.
+                continue
             lines.append(
                 ",".join(
                     [
-                        expiry.replace("-", ""),
-                        strike,
+                        expiry_date.strftime("%Y%m%d"),
+                        _plain_decimal(Decimal(str(strike))),
                         "C" if right == "call" else "P",
-                        row.get("open") or row.get("bid") or row.get("price", ""),
-                        row.get("high") or row.get("ask") or row.get("price", ""),
-                        row.get("low") or row.get("bid") or row.get("price", ""),
-                        row.get("close") or row.get("bid") or row.get("price", ""),
-                        row.get("volume", ""),
-                        row.get("open_interest", row.get("oi", "")),
-                        row.get("implied_volatility", ""),
-                        row.get("delta", ""),
-                        row.get("gamma", ""),
-                        row.get("vega", ""),
-                        row.get("theta", ""),
-                        row.get("rho", ""),
+                        metadata.get("open") or metadata.get("bid") or metadata.get("price", ""),
+                        metadata.get("high") or metadata.get("ask") or metadata.get("price", ""),
+                        metadata.get("low") or metadata.get("bid") or metadata.get("price", ""),
+                        metadata.get("close") or metadata.get("bid") or metadata.get("price", ""),
+                        metadata.get("volume", ""),
+                        metadata.get("open_interest", metadata.get("oi", "")),
+                        metadata.get("implied_volatility", ""),
+                        metadata.get("delta", ""),
+                        metadata.get("gamma", ""),
+                        metadata.get("vega", ""),
+                        metadata.get("theta", ""),
+                        metadata.get("rho", ""),
                     ]
                 )
             )

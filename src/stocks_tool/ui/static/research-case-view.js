@@ -192,8 +192,8 @@
       [ui().text("来源", "Source"), ui().statusLabel(researchCase.source || ui().text("未记录", "Not recorded"))],
       [ui().text("历史范围", "History range"), history.range || researchCase.configuration?.history_range || "--"],
       [ui().text("历史数据时间", "History as of"), ui().dateTime(history.generated_at || history.as_of)],
-      [ui().text("20 日收益", "20D return"), ui().percent(technicals.return_20d_pct)],
-      [ui().text("60 日收益", "60D return"), ui().percent(technicals.return_60d_pct)],
+      [ui().text("20 日价格涨跌", "20D price change"), ui().percent(technicals.return_20d_pct)],
+      [ui().text("60 日价格涨跌", "60D price change"), ui().percent(technicals.return_60d_pct)],
       [ui().text("保存时事件", "Event at capture"), primaryRow.next_event?.title || ui().text("无", "None")],
     ].map(([label, value]) => `<div><dt>${ui().escapeHtml(label)}</dt><dd>${ui().escapeHtml(String(value))}</dd></div>`).join("");
     const caseWarnings = Array.isArray(researchCase.warnings) ? researchCase.warnings : [];
@@ -336,8 +336,8 @@
     if (facts) {
       facts.innerHTML = [
         [ui().text("最新价", "Last"), last == null ? "--" : ui().money(last)],
-        [ui().text("20 日收益", "20D return"), ui().percent(technicals.return_20d_pct)],
-        [ui().text("60 日收益", "60D return"), ui().percent(technicals.return_60d_pct)],
+        [ui().text("20 日价格涨跌", "20D price change"), ui().percent(technicals.return_20d_pct)],
+        [ui().text("60 日价格涨跌", "60D price change"), ui().percent(technicals.return_60d_pct)],
         [ui().text("事件", "Next event"), row.next_event?.title || ui().text("暂无", "None")],
         [ui().text("策略状态", "Strategy"), (row.strategy_states || []).map(strategyLabel).join(" · ") || ui().text("暂无", "None")],
         [ui().text("报价时间", "Quote time"), ui().dateTime(quote.timestamp)],

@@ -72,6 +72,12 @@ multi-year options dataset is available. Fixture/synthetic validation cannot pro
 historical strategy performance; P5.3 remains `BLOCKED_DATA` and the full objective is
 incomplete until that requirement passes.
 
+Current lifecycle qualification covers standard 100-share options, equity
+splits and cash dividends. Adjusted option multipliers and unsupported corporate
+actions are rejected rather than approximated. Their model/data qualification
+remains part of the full historical objective; a newly licensed dataset is not
+by itself a passing historical gate.
+
 No live or paper broker order, model call, `.cn` switch, `.env` change, destructive
 cleanup or automatic merge is authorized. Read-only real-market validation is reported
 separately from fixture validation. A one-contract paper canary is a separate future

@@ -83,8 +83,8 @@ def test_registered_option_rows_are_staged_to_native_minute_files_and_universe(t
     dataset.mkdir()
     (dataset / "option_quotes.csv").write_text(
         "underlying,expiration,strike,right,date,bid,ask,bid_size,ask_size,volume,open_interest,delta,available_at\n"
-        "SPY.US,2024-02-16,500,call,2024-01-02T15:00:00Z,1.20,1.30,25,30,999,100,-0.22,2024-01-02T15:00:00Z\n"
-        "SPY.US,2024-02-16,505,call,2024-01-02T15:00:00Z,0.90,1.00,20,22,888,80,-0.18,2024-01-02T15:00:00Z\n",
+        "SPY.US,2024-02-16,500,call,2024-01-02T15:00:00Z,1.20,1.30,25,30,999,100,-0.22,2024-01-01T15:00:00Z\n"
+        "SPY.US,2024-02-16,505,call,2024-01-02T15:00:00Z,0.90,1.00,20,22,888,80,-0.18,2024-01-01T15:00:00Z\n",
         encoding="utf-8",
     )
     result_root = tmp_path / "results"
@@ -111,8 +111,36 @@ def test_registered_option_rows_are_staged_to_native_minute_files_and_universe(t
             "20240102_spy_minute_quote_american_call_5050000_20240216.csv",
         ]
         assert archive.read(archive.namelist()[0]).decode("utf-8").startswith("36000000,12000,12000,12000,12000,25,13000")
-    assert "20240216,500,C" in universe.read_text(encoding="utf-8")
+    universe_text = universe.read_text(encoding="utf-8")
+    assert universe_text.startswith("#expiry,strike,right,open,high,low,close,volume,open_interest,")
+    assert "20240216,500,C,1.20,1.30,1.20,1.20,999,100" in universe_text
+    assert "20240216,505,C,0.90,1.00,0.90,0.90,888,80" in universe_text
+    assert "symbol_id" not in universe_text
     assert "option_quote_size_unavailable" not in staged.warnings
+
+
+def test_option_universe_does_not_replay_same_session_quote_before_open(tmp_path):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "option_quotes.csv").write_text(
+        "underlying,expiration,strike,right,date,bid,ask,bid_size,ask_size,volume,open_interest,delta,available_at\n"
+        "SPY,2024-02-16,500,call,2024-01-02T15:00:00Z,1.20,1.30,25,30,999,100,-0.22,2024-01-02T15:00:00Z\n",
+        encoding="utf-8",
+    )
+    result_root = tmp_path / "results"
+    result_root.mkdir()
+    manifest = result_root / "lean-data-manifest.json"
+    manifest.write_text(
+        json.dumps({"files": [{"source": "option_quotes.csv", "category": "option_quotes"}]}),
+        encoding="utf-8",
+    )
+
+    staged = stage_registered_dataset(dataset, manifest, result_root)
+
+    universe = staged.root / "option" / "usa" / "universes" / "spy" / "20240102.csv"
+    assert universe.read_text(encoding="utf-8").splitlines() == [
+        "#expiry,strike,right,open,high,low,close,volume,open_interest,implied_volatility,delta,gamma,vega,theta,rho"
+    ]
 
 
 def test_formal_strategy_blocks_when_only_daily_equity_is_registered(tmp_path):

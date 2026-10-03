@@ -22,7 +22,7 @@ The active upgrade and requirement-by-requirement acceptance are documented in `
 
 The Chinese-first interface keeps five workspaces: 研究, 策略, 市场, 持仓, and 运行与安全. Charts and tables have visible explanations, evidence time/source and explicit next actions. Named research screens and immutable research cases persist in PostgreSQL. Portfolio reads distinguish raw NAV changes from investment returns and disclose unavailable cash flows, fees, Greeks and unverified history.
 
-Offline backtesting is a separate local compute adapter. It does not receive broker credentials or write orders, executions or trading intents. No paid dataset subscription is required for the software, but no authorized multi-year options dataset is currently available: genuine 2020-01-01 through 2026-09-30 historical validation remains `BLOCKED_DATA`. Fixture runs are software checks and cannot establish strategy performance. A broker paper-order canary requires separate authorization.
+Offline backtesting is a separate local compute adapter. It does not receive broker credentials or write the application's orders, executions or trading intents. Bull Put, Covered Call and Zero-DTE research use simulated orders inside LEAN, with explicit fill, cost and lifecycle models. This does not unlock the broker Zero-DTE routes. No paid dataset subscription is required for the software, but no authorized multi-year options dataset is currently available: genuine 2020-01-01 through 2026-09-30 historical validation remains `BLOCKED_DATA`. Fixture runs are software checks and cannot establish strategy performance. A broker paper-order canary requires separate authorization.
 
 ## Current status
 

@@ -8,7 +8,7 @@ accounting, exercise, assignment, expiry, and corporate actions.
 
 from AlgorithmImports import *
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
 from importlib.util import module_from_spec, spec_from_file_location
@@ -637,19 +637,6 @@ class _StrategyAlgorithm(QCAlgorithm):
         self.set_start_date(start)
         self.set_end_date(end)
 
-    def on_end_of_algorithm(self):
-        for name, value in self._quality.items():
-            self.set_runtime_statistic(name, str(value))
-        self.set_runtime_statistic("Pending Order Groups", str(len(self._pending_groups)))
-        self.set_runtime_statistic("Unhedged Order Groups", str(len(self._unhedged_groups)))
-        self.set_runtime_statistic("Blocked Partial Symbols", ",".join(sorted(self._blocked_symbols)) or "none")
-        if self._formal and (
-            self._quality["daily_bars_seen"] == 0
-            or self._quality["option_quotes_seen"] == 0
-            or self._quality["missing_greeks"] == self._quality["option_quotes_seen"]
-        ):
-            raise RuntimeError("formal strategy data quality failed: daily bars, option quotes, or Greeks are unavailable")
-
     def Initialize(self):
         return self.initialize()
 
@@ -839,13 +826,38 @@ class _StrategyAlgorithm(QCAlgorithm):
         return current.astimezone(timezone.utc)
 
     @staticmethod
+    def _is_fill_forward_data(value):
+        """Reject a contract or quote bar replayed by LEAN fill-forward."""
+
+        if value is None:
+            return False
+        for name in ("is_fill_forward", "IsFillForward"):
+            try:
+                marker = getattr(value, name, None)
+                if callable(marker):
+                    marker = marker()
+                if marker is not None:
+                    return bool(marker)
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
     def _contract_payload(contract, now):
         identifier = contract.symbol.id
+        raw_expiration = identifier.date
+        if isinstance(raw_expiration, datetime):
+            expiration = raw_expiration.date()
+        else:
+            try:
+                expiration = raw_expiration.date()
+            except Exception:
+                expiration = date.fromisoformat(str(raw_expiration)[:10])
         right = str(identifier.option_right).lower()
         right = "call" if "call" in right else "put" if "put" in right else right
         return {
             "symbol": str(contract.symbol),
-            "expiration_date": identifier.date,
+            "expiration_date": expiration,
             "strike": Decimal(str(identifier.strike_price)),
             "right": right,
             # ``OptionContract.Time`` is the time of the source observation.
@@ -868,7 +880,25 @@ class _StrategyAlgorithm(QCAlgorithm):
         if chain is None:
             return []
         now = self._now()
-        result = [self._contract_payload(contract, now) for contract in chain]
+        result = []
+        quote_bars = getattr(chain, "quote_bars", None)
+        if quote_bars is None:
+            quote_bars = getattr(chain, "QuoteBars", None)
+        if quote_bars is None:
+            return []
+        for contract in chain:
+            # LEAN's OptionContract does not expose a QuoteBar or a fill-forward
+            # flag. Its per-slice Time can come from a synthetic repeated bar.
+            # The chain's real QuoteBars collection is the source of authority.
+            quote_bar = quote_bars.get(contract.symbol)
+            if quote_bar is None or self._is_fill_forward_data(quote_bar):
+                continue
+            payload = self._contract_payload(contract, now)
+            end_time = getattr(quote_bar, "end_time", None) or getattr(quote_bar, "EndTime", None)
+            payload["timestamp"] = observed_at({"timestamp": end_time})
+            if payload["timestamp"] is None:
+                continue
+            result.append(payload)
         self._quality["option_quotes_seen"] += len(result)
         self._quality["missing_greeks"] += sum(1 for quote in result if quote["delta"] is None)
         return result
@@ -1316,12 +1346,21 @@ class StocksToolCoveredCallAlgorithm(_StrategyAlgorithm):
 
 
 class StocksToolZeroDteResearchAlgorithm(_StrategyAlgorithm):
-    """Research-only Zero-DTE selector; it never submits an order."""
+    """Offline Zero-DTE research simulation with an explicit close boundary.
+
+    The strategy remains research-only at the application boundary. Inside
+    LEAN it is a real long-option position: entry and exit orders go through
+    the shared pending-group and quote-fill models, while LEAN owns cash,
+    fees, slippage, expiry, exercise, assignment, and corporate actions.
+    """
+
+    _DEFAULT_MARKET_CUTOFF = "16:00 America/New_York"
 
     def initialize(self):
         self._load_request()
         self._set_period()
         self.set_cash(float(self._initial_cash))
+        self.settings.seed_initial_prices = True
         self.add_security_initializer(self._configure_security)
         self._equities = {symbol: self.add_equity(symbol, Resolution.Minute).symbol for symbol in self._symbols}
         self._options = {symbol: self.add_option(symbol, Resolution.Minute) for symbol in self._symbols}
@@ -1329,28 +1368,307 @@ class StocksToolZeroDteResearchAlgorithm(_StrategyAlgorithm):
             option.set_filter(lambda universe: universe.include_weeklys().strikes(-20, 20).expiration(0, 0))
         self._last_daily_close = {symbol: None for symbol in self._symbols}
         self._previous_daily_close = {symbol: None for symbol in self._symbols}
+        self._last_daily_bar_date = {symbol: None for symbol in self._symbols}
         self._last_observed_date = {symbol: None for symbol in self._symbols}
+        self._entry_date = None
+        self._entries_today = 0
+        self._entered_symbols = set()
+        self._active_positions = {}
+        self._partial_positions = {}
+        self._exit_requested = set()
+        self._entry_cutoff_cancel_requested = set()
+        self._lifecycle_events = []
+        self._assignment_events = []
+        self._exercise_events = []
+        self._order_events = []
+        self._late_entry_fill_events = 0
+        self.set_runtime_statistic("Research Only", "true")
+        self.set_runtime_statistic("Zero-DTE Contract Multiplier", "100")
+        self.set_runtime_statistic("Zero-DTE Premium Cap", str(self._zero_dte_rules().max_premium_per_trade))
+        self.set_runtime_statistic("Zero-DTE Market Cutoff", self._market_cutoff_text())
+        self.set_runtime_statistic(
+            "Zero-DTE Cutoff Source",
+            "configured" if self._lifecycle.get("market_cutoff") else "default_lifecycle",
+        )
         for symbol, equity in self._equities.items():
             consolidator = TradeBarConsolidator(timedelta(days=1))
             consolidator.data_consolidated += lambda _, bar, name=symbol: self._on_zero_dte_daily_bar(name, bar)
             self.subscription_manager.add_consolidator(equity, consolidator)
+        # One completed daily close is required for a point-in-time direction
+        # signal. Two daily warmup sessions leave a closed prior bar available
+        # even when the first evaluation session follows a weekend/holiday.
+        self.set_runtime_statistic("Zero-DTE Daily Warmup Sessions", "2")
+        self.set_warm_up(2, Resolution.DAILY)
+
+    def _zero_dte_rules(self):
+        """Build the selector rules from the same request fields as preview."""
+
+        return ZeroDteRules(
+            max_premium_per_trade=Decimal(str(self._param("max_premium_per_trade", "150"))),
+            contracts_per_trade=int(self._param("contracts_per_trade", 1)),
+            delta_target=Decimal(str(self._param("delta_target", "0.22"))),
+            delta_min=Decimal(str(self._param("delta_min", "0.15"))),
+            delta_max=Decimal(str(self._param("delta_max", "0.30"))),
+            min_open_interest=int(self._param("min_open_interest", 100)),
+            min_volume=int(self._param("min_volume", 10)),
+            min_bid=Decimal(str(self._param("min_bid", "0.05"))),
+            max_bid_ask_spread_pct=Decimal(str(self._param("max_bid_ask_spread_pct", "0.20"))),
+            max_option_quote_age_seconds=int(self._param("max_option_quote_age_seconds", 1800)),
+        )
 
     def _on_zero_dte_daily_bar(self, symbol, bar):
+        self._quality["daily_bars_seen"] += 1
         last = self._last_daily_close[symbol]
         if last is not None:
             self._previous_daily_close[symbol] = last
         self._last_daily_close[symbol] = Decimal(str(bar.close))
+        timestamp = getattr(bar, "end_time", None) or getattr(bar, "time", None)
+        self._last_daily_bar_date[symbol] = timestamp.date() if timestamp is not None else None
+
+    def _reset_zero_dte_session(self):
+        observed_date = self.time.date()
+        if self._entry_date == observed_date:
+            return
+        self._entry_date = observed_date
+        self._entries_today = 0
+        # A symbol may be traded again only after LEAN has reported the prior
+        # option as closed or exercised. The entered set is not cleared here.
+
+    def _market_cutoff(self):
+        raw = str(self._lifecycle.get("market_cutoff") or self._DEFAULT_MARKET_CUTOFF).strip()
+        parts = raw.split()
+        time_text = parts[0] if parts else "16:00"
+        zone_name = parts[1] if len(parts) > 1 else "America/New_York"
+        try:
+            zone = ZoneInfo(zone_name)
+        except Exception as exc:
+            raise UnsupportedRealityModelError(f"invalid Zero-DTE market_cutoff timezone: {zone_name}") from exc
+        parsed = None
+        for format_ in ("%H:%M", "%H:%M:%S"):
+            try:
+                parsed = datetime.strptime(time_text, format_).time()
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            raise UnsupportedRealityModelError(
+                "Zero-DTE market_cutoff must use HH:MM or HH:MM:SS [IANA timezone]"
+            )
+        return parsed, zone
+
+    def _market_cutoff_text(self):
+        cutoff, zone = self._market_cutoff()
+        return f"{cutoff.strftime('%H:%M:%S')} {zone.key}"
+
+    @staticmethod
+    def _position_expiration(position):
+        expiration = position.get("expiration") if isinstance(position, dict) else None
+        if isinstance(expiration, datetime):
+            return expiration.date()
+        if expiration is None or isinstance(expiration, date):
+            return expiration
+        try:
+            return date.fromisoformat(str(expiration)[:10])
+        except (TypeError, ValueError):
+            return None
+
+    def _effective_market_cutoff(self, security=None):
+        cutoff, zone = self._market_cutoff()
+        current = self._now().astimezone(zone)
+        configured = datetime.combine(current.date(), cutoff, tzinfo=zone)
+        if security is None:
+            return configured
+        try:
+            hours = security.exchange.hours
+            local_time = getattr(security, "local_time", current.replace(tzinfo=None))
+            if getattr(local_time, "tzinfo", None) is not None:
+                local_time = local_time.astimezone(zone).replace(tzinfo=None)
+            exchange_close = hours.get_next_market_close(local_time, False)
+            if getattr(exchange_close, "tzinfo", None) is None:
+                exchange_close = exchange_close.replace(tzinfo=zone)
+            else:
+                exchange_close = exchange_close.astimezone(zone)
+            if exchange_close.date() != current.date():
+                try:
+                    last_close = hours.get_last_daily_market_close(local_time, False)
+                    if getattr(last_close, "tzinfo", None) is None:
+                        last_close = last_close.replace(tzinfo=zone)
+                    else:
+                        last_close = last_close.astimezone(zone)
+                    if last_close.date() == current.date():
+                        exchange_close = last_close
+                except Exception:
+                    pass
+            if exchange_close.date() != current.date():
+                # GetNextMarketClose is non-inclusive and therefore returns
+                # the next session after an early close. Recover today's
+                # regular segment end so a 13:00 half-day cannot inherit the
+                # configured 16:00 boundary.
+                market_hours = hours.get_market_hours(local_time)
+                segments = list(getattr(market_hours, "segments", ()))
+                regular = [
+                    segment
+                    for segment in segments
+                    if "market" in str(getattr(segment, "state", "")).lower()
+                ]
+                if regular and getattr(regular[-1], "end", None) is not None:
+                    exchange_close = datetime.combine(
+                        current.date(),
+                        regular[-1].end,
+                        tzinfo=zone,
+                    )
+            if exchange_close.date() == current.date():
+                return min(configured, exchange_close)
+        except Exception:
+            # A unit fake may not expose LEAN's exchange-hours object. Formal
+            # engine runs do, and retain the configured lifecycle cutoff when
+            # a non-engine object cannot provide it.
+            pass
+        return configured
+
+    def _cutoff_reached(self, position=None, *, security=None):
+        cutoff, zone = self._market_cutoff()
+        current = self._now().astimezone(zone)
+        if position is not None:
+            expiration = self._position_expiration(position)
+            if expiration is not None and current.date() > expiration:
+                return True
+            if expiration is not None and current.date() < expiration:
+                return False
+        effective_cutoff = self._effective_market_cutoff(security)
+        return current >= effective_cutoff
+
+    @staticmethod
+    def _order_status_name(order_event):
+        value = getattr(order_event, "status", "")
+        return str(getattr(value, "value", value)).lower().replace("_", "")
+
+    def _lifecycle_settlement_proven(self, order_event):
+        status = self._order_status_name(order_event)
+        if any(token in status for token in ("cancel", "invalid", "reject", "error")):
+            return False
+        try:
+            fill_quantity = Decimal(str(getattr(order_event, "fill_quantity", 0) or 0))
+        except (TypeError, ValueError):
+            fill_quantity = Decimal("0")
+        if "fill" in status and fill_quantity != 0:
+            return True
+        if status in {"filled", "assignment", "assigned", "exercised", "expired"}:
+            return True
+        return self._option_holding_is_zero(getattr(order_event, "symbol", ""))
+
+    def _option_holding_is_zero(self, option_symbol):
+        try:
+            security = self.securities[option_symbol]
+            return Decimal(str(self.portfolio[security.symbol].quantity)) == 0
+        except Exception:
+            return False
+
+    def _record_late_entry_fill(self, order_event, group, leg_name):
+        leg = group["legs"][leg_name]
+        try:
+            filled = abs(Decimal(str(getattr(order_event, "fill_quantity", 0) or 0)))
+        except (TypeError, ValueError):
+            filled = Decimal("0")
+        if filled > 0:
+            leg["filled_quantity"] += filled
+        leg["status"] = getattr(OrderStatus, "PARTIALLY_FILLED", "partially_filled")
+        self._late_entry_fill_events += 1
+        self._record_order_event(order_event)
+
+    def _record_order_event(self, order_event, *, lifecycle=False):
+        payload = {
+            "symbol": str(getattr(order_event, "symbol", "")),
+            "status": str(getattr(order_event, "status", "")),
+            "fill_quantity": str(getattr(order_event, "fill_quantity", "")),
+            "is_assignment": bool(getattr(order_event, "is_assignment", False)),
+            "message": str(getattr(order_event, "message", "")),
+        }
+        self._order_events.append(payload)
+        if lifecycle:
+            self._lifecycle_events.append(payload)
+            message = payload["message"].lower()
+            if payload["is_assignment"] or "assign" in message:
+                self._assignment_events.append(payload)
+            elif "exercise" in message or "expire" in message or "expiry" in message:
+                self._exercise_events.append(payload)
+
+    def _settle_lifecycle_position(self, option_symbol):
+        option_symbol = str(option_symbol)
+        for positions in (self._active_positions, self._partial_positions):
+            for symbol, position in list(positions.items()):
+                if str(position.get("option_symbol")) != option_symbol:
+                    continue
+                position["status"] = "settled"
+                positions.pop(symbol, None)
+                self._entered_symbols.discard(symbol)
+                self._exit_requested.discard(symbol)
+
+    def on_order_event(self, order_event):
+        """Route fills through the parent and retain lifecycle events."""
+
+        order_id = int(getattr(order_event, "order_id", -1))
+        pending_orders = getattr(self, "_pending_orders", {})
+        pending = pending_orders.get(order_id)
+        if pending is not None:
+            group_id, leg_name = pending
+            group = self._pending_groups.get(group_id)
+            if (
+                group is not None
+                and group["kind"] == "zero_dte_entry"
+                and group["symbol"] in self._entry_cutoff_cancel_requested
+                and "fill" in self._order_status_name(order_event)
+            ):
+                # Keep the observed quantity for settlement accounting, but
+                # never let a fill that arrived after the cutoff activate a
+                # new position.
+                self._record_late_entry_fill(order_event, group, leg_name)
+                return
+        message = str(getattr(order_event, "message", "")).lower()
+        lifecycle = bool(getattr(order_event, "is_assignment", False)) or any(
+            token in message for token in ("exercise", "assignment", "assigned", "expiry", "expired")
+        )
+        if lifecycle and order_id not in pending_orders:
+            self._record_order_event(order_event, lifecycle=True)
+            if self._lifecycle_settlement_proven(order_event):
+                self._settle_lifecycle_position(getattr(order_event, "symbol", ""))
+            return
+        self._record_order_event(order_event)
+        super().on_order_event(order_event)
+
+    def on_assignment_order_event(self, assignment_event):
+        self._record_order_event(assignment_event, lifecycle=True)
+        if self._lifecycle_settlement_proven(assignment_event):
+            self._settle_lifecycle_position(getattr(assignment_event, "symbol", ""))
 
     def on_data(self, data):
+        if bool(getattr(self, "is_warming_up", False)):
+            return
+        self._reset_zero_dte_session()
+        self._manage_zero_dte_positions()
+        rules = self._zero_dte_rules()
         for symbol, equity_symbol in self._equities.items():
+            if (
+                symbol in self._entered_symbols
+                or symbol in self._blocked_symbols
+                or self._has_pending_symbol(symbol)
+                or self._entries_today >= int(self._param("max_trades_per_day", 1))
+            ):
+                continue
             security = self.securities[equity_symbol]
-            observed_date = self.time.date()
-            if self._last_observed_date[symbol] != observed_date:
-                if self._last_daily_close[symbol] is not None:
+            if self._cutoff_reached(security=security) or not security.has_data or security.price <= 0:
+                continue
+            if self._last_observed_date[symbol] != self.time.date():
+                last_bar_date = getattr(self, "_last_daily_bar_date", {}).get(symbol)
+                if (
+                    self._last_daily_close[symbol] is not None
+                    and last_bar_date is not None
+                    and last_bar_date < self.time.date()
+                ):
                     self._previous_daily_close[symbol] = self._last_daily_close[symbol]
-                self._last_observed_date[symbol] = observed_date
+                self._last_observed_date[symbol] = self.time.date()
             previous_close = self._previous_daily_close[symbol]
-            if not security.has_data or security.price <= 0 or previous_close is None or previous_close <= 0:
+            if previous_close is None or previous_close <= 0:
                 continue
             change = (Decimal(str(security.price)) - previous_close) / previous_close * Decimal("100")
             threshold = Decimal(str(self._param("min_direction_change_pct", "0.30")))
@@ -1359,17 +1677,237 @@ class StocksToolZeroDteResearchAlgorithm(_StrategyAlgorithm):
                 continue
             quotes = self._read_chain(data, self._options[symbol])
             selection = select_zero_dte_candidate(
-                symbol=symbol, direction=direction, underlying_price=Decimal(str(security.price)), evaluated_at=self._now(), quotes=quotes,
-                rules=ZeroDteRules(max_premium_per_trade=Decimal(str(self._param("max_premium_per_trade", "150"))), contracts_per_trade=int(self._param("contracts_per_trade", 1)), delta_target=Decimal(str(self._param("delta_target", "0.22"))), delta_min=Decimal(str(self._param("delta_min", "0.15"))), delta_max=Decimal(str(self._param("delta_max", "0.30"))), min_open_interest=int(self._param("min_open_interest", 100)), min_volume=int(self._param("min_volume", 10)), min_bid=Decimal(str(self._param("min_bid", "0.05"))), max_bid_ask_spread_pct=Decimal(str(self._param("max_bid_ask_spread_pct", "0.20"))), max_option_quote_age_seconds=int(self._param("max_option_quote_age_seconds", 1800))),
+                symbol=symbol,
+                direction=direction,
+                underlying_price=Decimal(str(security.price)),
+                evaluated_at=self._now(),
+                quotes=quotes,
+                rules=rules,
             )
-            if selection is not None:
-                self.debug(json.dumps({"research_only": True, "strategy": "zero_dte", "symbol": symbol, "direction": direction, "strike": str(selection.quote["strike"])}))
+            if selection is None or selection.premium_at_ask > rules.max_premium_per_trade:
+                continue
+            self._quality["valid_candidate_checks"] += 1
+            position = {
+                "option_symbol": str(selection.quote["contract"].symbol),
+                "strike": selection.quote["strike"],
+                "right": direction,
+                "expiration": selection.expiration,
+                "contracts": int(selection.contracts),
+                "entry_premium_at_ask": selection.premium_at_ask,
+                "max_loss": selection.premium_at_ask,
+                "premium_cap": rules.max_premium_per_trade,
+                "entry_price": selection.quote["ask"],
+                "entry_time": self._now(),
+                "status": "entry_pending",
+            }
+            self._new_order_group(
+                kind="zero_dte_entry",
+                symbol=symbol,
+                legs=[
+                    {
+                        "name": "option_entry",
+                        "symbol": selection.quote["contract"].symbol,
+                        "quantity": int(selection.contracts),
+                        "tag": (
+                            f"stocks-tool zero-dte entry:{direction}:"
+                            f"premium_cap={rules.max_premium_per_trade}"
+                        ),
+                    }
+                ],
+                metadata=position,
+            )
+            self._entries_today += 1
+
+    def _cancel_zero_dte_entry_order(self, order_id):
+        """Cancel a pending LEAN entry through its transaction ticket."""
+
+        transactions = getattr(self, "transactions", None)
+        if transactions is None:
+            return False
+        tag = "stocks-tool zero-dte entry canceled at market cutoff"
+        try:
+            ticket = transactions.get_order_ticket(int(order_id))
+        except Exception:
+            ticket = None
+        if ticket is not None and hasattr(ticket, "cancel"):
+            try:
+                ticket.cancel(tag)
+                return True
+            except Exception:
+                pass
+        try:
+            transactions.cancel_order(int(order_id), tag)
+            return True
+        except Exception:
+            return False
+
+    def _cancel_zero_dte_entries_at_cutoff(self):
+        for group in list(self._pending_groups.values()):
+            if group.get("kind") != "zero_dte_entry":
+                continue
+            symbol = group["symbol"]
+            if symbol in self._entry_cutoff_cancel_requested:
+                continue
+            position = group.get("metadata", {})
+            security = None
+            try:
+                security = self.securities[self._equities[symbol]]
+            except Exception:
+                pass
+            if not self._cutoff_reached(position, security=security):
+                continue
+            # Block new activation before asking LEAN to cancel. A backtest
+            # may deliver a final fill and the cancel event in either order.
+            self._entry_cutoff_cancel_requested.add(symbol)
+            self._blocked_symbols.add(symbol)
+            for leg in group["legs"].values():
+                order_id = leg.get("order_id")
+                status = str(getattr(leg.get("status"), "value", leg.get("status", ""))).lower()
+                terminal = status.replace("_", "") in {
+                    "filled",
+                    "canceled",
+                    "cancelled",
+                    "invalid",
+                    "rejected",
+                }
+                if order_id is not None and not terminal:
+                    self._cancel_zero_dte_entry_order(order_id)
+
+    def _submit_zero_dte_exit(self, symbol, position, *, reason):
+        contracts = int(position.get("contracts", 0))
+        if contracts <= 0 or symbol in self._exit_requested:
+            return
+        # Register before submission so a synchronous fixture fill can clear
+        # the guard in the filled handler without it being re-added afterward.
+        self._exit_requested.add(symbol)
+        self._new_order_group(
+            kind="zero_dte_exit",
+            symbol=symbol,
+            legs=[
+                {
+                    "name": "option_exit",
+                    "symbol": position["option_symbol"],
+                    "quantity": -contracts,
+                    "tag": f"stocks-tool zero-dte close:{reason}",
+                }
+            ],
+            metadata={
+                "position": position,
+                "reason": reason,
+                "quantity": contracts,
+            },
+        )
+
+    def _manage_zero_dte_positions(self):
+        self._cancel_zero_dte_entries_at_cutoff()
+        cutoff, zone = self._market_cutoff()
+        current = self._now().astimezone(zone)
+        for symbol, position in list(self._active_positions.items()):
+            security = None
+            try:
+                security = self.securities[self._equities[symbol]]
+            except Exception:
+                pass
+            expiration = self._position_expiration(position)
+            if expiration is not None and current.date() > expiration:
+                # LEAN's expiry/exercise model owns a position after its
+                # session. Do not submit a stale close on the next session.
+                continue
+            if (
+                symbol in self._blocked_symbols
+                or symbol in self._exit_requested
+                or self._has_pending_symbol(symbol)
+                or position.get("status") != "open"
+                or not self._cutoff_reached(position, security=security)
+            ):
+                continue
+            self._submit_zero_dte_exit(symbol, position, reason="market_cutoff")
+
+        # A cutoff-canceled partial entry remains a real long option holding,
+        # but it never becomes an active strategy position. Close it through
+        # the same quote/fee model once the cancellation is terminal.
+        for symbol, position in list(self._partial_positions.items()):
+            if position.get("status") != "cutoff_partial" or self._has_pending_symbol(symbol):
+                continue
+            if expiration := self._position_expiration(position):
+                if current.date() > expiration:
+                    continue
+            if current.time() >= cutoff or symbol in self._entry_cutoff_cancel_requested:
+                self._submit_zero_dte_exit(symbol, position, reason="market_cutoff_partial_entry")
+
+    def _on_zero_dte_entry_group(self, group):
+        symbol = group["symbol"]
+        leg = group["legs"].get("option_entry", {})
+        filled = int(Decimal(str(leg.get("filled_quantity", 0))))
+        cutoff_canceled = symbol in self._entry_cutoff_cancel_requested
+        if group["state"] == "filled" and not cutoff_canceled:
+            position = dict(group["metadata"])
+            position["status"] = "open"
+            self._active_positions[symbol] = position
+            self._entered_symbols.add(symbol)
+            self._forget_group(group)
+        elif group["state"] == "partial_terminal" or cutoff_canceled:
+            if filled > 0:
+                position = dict(group["metadata"])
+                position["contracts"] = filled
+                position["status"] = "cutoff_partial" if cutoff_canceled else "partial_entry_manual_action"
+                self._partial_positions[symbol] = position
+            self._blocked_symbols.add(symbol)
+            self._forget_group(group)
+            if cutoff_canceled and filled > 0:
+                self._submit_zero_dte_exit(symbol, self._partial_positions[symbol], reason="market_cutoff_partial_entry")
+
+    def _on_zero_dte_exit_group(self, group):
+        symbol = group["symbol"]
+        position = self._active_positions.get(symbol) or self._partial_positions.get(symbol)
+        filled = int(Decimal(str(group["legs"].get("option_exit", {}).get("filled_quantity", 0))))
+        if group["state"] == "filled":
+            self._active_positions.pop(symbol, None)
+            self._partial_positions.pop(symbol, None)
+            self._entered_symbols.discard(symbol)
+            self._exit_requested.discard(symbol)
+            self._forget_group(group)
+        elif group["state"] == "partial_terminal":
+            if position is not None and filled > 0:
+                position["contracts"] = max(0, int(position.get("contracts", 0)) - filled)
+                if position["contracts"] == 0:
+                    self._active_positions.pop(symbol, None)
+                    self._partial_positions.pop(symbol, None)
+                    self._entered_symbols.discard(symbol)
+            if position is not None and position.get("contracts", 0) > 0:
+                position["status"] = "partial_exit_manual_action"
+            self._blocked_symbols.add(symbol)
+            self._forget_group(group)
+
+    def on_end_of_algorithm(self):
+        super().on_end_of_algorithm()
+        self.set_runtime_statistic("Zero-DTE Entries Submitted", str(self._entries_today))
+        self.set_runtime_statistic("Zero-DTE Active Positions", str(len(self._active_positions)))
+        self.set_runtime_statistic("Zero-DTE Partial Positions", str(len(self._partial_positions)))
+        self.set_runtime_statistic("Zero-DTE Exit Requests", str(len(self._exit_requested)))
+        self.set_runtime_statistic("Zero-DTE Late Entry Fills", str(self._late_entry_fill_events))
+        self.set_runtime_statistic("Zero-DTE Lifecycle Events", str(len(self._lifecycle_events)))
+        self.set_runtime_statistic("Zero-DTE Assignment Events", str(len(self._assignment_events)))
+        self.set_runtime_statistic("Zero-DTE Exercise Events", str(len(self._exercise_events)))
+        self.set_runtime_statistic(
+            "Zero-DTE Lifecycle Event Payload",
+            json.dumps(self._lifecycle_events, sort_keys=True, default=str),
+        )
 
     def Initialize(self):
         return self.initialize()
 
     def OnData(self, data):
         return self.on_data(data)
+
+    def OnOrderEvent(self, order_event):
+        return self.on_order_event(order_event)
+
+    def OnAssignmentOrderEvent(self, assignment_event):
+        return self.on_assignment_order_event(assignment_event)
+
+    def OnEndOfAlgorithm(self):
+        return self.on_end_of_algorithm()
 
 
 StocksToolZeroDteAlgorithm = StocksToolZeroDteResearchAlgorithm

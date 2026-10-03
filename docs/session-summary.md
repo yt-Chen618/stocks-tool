@@ -99,6 +99,14 @@ Open:
   data and model identities are recorded; partial groups and unsupported data
   fail closed. The full final engine matrix belongs with the source-specific
   acceptance artifacts, not an older initialization-only report.
+- Canonical strategy qualification is now maintained in
+  `scripts/lean_strategy_smoke.py`: synthetic native chains must produce filled
+  entry/exit orders and repeatable semantic results. Zero-DTE orders exist only
+  inside the offline engine; its broker execution routes remain locked. The
+  engine adapter supports standard 100-share contracts and validated equity
+  split/cash-dividend events. Adjusted contract multipliers and unsupported
+  corporate actions fail closed and need separate model/data qualification;
+  obtaining a licensed dataset alone does not automatically complete P5.
 - The actual Longbridge quote and paper-account read attempts returned HTTP 502.
   Local API availability is verified separately; external cold connection and
   warm-market latency goals must not be reported as passed from mock timings.
