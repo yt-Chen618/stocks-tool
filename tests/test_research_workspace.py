@@ -14,6 +14,7 @@ from stocks_tool.application.services.research_workspace import (
 )
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
     AssetType,
     BrokerName,
     ExecutionMode,
@@ -96,6 +97,8 @@ def _service(
     snapshots.get_latest_account_snapshot.return_value = AccountSnapshot(
         broker=BrokerName.LONGBRIDGE,
         account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        provenance=AccountSnapshotProvenance.BROKER_SYNC,
         cash_balance=Decimal("1000"),
         net_liquidation=Decimal("1500"),
         buying_power=Decimal("900"),

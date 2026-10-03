@@ -82,6 +82,11 @@ def test_liquidity_and_quote_freshness_helpers() -> None:
         scanned_at=NOW,
         max_option_quote_age_seconds=300,
     )
+    assert not is_option_quote_fresh(
+        _put(timestamp=NOW + timedelta(seconds=1)),
+        scanned_at=NOW,
+        max_option_quote_age_seconds=300,
+    )
 
     reasons = option_leg_liquidity_reasons(
         short_leg=_put(volume=50),

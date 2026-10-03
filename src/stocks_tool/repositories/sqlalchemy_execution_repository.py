@@ -5,8 +5,8 @@ from uuid import uuid4
 from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
-from stocks_tool.db.models import ExecutionRecord
-from stocks_tool.domain.enums import BrokerName, OrderSide
+from stocks_tool.db.models import BrokerAccountRecord, ExecutionRecord, OrderRecord
+from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderSide
 from stocks_tool.domain.models import Execution
 from stocks_tool.domain.pagination import (
     CursorPage,
@@ -45,6 +45,8 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
         self,
         external_account_id: str | None = None,
         order_id: str | None = None,
+        *,
+        mode: ExecutionMode | None = None,
     ) -> list[Execution]:
         query = (
             select(ExecutionRecord)
@@ -54,10 +56,12 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
                 ExecutionRecord.id.desc(),
             )
         )
-        if external_account_id is not None:
-            query = query.where(ExecutionRecord.external_account_id == external_account_id)
-        if order_id is not None:
-            query = query.where(ExecutionRecord.order_id == order_id)
+        query = self._apply_scope(
+            query,
+            external_account_id=external_account_id,
+            order_id=order_id,
+            mode=mode,
+        )
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
 
@@ -66,6 +70,7 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
         *,
         external_account_id: str | None = None,
         order_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> CursorPage[Execution]:
@@ -73,15 +78,18 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
         scope = {
             "external_account_id": external_account_id,
             "order_id": order_id,
+            "mode": mode.value if mode is not None else None,
         }
         query = select(ExecutionRecord.id).order_by(
             ExecutionRecord.created_at.desc(),
             ExecutionRecord.id.desc(),
         )
-        if external_account_id is not None:
-            query = query.where(ExecutionRecord.external_account_id == external_account_id)
-        if order_id is not None:
-            query = query.where(ExecutionRecord.order_id == order_id)
+        query = self._apply_scope(
+            query,
+            external_account_id=external_account_id,
+            order_id=order_id,
+            mode=mode,
+        )
         if cursor is not None:
             position = decode_cursor(cursor, resource="executions", scope=scope)
             try:
@@ -123,6 +131,38 @@ class SQLAlchemyExecutionRepository(ExecutionRepository):
             has_more=has_more,
             limit=page_limit,
         )
+
+    @staticmethod
+    def _apply_scope(
+        query,
+        *,
+        external_account_id: str | None,
+        order_id: str | None,
+        mode: ExecutionMode | None,
+    ):
+        if mode is None:
+            if external_account_id is not None:
+                query = query.where(ExecutionRecord.external_account_id == external_account_id)
+            if order_id is not None:
+                query = query.where(ExecutionRecord.order_id == order_id)
+            return query
+
+        query = (
+            query.join(OrderRecord, ExecutionRecord.order_id == OrderRecord.id)
+            .join(BrokerAccountRecord, OrderRecord.broker_account_id == BrokerAccountRecord.id)
+            .where(
+                OrderRecord.execution_mode == mode.value,
+                ExecutionRecord.external_account_id == BrokerAccountRecord.external_account_id,
+            )
+        )
+        if external_account_id is not None:
+            query = query.where(
+                ExecutionRecord.external_account_id == external_account_id,
+                BrokerAccountRecord.external_account_id == external_account_id,
+            )
+        if order_id is not None:
+            query = query.where(OrderRecord.id == order_id)
+        return query
 
     def upsert_execution(self, execution: Execution) -> Execution:
         record = None

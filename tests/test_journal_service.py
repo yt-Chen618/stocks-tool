@@ -99,6 +99,7 @@ def test_create_entry_links_order_and_execution_context() -> None:
     assert created.trade_plan_id == "plan-123"
     assert created.order_id == "order-123"
     assert created.execution_id == "execution-123"
+    assert created.mode is ExecutionMode.PAPER
     assert created.title == "Post-trade review"
     assert created.notes == "Held the risk budget and respected the exit."
     assert created.tags == ["discipline", "execution"]
@@ -130,3 +131,57 @@ def test_create_entry_rejects_execution_order_mismatch() -> None:
                 execution_id="execution-123",
             )
         )
+
+
+def test_create_entry_rejects_contradictory_linked_mode() -> None:
+    journals = Mock()
+    orders = Mock()
+    orders.get_order.return_value = build_order()
+    trade_plans = Mock()
+    executions = Mock()
+    service = JournalService(
+        journals=journals,
+        orders=orders,
+        trade_plans=trade_plans,
+        executions=executions,
+    )
+
+    with pytest.raises(ValueError, match="Journal mode does not match the linked order"):
+        service.create_entry(
+            CreateJournalEntryRequest(
+                external_account_id="LBPT10087357",
+                mode=ExecutionMode.LIVE,
+                symbol="UNH.US",
+                entry_type=JournalEntryType.NOTE,
+                title="Mode check",
+                notes="A live note cannot link to a paper order.",
+                order_id="order-123",
+            )
+        )
+
+
+def test_create_entry_preserves_explicit_mode_for_standalone_note() -> None:
+    journals = Mock()
+    journals.create_entry.side_effect = lambda entry: entry
+    orders = Mock()
+    trade_plans = Mock()
+    executions = Mock()
+    service = JournalService(
+        journals=journals,
+        orders=orders,
+        trade_plans=trade_plans,
+        executions=executions,
+    )
+
+    created = service.create_entry(
+        CreateJournalEntryRequest(
+            external_account_id="LBPT10087357",
+            mode=ExecutionMode.PAPER,
+            symbol="UNH.US",
+            entry_type=JournalEntryType.NOTE,
+            title="Standalone note",
+            notes="Mode is explicit and server-persistable.",
+        )
+    )
+
+    assert created.mode is ExecutionMode.PAPER

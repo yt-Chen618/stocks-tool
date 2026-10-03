@@ -17,12 +17,14 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         record = self.session.execute(
             select(BullPutStrategyRuntimeRecord).where(
                 BullPutStrategyRuntimeRecord.external_account_id == external_account_id,
                 BullPutStrategyRuntimeRecord.strategy_id == strategy_id,
+                BullPutStrategyRuntimeRecord.execution_mode == mode.value,
             )
         ).scalar_one_or_none()
         if record is None:
@@ -33,6 +35,7 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         record = self.session.execute(
@@ -40,6 +43,7 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
             .where(
                 BullPutStrategyRuntimeRecord.external_account_id == external_account_id,
                 BullPutStrategyRuntimeRecord.strategy_id == strategy_id,
+                BullPutStrategyRuntimeRecord.execution_mode == mode.value,
             )
             .with_for_update()
         ).scalar_one_or_none()
@@ -55,8 +59,18 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
                 select(BullPutStrategyRuntimeRecord).where(
                     BullPutStrategyRuntimeRecord.external_account_id == state.external_account_id,
                     BullPutStrategyRuntimeRecord.strategy_id == state.strategy_id,
+                    BullPutStrategyRuntimeRecord.execution_mode == state.mode.value,
                 )
             ).scalar_one_or_none()
+        elif (
+            record.external_account_id != state.external_account_id
+            or record.strategy_id != state.strategy_id
+            or record.execution_mode != state.mode.value
+        ):
+            raise ValueError(
+                "Bull Put runtime state id is already bound to a different account, "
+                "strategy, or execution mode."
+            )
         if record is None:
             record = BullPutStrategyRuntimeRecord(id=state.id)
             self.session.add(record)
@@ -79,10 +93,10 @@ class SQLAlchemyBullPutStrategyRuntimeRepository(BullPutStrategyRuntimeRepositor
         record: BullPutStrategyRuntimeRecord,
         state: BullPutStrategyRuntimeState,
     ) -> None:
-        record.broker_account_id = self._resolve_broker_account_id(self.session, state)
         record.strategy_id = state.strategy_id
         record.external_account_id = state.external_account_id
         record.execution_mode = state.mode.value
+        record.broker_account_id = self._resolve_broker_account_id(self.session, state)
         record.auto_entry_enabled = state.auto_entry_enabled
         record.manual_pause = state.manual_pause
         record.kill_switch_active = state.kill_switch_active

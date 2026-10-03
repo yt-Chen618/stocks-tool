@@ -1,6 +1,6 @@
 # Regression Matrix
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 Run the smallest relevant test first, then the broader gates before treating an optimization slice as done.
 
@@ -13,6 +13,41 @@ Resume by rerunning the same command with the same evidence directory after insp
 Fault timeouts apply per child, not to the campaign: static/environment checks default to 120 seconds, pytest/PostgreSQL/recovery checks to 600 seconds, and the complete mock matrix to 1,800 seconds. Browser wrappers have a separate 300-second default process deadline; real-refresh deadlines also allow the requested iteration count. Browser-step deadlines remain in effect. Owned process trees are checked by PID/start identity before cleanup, including Linux descendants in separate sessions. Mock-server output goes to diagnostic log files, avoiding unconsumed pipes. Cleanup or identity failures require inspection and cannot justify a successful validation claim.
 
 CI runs on PR updates, `main` pushes and manual dispatch, and checks out the exact PR head. Its concurrency group cancels only an older run for the same PR/ref. Uploaded evidence includes P0, history-query, strategy-query, deterministic Bull Put flow and screenshots. A saved workflow, local pass, or previous-head green run does not prove final remote acceptance.
+
+## Professional Workbench Gates
+
+`scripts/run_regression.py workbench-features` drives the real mock DOM through
+research selection, save/reload and immutable case capture, comparison, portfolio,
+events, Advisor and backtest read surfaces. It checks new-panel account races,
+explicit paper activity scope, missing-data explanations and three viewport sizes.
+It records zero broker mutations and hashes all served UI assets before/after;
+source drift invalidates the run. This gate is included in `p0-safety`.
+
+`scripts/run_regression.py p6-query` uses isolated PostgreSQL for 100k-intent keyset
+and fairness evidence, concurrent event deduplication, and legacy duplicate reuse
+beyond the first batch. Old records remain untouched; no broker is called.
+
+`scripts/lean_offline_smoke.py` is a separate actual-engine gate. It never pulls an
+image, downloads market data or contacts a broker. Provision the pinned official
+image first. `BLOCKED_ENV`, fixture simulation, and genuine historical validation
+are distinct outcomes. Synthetic data cannot satisfy the multi-year data gate.
+
+The engine matrix includes `--registered-fixture` for native equity and two
+explicit option contracts, and `--registered-fixture --partial-fill-fixture` for
+limited quote size, fill-forward rejection and incomplete-leg state. Lifecycle
+fixtures exercise stock split/dividend accounting and standard option expiry
+behavior. Record raw input rows separately from repeated/fill-forward observations;
+those observation counts are not independent historical samples. Compare repeat
+runs on normalized trades, equity and lifecycle events rather than elapsed time.
+
+Use `--lifecycle-fixture --lifecycle-scenario` with `split_dividend`,
+`covered_call_assignment`, or `long_call_exercise` for each actual-engine case.
+Split warnings and applied splits are counted separately. Option event counts
+also distinguish the contract exercise/assignment from underlying stock delivery.
+
+CI additionally checks the Windows process paths from a Unicode checkout and
+runs the actual offline LEAN fixture in an independent Linux job. All artifacts
+must match the PR head; a skipped or blocked engine gate is not a passing result.
 
 ## Reproducible Environment Gates
 

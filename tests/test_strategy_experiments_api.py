@@ -656,6 +656,7 @@ def test_strategy_controls_route_returns_policy_snapshot() -> None:
     assert body["llm_direct_execution_allowed"] is False
     service.get_control_snapshot.assert_called_once_with(
         external_account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
     )
 
 

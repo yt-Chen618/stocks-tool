@@ -5,7 +5,7 @@ from collections.abc import Collection
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -40,6 +40,7 @@ from stocks_tool.domain.models import (
     TradingActionContext,
 )
 from stocks_tool.ports.trading_intent_ledger import (
+    ReconciliationCursor,
     TradeActionIntentConflictError,
     TradingIntentLedger,
 )
@@ -492,6 +493,10 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
                 action.state = TradingIntentState.UNKNOWN.value
                 action.last_error = error
         now = datetime.now(timezone.utc)
+        # Reconciliation attempts are also the durable fairness clock. The
+        # next bounded pass orders by this value so a large unresolved queue
+        # rotates instead of retrying the same first page forever.
+        intent.updated_at = now
         coverage_complete = self._coverage_covers_intent(
             intent,
             reconciliation_coverage_start_at,
@@ -609,6 +614,91 @@ class SQLAlchemyTradingIntentLedger(TradingIntentLedger):
             query = query.where(OrderIntentRecord.operation.in_(operation_values))
         if limit is not None:
             query = query.limit(limit)
+        return [self._to_domain(record) for record in self.session.execute(query).scalars().all()]
+
+    def get_reconciliation_high_watermark(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        states: Collection[TradingIntentState],
+    ) -> ReconciliationCursor | None:
+        state_values = [state.value for state in states]
+        if not state_values:
+            return None
+        record = self.session.execute(
+            select(OrderIntentRecord)
+            .where(
+                OrderIntentRecord.external_account_id == external_account_id,
+                OrderIntentRecord.execution_mode == mode.value,
+                OrderIntentRecord.state.in_(state_values),
+            )
+            .order_by(
+                OrderIntentRecord.updated_at.desc(),
+                OrderIntentRecord.created_at.desc(),
+                OrderIntentRecord.id.desc(),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if record is None:
+            return None
+        return ReconciliationCursor(
+            updated_at=self._as_utc(record.updated_at),
+            created_at=self._as_utc(record.created_at),
+            intent_id=record.id,
+        )
+
+    def list_reconciliation_intents(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        states: Collection[TradingIntentState],
+        high_watermark: ReconciliationCursor,
+        cursor: ReconciliationCursor | None = None,
+        limit: int = 100,
+    ) -> list[BrokerOrderIntent]:
+        state_values = [state.value for state in states]
+        if not state_values or limit <= 0:
+            return []
+        highwater_filter = or_(
+            OrderIntentRecord.updated_at < high_watermark.updated_at,
+            and_(
+                OrderIntentRecord.updated_at == high_watermark.updated_at,
+                OrderIntentRecord.created_at < high_watermark.created_at,
+            ),
+            and_(
+                OrderIntentRecord.updated_at == high_watermark.updated_at,
+                OrderIntentRecord.created_at == high_watermark.created_at,
+                OrderIntentRecord.id <= high_watermark.intent_id,
+            ),
+        )
+        query = select(OrderIntentRecord).where(
+            OrderIntentRecord.external_account_id == external_account_id,
+            OrderIntentRecord.execution_mode == mode.value,
+            OrderIntentRecord.state.in_(state_values),
+            highwater_filter,
+        )
+        if cursor is not None:
+            query = query.where(
+                or_(
+                    OrderIntentRecord.updated_at > cursor.updated_at,
+                    and_(
+                        OrderIntentRecord.updated_at == cursor.updated_at,
+                        OrderIntentRecord.created_at > cursor.created_at,
+                    ),
+                    and_(
+                        OrderIntentRecord.updated_at == cursor.updated_at,
+                        OrderIntentRecord.created_at == cursor.created_at,
+                        OrderIntentRecord.id > cursor.intent_id,
+                    ),
+                )
+            )
+        query = query.order_by(
+            OrderIntentRecord.updated_at.asc(),
+            OrderIntentRecord.created_at.asc(),
+            OrderIntentRecord.id.asc(),
+        ).limit(limit)
         return [self._to_domain(record) for record in self.session.execute(query).scalars().all()]
 
     def count_intents(

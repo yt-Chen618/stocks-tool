@@ -4,6 +4,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from stocks_tool.domain.strategies.common import (
+    days_to_expiration as shared_days_to_expiration,
+    quote_mid as shared_quote_mid,
+)
 from stocks_tool.domain.enums import RiskStatus
 from stocks_tool.domain.models import (
     CoveredCallCandidate,
@@ -20,18 +24,16 @@ def days_to_expiration(
     evaluated_at: datetime,
     market_timezone: ZoneInfo,
 ) -> int:
-    evaluated_date = evaluated_at.astimezone(market_timezone).date()
-    return (expiry_date - evaluated_date).days
+    return shared_days_to_expiration(
+        expiry_date,
+        evaluated_at,
+        market_timezone=market_timezone,
+    )
 
 
 def quote_mid(quote: OptionMarketSnapshot) -> Decimal:
-    if quote.bid is not None and quote.ask is not None:
-        return ((quote.bid + quote.ask) / Decimal("2")).quantize(Decimal("0.01"))
-    if quote.bid is not None:
-        return quote.bid.quantize(Decimal("0.01"))
-    if quote.ask is not None:
-        return quote.ask.quantize(Decimal("0.01"))
-    return Decimal("0")
+    shared = shared_quote_mid(quote)
+    return shared.quantize(Decimal("0.01")) if shared is not None else Decimal("0")
 
 
 def safe_pct(numerator: Decimal, denominator: Decimal) -> Decimal | None:

@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from stocks_tool.domain.strategies.bull_put import BullPutRules, is_short_put_candidate as select_is_short_put_candidate
+from stocks_tool.domain.strategies.common import (
+    is_option_quote_fresh as shared_is_option_quote_fresh,
+    is_tradeable_long_leg as shared_is_tradeable_long_leg,
+    passes_top_of_book as shared_passes_top_of_book,
+    quote_mid as shared_quote_mid,
+    select_nearest_expiration,
+)
 from stocks_tool.domain.models import OptionMarketSnapshot
 
 
@@ -15,15 +23,13 @@ def select_expiration_date(
     max_dte: int,
     market_timezone: ZoneInfo,
 ) -> date | None:
-    scanned_date = scanned_at.astimezone(market_timezone).date()
-    candidates = [
-        expiry_date
-        for expiry_date in expiry_dates
-        if min_dte <= (expiry_date - scanned_date).days <= max_dte
-    ]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda expiry_date: (expiry_date - scanned_date).days)
+    return select_nearest_expiration(
+        expiry_dates,
+        scanned_at,
+        min_dte=min_dte,
+        max_dte=max_dte,
+        market_timezone=market_timezone,
+    )
 
 
 def is_short_put_candidate(
@@ -33,12 +39,15 @@ def is_short_put_candidate(
     short_delta_min: Decimal,
     short_delta_max: Decimal,
 ) -> bool:
-    if quote.delta is None:
-        return False
-    if quote.open_interest is None or quote.open_interest < min_open_interest:
-        return False
-    delta_abs = abs(quote.delta)
-    return short_delta_min <= delta_abs <= short_delta_max
+    return select_is_short_put_candidate(
+        quote,
+        rules=BullPutRules(
+            min_open_interest=min_open_interest,
+            short_delta_min=short_delta_min,
+            short_delta_max=short_delta_max,
+            require_trend=False,
+        ),
+    )
 
 
 def passes_top_of_book_filters(
@@ -46,14 +55,10 @@ def passes_top_of_book_filters(
     *,
     max_bid_ask_spread_pct: Decimal,
 ) -> bool:
-    if quote.bid is None or quote.ask is None:
-        return False
-    if quote.bid <= Decimal("0") or quote.ask <= quote.bid:
-        return False
-    mid = (quote.ask + quote.bid) / Decimal("2")
-    if mid <= Decimal("0"):
-        return False
-    return ((quote.ask - quote.bid) / mid) <= max_bid_ask_spread_pct
+    return shared_passes_top_of_book(
+        quote,
+        max_bid_ask_spread_pct=max_bid_ask_spread_pct,
+    )
 
 
 def is_option_quote_fresh(
@@ -62,14 +67,11 @@ def is_option_quote_fresh(
     scanned_at: datetime,
     max_option_quote_age_seconds: int,
 ) -> bool:
-    quote_time = quote.timestamp
-    if quote_time.tzinfo is None:
-        quote_time = quote_time.replace(tzinfo=timezone.utc)
-    reference = scanned_at if scanned_at.tzinfo is not None else scanned_at.replace(tzinfo=timezone.utc)
-    age_seconds = (reference.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)).total_seconds()
-    if age_seconds < -300:
-        return False
-    return age_seconds <= max_option_quote_age_seconds
+    return shared_is_option_quote_fresh(
+        quote,
+        evaluated_at=scanned_at,
+        max_age_seconds=max_option_quote_age_seconds,
+    )
 
 
 def option_leg_liquidity_reasons(
@@ -83,32 +85,32 @@ def option_leg_liquidity_reasons(
     max_option_quote_age_seconds: int,
 ) -> list[str]:
     reasons: list[str] = []
-    if not passes_top_of_book_filters(short_leg, max_bid_ask_spread_pct=max_bid_ask_spread_pct):
+    if not shared_passes_top_of_book(short_leg, max_bid_ask_spread_pct=max_bid_ask_spread_pct):
         reasons.append(f"Short put {short_leg.symbol} does not have a tight, positive bid/ask.")
     if short_leg.volume < min_short_leg_volume:
         reasons.append(
             f"Short put {short_leg.symbol} volume {short_leg.volume} is below the configured minimum {min_short_leg_volume}."
         )
-    if not is_option_quote_fresh(
+    if not shared_is_option_quote_fresh(
         short_leg,
-        scanned_at=scanned_at,
-        max_option_quote_age_seconds=max_option_quote_age_seconds,
+        evaluated_at=scanned_at,
+        max_age_seconds=max_option_quote_age_seconds,
     ):
         reasons.append(
             f"Short put {short_leg.symbol} quote timestamp is older than {max_option_quote_age_seconds}s."
         )
     if long_leg is None:
         return reasons
-    if not passes_top_of_book_filters(long_leg, max_bid_ask_spread_pct=max_bid_ask_spread_pct):
+    if not shared_passes_top_of_book(long_leg, max_bid_ask_spread_pct=max_bid_ask_spread_pct):
         reasons.append(f"Long put {long_leg.symbol} does not have a tight, positive bid/ask.")
     if long_leg.volume < min_long_leg_volume:
         reasons.append(
             f"Long put {long_leg.symbol} volume {long_leg.volume} is below the configured minimum {min_long_leg_volume}."
         )
-    if not is_option_quote_fresh(
+    if not shared_is_option_quote_fresh(
         long_leg,
-        scanned_at=scanned_at,
-        max_option_quote_age_seconds=max_option_quote_age_seconds,
+        evaluated_at=scanned_at,
+        max_age_seconds=max_option_quote_age_seconds,
     ):
         reasons.append(
             f"Long put {long_leg.symbol} quote timestamp is older than {max_option_quote_age_seconds}s."
@@ -117,11 +119,7 @@ def option_leg_liquidity_reasons(
 
 
 def has_tradeable_long_leg(quote: OptionMarketSnapshot) -> bool:
-    if quote.ask is None or quote.bid is None:
-        return False
-    if quote.ask <= Decimal("0"):
-        return False
-    return quote.ask > quote.bid
+    return shared_is_tradeable_long_leg(quote)
 
 
 def entry_long_limit_price(
@@ -219,6 +217,4 @@ def quantize_price(value: Decimal) -> Decimal:
 
 
 def mid_price(quote: OptionMarketSnapshot) -> Decimal | None:
-    if quote.bid is None or quote.ask is None:
-        return None
-    return (quote.bid + quote.ask) / Decimal("2")
+    return shared_quote_mid(quote) if quote.bid is not None and quote.ask is not None else None

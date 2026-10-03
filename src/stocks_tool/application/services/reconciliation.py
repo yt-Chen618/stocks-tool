@@ -25,6 +25,7 @@ from stocks_tool.application.services.market_event_provider_ingestion import (
     SettingsMarketEventProviderFactory,
 )
 from stocks_tool.application.services.orders import OrderService
+from stocks_tool.application.services.order_authorization import OrderAuthorizationService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.zero_dte_lottery_strategy import (
     ZeroDteLotteryStrategyService,
@@ -151,6 +152,10 @@ class ReconciliationCoordinator:
             self._strategy_audit_events = SQLAlchemyStrategyAuditEventRepository(session)
             market_events = SQLAlchemyMarketEventRepository(session)
             experiments = SQLAlchemyStrategyExperimentRepository(session)
+            order_authorization = OrderAuthorizationService(
+                account_snapshots=account_snapshots,
+                market_data=self.longbridge_adapter,
+            )
             account_service = LongbridgeIntegrationService(
                 adapter=self.longbridge_adapter,
                 broker_accounts=broker_accounts,
@@ -165,6 +170,7 @@ class ReconciliationCoordinator:
                 longbridge_adapter=self.longbridge_adapter,
                 audit_events=self._strategy_audit_events,
                 intent_ledger=SQLAlchemyTradingIntentLedger(session),
+                order_authorization=order_authorization,
             )
             journal_service = JournalService(
                 journals=SQLAlchemyJournalRepository(session),
@@ -193,6 +199,7 @@ class ReconciliationCoordinator:
                 order_service=order_service,
                 market_events=market_events,
                 audit_events=self._strategy_audit_events,
+                order_authorization=order_authorization,
             )
             zero_dte_lottery_service = ZeroDteLotteryStrategyService(
                 settings=self.settings,
@@ -285,7 +292,9 @@ class ReconciliationCoordinator:
                 same_day_option_entry_blocked = False
                 if account_ready:
                     latest_snapshot = account_snapshots.get_latest_account_snapshot(
-                        broker_account.external_account_id
+                        external_account_id=broker_account.external_account_id,
+                        mode=ExecutionMode.PAPER,
+                        trusted_only=True,
                     )
                     if isinstance(latest_snapshot, AccountSnapshot):
                         same_day_option_entry_blocked = self._guard_same_day_option_positions(

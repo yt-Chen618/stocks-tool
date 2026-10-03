@@ -1,6 +1,11 @@
 from datetime import datetime, timezone
 
-from stocks_tool.domain.enums import BrokerName, ExecutionMode, ReconciliationStatus
+from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
+    BrokerName,
+    ExecutionMode,
+    ReconciliationStatus,
+)
 from stocks_tool.domain.models import BrokerAccountSyncResult, SecurityQuoteSnapshot
 from stocks_tool.ports.broker_gateway import BrokerIntegrationGateway
 from stocks_tool.ports.repository import AccountSnapshotRepository, BrokerAccountRepository
@@ -51,7 +56,28 @@ class LongbridgeIntegrationService:
                 currency=currency or broker_account.base_currency,
                 options_level=broker_account.options_level,
             )
-            persisted_snapshot = self.account_snapshots.create_account_snapshot(snapshot)
+            if snapshot.account_id != external_account_id:
+                raise ValueError(
+                    "Longbridge returned an account snapshot for a different account."
+                )
+            if snapshot.broker != BrokerName.LONGBRIDGE:
+                raise ValueError(
+                    "Longbridge returned an account snapshot for an unexpected broker."
+                )
+            if snapshot.mode != mode:
+                raise ValueError(
+                    "Longbridge returned an account snapshot for a different execution mode."
+                )
+            if snapshot.captured_at.tzinfo is None:
+                raise ValueError(
+                    "Longbridge returned an account snapshot without timezone-aware capture time."
+                )
+            if snapshot.captured_at.astimezone(timezone.utc) > datetime.now(timezone.utc):
+                raise ValueError("Longbridge returned an account snapshot captured in the future.")
+            persisted_snapshot = self.account_snapshots.create_account_snapshot(
+                snapshot,
+                provenance=AccountSnapshotProvenance.BROKER_SYNC,
+            )
             self.broker_accounts.update_account_sync_state(
                 external_account_id,
                 status=ReconciliationStatus.SUCCESS,

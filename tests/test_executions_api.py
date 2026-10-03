@@ -5,7 +5,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_execution_repository
-from stocks_tool.domain.enums import BrokerName, OrderSide
+from stocks_tool.domain.enums import BrokerName, ExecutionMode, OrderSide
 from stocks_tool.domain.models import Execution
 from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.main import app
@@ -55,6 +55,7 @@ def test_list_executions_paged_returns_bounded_page() -> None:
             params={
                 "external_account_id": "LBPT10087357",
                 "order_id": "order-123",
+                "mode": "paper",
                 "limit": 1,
             },
         )
@@ -67,6 +68,7 @@ def test_list_executions_paged_returns_bounded_page() -> None:
     repository.list_executions_page.assert_called_once_with(
         external_account_id="LBPT10087357",
         order_id="order-123",
+        mode=ExecutionMode.PAPER,
         limit=1,
         cursor=None,
     )
@@ -98,4 +100,5 @@ def test_list_executions_filters_by_account_and_order() -> None:
     repository.list_executions.assert_called_once_with(
         external_account_id="LBPT10087357",
         order_id="order-123",
+        mode=None,
     )

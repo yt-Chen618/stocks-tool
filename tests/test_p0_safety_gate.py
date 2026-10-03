@@ -34,6 +34,7 @@ def test_p0_safety_gate_is_broker_read_only_and_covers_required_checks(tmp_path:
         "postgres-order-concurrency",
         "mock-ui",
         "recovery-ui",
+        "workbench-features",
         "consistency-report",
         "git-diff-check",
         "dashboard-node-check-chart-view",

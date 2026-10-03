@@ -28,6 +28,7 @@ from stocks_tool.application.services.market_event_provider_ingestion import (
 )
 from stocks_tool.application.services.execution import ExecutionService
 from stocks_tool.application.services.journal import JournalService
+from stocks_tool.application.services.order_authorization import OrderAuthorizationService
 from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
 from stocks_tool.application.services.research_workspace import ResearchWorkspaceService
@@ -246,6 +247,16 @@ def get_longbridge_adapter() -> BrokerGateway:
     return LongbridgeBrokerAdapter(settings=settings)
 
 
+def get_order_authorization_service(
+    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
+    market_data: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
+) -> OrderAuthorizationService:
+    return OrderAuthorizationService(
+        account_snapshots=account_snapshots,
+        market_data=market_data,
+    )
+
+
 def get_research_workspace_service(
     watchlists: WatchlistRepository = Depends(get_watchlist_repository),
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
@@ -288,6 +299,7 @@ def get_order_service(
     audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
     intent_ledger: TradingIntentLedger = Depends(get_trading_intent_ledger),
     adapter: BrokerOrderGateway = Depends(get_longbridge_adapter),
+    order_authorization: OrderAuthorizationService = Depends(get_order_authorization_service),
 ) -> OrderService:
     settings: Settings = get_settings()
     return OrderService(
@@ -299,6 +311,7 @@ def get_order_service(
         longbridge_adapter=adapter,
         audit_events=audit_events,
         intent_ledger=intent_ledger,
+        order_authorization=order_authorization,
     )
 
 
@@ -350,6 +363,7 @@ def get_covered_call_strategy_service(
     order_service: OrderService = Depends(get_order_service),
     adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
     audit_events: StrategyAuditEventRepository = Depends(get_strategy_audit_event_repository),
+    order_authorization: OrderAuthorizationService = Depends(get_order_authorization_service),
 ) -> CoveredCallStrategyService:
     settings: Settings = get_settings()
     return CoveredCallStrategyService(
@@ -361,6 +375,7 @@ def get_covered_call_strategy_service(
         order_service=order_service,
         market_events=market_events,
         audit_events=audit_events,
+        order_authorization=order_authorization,
     )
 
 

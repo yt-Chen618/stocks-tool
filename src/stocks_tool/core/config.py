@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from stocks_tool.domain.enums import BrokerName, ExecutionMode
+from stocks_tool.domain.strategies.bull_put import width_for_underlying_price as shared_width_for_underlying_price
 
 
 class BullPutSpreadStrategySettings(BaseModel):
@@ -116,11 +117,7 @@ class BullPutSpreadStrategySettings(BaseModel):
         return self
 
     def width_for_underlying_price(self, underlying_price: Decimal) -> Decimal:
-        if underlying_price < Decimal("75"):
-            return Decimal("1")
-        if underlying_price < Decimal("250"):
-            return Decimal("2")
-        return Decimal("3")
+        return shared_width_for_underlying_price(underlying_price)
 
 
 class CoveredCallStrategySettings(BaseModel):
@@ -223,6 +220,13 @@ class Settings(BaseSettings):
     sqlalchemy_echo: bool = False
     reconciliation_scheduler_enabled: bool = True
     reconciliation_poll_interval_seconds: int = 15
+    backtest_dispatcher_enabled: bool = True
+    backtest_dispatcher_poll_interval_seconds: int = Field(default=5, ge=1, le=300)
+    backtest_dispatcher_lease_ttl_seconds: int = Field(default=300, ge=30, le=86_400)
+    backtest_data_root: str = "data/backtesting"
+    backtest_result_root: str = "artifacts/backtests/results"
+    lean_image_digest: str = ""
+    shutdown_timeout_seconds: int = Field(default=10, ge=1, le=120)
     reconciliation_account_interval_seconds: int = 300
     reconciliation_orders_interval_seconds: int = 300
     reconciliation_working_orders_interval_seconds: int = 60

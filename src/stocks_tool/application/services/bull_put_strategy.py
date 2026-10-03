@@ -103,6 +103,8 @@ from stocks_tool.domain.models import (
 )
 from stocks_tool.domain.option_symbols import same_day_expiring_option_positions
 from stocks_tool.domain.pagination import CursorPage
+from stocks_tool.domain.strategies.bull_put import bull_put_trend_reasons as compute_bull_put_trend_reasons
+from stocks_tool.domain.strategies.common import is_timestamp_fresh as shared_is_timestamp_fresh
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
 
 
@@ -571,6 +573,7 @@ class BullPutStrategyService:
                 replayed = existing_spread.model_copy(update={"idempotent_replayed": True})
                 state = self.runtime_states.get_runtime_state(
                     external_account_id=external_account_id,
+                    mode=mode,
                     strategy_id=self.strategy_id,
                 )
                 if state is None:
@@ -747,14 +750,47 @@ class BullPutStrategyService:
             mode=mode,
             as_of=evaluated_at,
         )
-        closed_spreads = self._list_closed_spreads(
-            external_account_id=external_account_id,
-            mode=mode,
+        supports_closed_aggregates = all(
+            callable(getattr(type(self.spreads), method_name, None))
+            for method_name in (
+                "count_spreads",
+                "get_oldest_closed_at",
+                "list_closed_spreads_since",
+            )
         )
+        closed_spreads: list[BullPutSpread] = []
+        closed_spread_count: int | None = None
+        oldest_closed_at: datetime | None = None
+        closed_since_count: int | None = None
+        if supports_closed_aggregates:
+            closed_spread_count = self.spreads.count_spreads(
+                external_account_id=external_account_id,
+                mode=mode,
+                statuses=(SpreadStatus.CLOSED,),
+            )
+            oldest_closed_at = self.spreads.get_oldest_closed_at(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
+            if state.last_review_at is not None:
+                closed_since_count = self.spreads.count_spreads(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    statuses=(SpreadStatus.CLOSED,),
+                    closed_since=state.last_review_at,
+                )
+        else:
+            closed_spreads = self._list_closed_spreads(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
         if not force:
             due_reason = self._review_not_due_reason(
                 state=state,
                 closed_spreads=closed_spreads,
+                closed_spread_count=closed_spread_count,
+                oldest_closed_at=oldest_closed_at,
+                closed_since_count=closed_since_count,
                 as_of=evaluated_at,
             )
             if due_reason is not None:
@@ -769,12 +805,24 @@ class BullPutStrategyService:
 
         strategy = self.settings.bull_put_strategy
         window_start = evaluated_at.astimezone(self.new_york).date() - timedelta(days=strategy.review_interval_days)
-        recent_spreads = [
-            spread
-            for spread in closed_spreads
-            if spread.closed_at is not None
-            and spread.closed_at.astimezone(self.new_york).date() >= window_start
-        ]
+        if supports_closed_aggregates:
+            window_start_at = datetime.combine(
+                window_start,
+                datetime.min.time(),
+                tzinfo=self.new_york,
+            ).astimezone(timezone.utc)
+            recent_spreads = self.spreads.list_closed_spreads_since(
+                external_account_id=external_account_id,
+                mode=mode,
+                closed_since=window_start_at,
+            )
+        else:
+            recent_spreads = [
+                spread
+                for spread in closed_spreads
+                if spread.closed_at is not None
+                and spread.closed_at.astimezone(self.new_york).date() >= window_start
+            ]
         reviewed_metrics = [
             (spread, realized_pnl)
             for spread in recent_spreads
@@ -829,6 +877,7 @@ class BullPutStrategyService:
 
         journal_entry = self._create_strategy_review_entry(
             external_account_id=external_account_id,
+            mode=mode,
             reviewed_metrics=reviewed_metrics,
             evaluated_at=evaluated_at,
             review_status=review_status,
@@ -953,7 +1002,7 @@ class BullPutStrategyService:
             mode=mode,
             as_of=scanned_at,
         )
-        account_snapshot = self._get_latest_account_snapshot(external_account_id)
+        account_snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         account_snapshot = account_snapshot.model_copy(
             update={
                 "options_level": account_snapshot.options_level or broker_account.options_level,
@@ -1002,6 +1051,7 @@ class BullPutStrategyService:
                 account_snapshot=account_snapshot,
                 underlying_quote=underlying_quote,
                 evaluated_at=scanned_at,
+                bars=bars,
                 moving_average_20=moving_average_20,
                 moving_average_50=moving_average_50,
             )
@@ -1373,7 +1423,10 @@ class BullPutStrategyService:
                 "conservative_credit": (short_leg.bid or Decimal("0")) - (long_leg.ask or Decimal("0")),
             }
         )
-        account_snapshot = self._get_latest_account_snapshot(preview.external_account_id)
+        account_snapshot = self._get_latest_account_snapshot(
+            preview.external_account_id,
+            mode=preview.mode,
+        )
         risk = self.risk_service.evaluate_bull_put_candidate(
             candidate=candidate,
             account=account_snapshot,
@@ -1822,6 +1875,7 @@ class BullPutStrategyService:
         account_snapshot: AccountSnapshot,
         underlying_quote,
         evaluated_at: datetime,
+        bars: list[HistoricalPriceBar] | None = None,
         moving_average_20: Decimal,
         moving_average_50: Decimal,
     ) -> list[str]:
@@ -1836,17 +1890,23 @@ class BullPutStrategyService:
             )
         )
 
-        if underlying_quote.last_done <= moving_average_20:
-            reasons.append("Underlying price is below the 20-day moving average.")
-
-        if moving_average_20 <= moving_average_50:
-            reasons.append("20-day moving average is not above the 50-day moving average.")
-
-        if underlying_quote.last_done < (underlying_quote.prev_close * Decimal("0.995")):
-            reasons.append("Underlying price is trading more than 0.5% below the previous close.")
-
-        if underlying_quote.open < (underlying_quote.prev_close * Decimal("0.98")):
-            reasons.append("Underlying opened more than 2% below the previous close.")
+        if bars is not None:
+            reasons.extend(
+                compute_bull_put_trend_reasons(
+                    underlying=underlying_quote,
+                    bars=bars,
+                    require_trend=True,
+                )
+            )
+        else:
+            if underlying_quote.last_done <= moving_average_20:
+                reasons.append("Underlying price is below the 20-day moving average.")
+            if moving_average_20 <= moving_average_50:
+                reasons.append("20-day moving average is not above the 50-day moving average.")
+            if underlying_quote.last_done < (underlying_quote.prev_close * Decimal("0.995")):
+                reasons.append("Underlying price is trading more than 0.5% below the previous close.")
+            if underlying_quote.open < (underlying_quote.prev_close * Decimal("0.98")):
+                reasons.append("Underlying opened more than 2% below the previous close.")
 
         return reasons
 
@@ -1860,18 +1920,10 @@ class BullPutStrategyService:
         if underlying_quote.data_quality != "live" or underlying_quote.warning_code is not None:
             reasons.append("Cached quote evidence cannot authorize a bull put entry.")
 
-        quote_time = underlying_quote.timestamp
-        if quote_time.tzinfo is None:
-            quote_time = quote_time.replace(tzinfo=timezone.utc)
-        reference_time = evaluated_at
-        if reference_time.tzinfo is None:
-            reference_time = reference_time.replace(tzinfo=timezone.utc)
-        quote_age_seconds = (
-            reference_time.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
-        ).total_seconds()
-        if (
-            quote_age_seconds < -300
-            or quote_age_seconds > self.settings.bull_put_strategy.max_option_quote_age_seconds
+        if not shared_is_timestamp_fresh(
+            underlying_quote.timestamp,
+            evaluated_at=evaluated_at,
+            max_age_seconds=self.settings.bull_put_strategy.max_option_quote_age_seconds,
         ):
             reasons.append("Underlying quote is stale and cannot authorize a bull put entry.")
         return reasons
@@ -1908,15 +1960,22 @@ class BullPutStrategyService:
             next_action=next_action,
         )
 
-    def _get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot:
-        snapshots = self.account_snapshots.list_account_snapshots(
-            external_account_id=external_account_id
+    def _get_latest_account_snapshot(
+        self,
+        external_account_id: str,
+        *,
+        mode: ExecutionMode,
+    ) -> AccountSnapshot:
+        snapshot = self.account_snapshots.get_latest_account_snapshot(
+            external_account_id=external_account_id,
+            mode=mode,
+            trusted_only=True,
         )
-        if not snapshots:
+        if snapshot is None:
             raise LookupError(
                 f"No local account snapshot was found for '{external_account_id}'. Run account sync first."
             )
-        return max(snapshots, key=lambda snapshot: snapshot.captured_at)
+        return snapshot
 
     @staticmethod
     def _moving_average(bars: list[HistoricalPriceBar]) -> Decimal:
@@ -1938,7 +1997,10 @@ class BullPutStrategyService:
         reference_time = as_of or datetime.now(timezone.utc)
         if reference_time.tzinfo is None:
             reference_time = reference_time.replace(tzinfo=timezone.utc)
-        state = self.runtime_states.get_runtime_state(external_account_id=external_account_id)
+        state = self.runtime_states.get_runtime_state(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
         if state is None:
             state = BullPutStrategyRuntimeState(
                 external_account_id=external_account_id,
@@ -2123,6 +2185,9 @@ class BullPutStrategyService:
         *,
         state: BullPutStrategyRuntimeState,
         closed_spreads: list[BullPutSpread],
+        closed_spread_count: int | None = None,
+        oldest_closed_at: datetime | None = None,
+        closed_since_count: int | None = None,
         as_of: datetime,
     ) -> str | None:
         strategy = self.settings.bull_put_strategy
@@ -2130,6 +2195,25 @@ class BullPutStrategyService:
             return "Bull put spread strategy is disabled by configuration."
         if not strategy.auto_review_enabled:
             return "Automatic bull put review is disabled by configuration."
+        if closed_spread_count is not None:
+            if closed_spread_count == 0:
+                return "Bull put review is waiting for the first closed spread."
+            if state.last_review_at is None:
+                if closed_spread_count >= strategy.review_min_closed_spreads:
+                    return None
+                if oldest_closed_at is None:
+                    return "Bull put review is waiting for the first closed spread."
+                if oldest_closed_at.tzinfo is None:
+                    oldest_closed_at = oldest_closed_at.replace(tzinfo=timezone.utc)
+                if (as_of - oldest_closed_at).days >= strategy.review_interval_days:
+                    return None
+                return "Bull put review is not due yet."
+            if (closed_since_count or 0) >= strategy.review_min_closed_spreads:
+                return None
+            if (as_of - state.last_review_at).days >= strategy.review_interval_days:
+                return None
+            return "Bull put review is not due yet."
+
         if not closed_spreads:
             return "Bull put review is waiting for the first closed spread."
 
@@ -2253,8 +2337,9 @@ class BullPutStrategyService:
         if candidate is None or risk is None:
             return spread
         self._safe_create_journal_entry(
-            CreateJournalEntryRequest(
-                external_account_id=spread.external_account_id,
+                CreateJournalEntryRequest(
+                    external_account_id=spread.external_account_id,
+                    mode=spread.mode,
                 symbol=spread.underlying_symbol,
                 entry_type=JournalEntryType.PLAN,
                 title=f"Bull put spread opened for {spread.underlying_symbol}",
@@ -2274,8 +2359,9 @@ class BullPutStrategyService:
         if self._spread_journal_flag(spread, "entry_failure_logged_at"):
             return spread
         self._safe_create_journal_entry(
-            CreateJournalEntryRequest(
-                external_account_id=spread.external_account_id,
+                CreateJournalEntryRequest(
+                    external_account_id=spread.external_account_id,
+                    mode=spread.mode,
                 symbol=spread.underlying_symbol,
                 entry_type=JournalEntryType.NOTE,
                 title=f"Bull put entry failed for {spread.underlying_symbol}",
@@ -2359,6 +2445,7 @@ class BullPutStrategyService:
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         reviewed_metrics: list[tuple[BullPutSpread, Decimal]],
         evaluated_at: datetime,
         review_status: str,
@@ -2376,6 +2463,7 @@ class BullPutStrategyService:
             return self.journal_service.create_entry(
                 CreateJournalEntryRequest(
                     external_account_id=external_account_id,
+                    mode=mode,
                     symbol=primary_symbol,
                     entry_type=JournalEntryType.REVIEW,
                     title="Bull put strategy review",
@@ -2405,8 +2493,9 @@ class BullPutStrategyService:
         if self._spread_journal_flag(spread, "close_logged_at"):
             return
         self._safe_create_journal_entry(
-            CreateJournalEntryRequest(
-                external_account_id=spread.external_account_id,
+                CreateJournalEntryRequest(
+                    external_account_id=spread.external_account_id,
+                    mode=spread.mode,
                 symbol=spread.underlying_symbol,
                 entry_type=JournalEntryType.REVIEW,
                 title=f"Bull put spread closed for {spread.underlying_symbol}",
@@ -2423,8 +2512,9 @@ class BullPutStrategyService:
     def _log_scan_skip(self, *, preview: BullPutSpreadScanResult, automatic: bool) -> None:
         reason = preview.reasons[0] if preview.reasons else "No bull put spread candidate was eligible."
         self._safe_create_journal_entry(
-            CreateJournalEntryRequest(
-                external_account_id=preview.external_account_id,
+                CreateJournalEntryRequest(
+                    external_account_id=preview.external_account_id,
+                    mode=preview.mode,
                 symbol=preview.symbol,
                 entry_type=JournalEntryType.NOTE,
                 title=f"Bull put scan skipped for {preview.symbol}",
@@ -2831,54 +2921,102 @@ class BullPutStrategyService:
         if runtime_reason is not None:
             raise ValueError(runtime_reason)
         strategy = self.settings.bull_put_strategy
-        account_spreads = self.spreads.list_spreads(
-            external_account_id=external_account_id,
-            mode=runtime_state.mode,
+        supports_spread_aggregates = callable(
+            getattr(type(self.spreads), "count_spreads", None)
         )
-        if any(spread.manual_action_required for spread in account_spreads):
+        if supports_spread_aggregates:
+            manual_action_count = self.spreads.count_spreads(
+                external_account_id=external_account_id,
+                mode=runtime_state.mode,
+                manual_action_required=True,
+            )
+        else:
+            account_spreads = self.spreads.list_spreads(
+                external_account_id=external_account_id,
+                mode=runtime_state.mode,
+            )
+            manual_action_count = sum(
+                1 for spread in account_spreads if spread.manual_action_required
+            )
+        if manual_action_count:
             raise ValueError(
                 f"Account '{external_account_id}' has a Bull Put item requiring manual action; new entry is blocked."
             )
         if runtime_state.current_session_date is not None:
-            session_attempts = 0
-            for spread in account_spreads:
-                attempted_at = spread.entry_started_at or spread.created_at
-                if attempted_at.tzinfo is None:
-                    attempted_at = attempted_at.replace(tzinfo=timezone.utc)
-                if attempted_at.astimezone(self.new_york).date() == runtime_state.current_session_date:
-                    session_attempts += 1
+            if supports_spread_aggregates:
+                session_start_at = datetime.combine(
+                    runtime_state.current_session_date,
+                    datetime.min.time(),
+                    tzinfo=self.new_york,
+                ).astimezone(timezone.utc)
+                session_end_at = session_start_at + timedelta(days=1)
+                session_attempts = self.spreads.count_spreads(
+                    external_account_id=external_account_id,
+                    mode=runtime_state.mode,
+                    entry_attempt_start=session_start_at,
+                    entry_attempt_end=session_end_at,
+                )
+            else:
+                session_attempts = 0
+                for spread in account_spreads:
+                    attempted_at = spread.entry_started_at or spread.created_at
+                    if attempted_at.tzinfo is None:
+                        attempted_at = attempted_at.replace(tzinfo=timezone.utc)
+                    if attempted_at.astimezone(self.new_york).date() == runtime_state.current_session_date:
+                        session_attempts += 1
             if session_attempts >= strategy.max_new_spreads_per_day:
                 raise ValueError(
                     f"Account '{external_account_id}' already used the daily bull put entry-attempt capacity."
                 )
-        active_spreads = self.spreads.list_spreads(
-            external_account_id=external_account_id,
-            statuses=ACTIVE_SPREAD_STATUSES,
-            mode=runtime_state.mode,
-        )
+        if supports_spread_aggregates:
+            active_count = self.spreads.count_spreads(
+                external_account_id=external_account_id,
+                statuses=ACTIVE_SPREAD_STATUSES,
+                mode=runtime_state.mode,
+            )
+        else:
+            active_spreads = self.spreads.list_spreads(
+                external_account_id=external_account_id,
+                statuses=ACTIVE_SPREAD_STATUSES,
+                mode=runtime_state.mode,
+            )
+            active_count = len(active_spreads)
 
-        if len(active_spreads) >= strategy.account_max_open_spreads:
+        if active_count >= strategy.account_max_open_spreads:
             raise ValueError(
                 f"Account '{external_account_id}' already has the maximum number of active bull put spreads."
             )
-
-        symbol_spreads = [
-            spread
-            for spread in active_spreads
-            if spread.underlying_symbol == symbol
-        ]
-        if len(symbol_spreads) >= strategy.per_symbol_max_open_spreads:
+        if supports_spread_aggregates:
+            symbol_count = self.spreads.count_spreads(
+                external_account_id=external_account_id,
+                statuses=ACTIVE_SPREAD_STATUSES,
+                mode=runtime_state.mode,
+                underlying_symbol=symbol,
+            )
+        else:
+            symbol_count = sum(
+                1 for spread in active_spreads if spread.underlying_symbol == symbol
+            )
+        if symbol_count >= strategy.per_symbol_max_open_spreads:
             raise ValueError(
                 f"An active bull put spread already exists for '{symbol}' in account '{external_account_id}'."
             )
 
         if symbol in strategy.correlated_symbols:
-            correlated_spreads = [
-                spread
-                for spread in active_spreads
-                if spread.underlying_symbol in strategy.correlated_symbols
-            ]
-            if len(correlated_spreads) >= strategy.correlated_group_max_open_spreads:
+            if supports_spread_aggregates:
+                correlated_count = self.spreads.count_spreads(
+                    external_account_id=external_account_id,
+                    statuses=ACTIVE_SPREAD_STATUSES,
+                    mode=runtime_state.mode,
+                    underlying_symbols=strategy.correlated_symbols,
+                )
+            else:
+                correlated_count = sum(
+                    1
+                    for spread in active_spreads
+                    if spread.underlying_symbol in strategy.correlated_symbols
+                )
+            if correlated_count >= strategy.correlated_group_max_open_spreads:
                 correlated_group = ", ".join(strategy.correlated_symbols)
                 raise ValueError(
                     f"Account '{external_account_id}' already has the maximum number of active correlated bull put spreads in [{correlated_group}]."
@@ -3270,7 +3408,10 @@ class BullPutStrategyService:
         break_even = spread.short_strike - entry_net_credit
         account_risk_pct = spread.account_risk_pct
         try:
-            account = self._get_latest_account_snapshot(spread.external_account_id)
+            account = self._get_latest_account_snapshot(
+                spread.external_account_id,
+                mode=spread.mode,
+            )
         except LookupError:
             account = None
         if account is not None and account.net_liquidation > 0:

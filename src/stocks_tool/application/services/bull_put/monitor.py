@@ -4,6 +4,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+from stocks_tool.domain.strategies.bull_put import BullPutRules, bull_put_exit_reason
+from stocks_tool.domain.strategies.common import days_to_expiration as shared_days_to_expiration
 from stocks_tool.domain.models import BullPutSpread, OptionMarketSnapshot
 
 
@@ -37,17 +39,19 @@ def determine_exit_reason(
     stop_loss_exit_multiple: Decimal,
     take_profit_exit_ratio: Decimal,
 ) -> str | None:
-    if days_to_expiration <= close_days_to_expiration:
-        return "days_to_expiration_limit"
-    if underlying_price <= spread.short_strike:
-        return "short_strike_breach"
-    if spread.entry_net_credit is None or estimated_exit_debit is None:
-        return None
-    if estimated_exit_debit >= (spread.entry_net_credit * stop_loss_exit_multiple):
-        return "stop_loss"
-    if estimated_exit_debit <= (spread.entry_net_credit * take_profit_exit_ratio):
-        return "take_profit"
-    return None
+    return bull_put_exit_reason(
+        underlying_price=underlying_price,
+        short_strike=spread.short_strike,
+        estimated_exit_debit=estimated_exit_debit,
+        entry_credit=spread.entry_net_credit,
+        days_to_expiration=days_to_expiration,
+        rules=BullPutRules(
+            close_days_to_expiration=close_days_to_expiration,
+            stop_loss_exit_multiple=stop_loss_exit_multiple,
+            take_profit_exit_ratio=take_profit_exit_ratio,
+            require_trend=False,
+        ),
+    )
 
 
 def days_to_expiration(
@@ -56,5 +60,8 @@ def days_to_expiration(
     scanned_at: datetime,
     market_timezone: ZoneInfo,
 ) -> int:
-    scanned_date = scanned_at.astimezone(market_timezone).date()
-    return (expiry_date - scanned_date).days
+    return shared_days_to_expiration(
+        expiry_date,
+        scanned_at,
+        market_timezone=market_timezone,
+    )

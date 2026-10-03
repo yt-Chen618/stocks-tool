@@ -12,7 +12,17 @@ The project is intentionally scoped around:
 
 It does not attempt live autonomous trading in the current phase.
 
-The current schema requires `alembic upgrade head` through revision `20261002_0019`. The October 2026 changes harden unknown-order evidence, atomic Advisor records and scheduler leases, add indexed history pages, and separate strategy orchestration and dashboard account state. See `docs/runtime-operations.md` for migration and recovery, and `docs/project-wide-optimization-campaign.md` for the active implementation and acceptance scope. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+The current source requires `alembic upgrade head` through revision `20261004_0024`. Back up an existing database and validate the upgrade in an isolated restored database first. October 4 adds snapshot mode/provenance, mode-scoped strategy runtime and journals, durable research records, isolated offline-backtest records and concurrent event deduplication. Legacy snapshots with unverified mode remain preserved and cannot authorize an opening order. Paper entry kill switches and the Zero-DTE execution lock remain in force.
+
+The active upgrade and requirement-by-requirement acceptance are documented in `docs/professional-workbench-upgrade.md` and `docs/session-summary.md`. Earlier campaign results are historical evidence, not proof that the current working source has passed. See `docs/runtime-operations.md` for migration and recovery.
+
+### Personal workbench upgrade
+
+中文操作说明：[工作台使用说明](docs/workbench-guide.zh.md)。
+
+The Chinese-first interface keeps five workspaces: 研究, 策略, 市场, 持仓, and 运行与安全. Charts and tables have visible explanations, evidence time/source and explicit next actions. Named research screens and immutable research cases persist in PostgreSQL. Portfolio reads distinguish raw NAV changes from investment returns and disclose unavailable cash flows, fees, Greeks and unverified history.
+
+Offline backtesting is a separate local compute adapter. It does not receive broker credentials or write orders, executions or trading intents. No paid dataset subscription is required for the software, but no authorized multi-year options dataset is currently available: genuine 2020-01-01 through 2026-09-30 historical validation remains `BLOCKED_DATA`. Fixture runs are software checks and cannot establish strategy performance. A broker paper-order canary requires separate authorization.
 
 ## Current status
 

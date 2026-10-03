@@ -1,6 +1,6 @@
 # Session Summary
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Project
 
@@ -57,6 +57,53 @@ Open:
 - Swagger: `http://127.0.0.1:8000/docs`
 
 ## Current Implementation State
+
+### 2026-10-04 Professional workbench upgrade
+
+- Approved full scope and acceptance ledger: `docs/professional-workbench-upgrade.md`.
+  Active branch: `codex/professional-workbench-20261004`, from merged `origin/main`
+  commit `d2fb5a8eda93921744057e33409e3210e5243af4`. Its tree matches the previous
+  campaign's final source `6319915`; PR #1 is now merged, so older draft-PR notes
+  below describe historical posture rather than the current release status.
+- Current checkpoint: `artifacts/professional-workbench-20261004/state.json` and
+  adjacent append-only `events.jsonl`. The source-specific delivery audit is
+  `completion-audit.json` in the same directory when available. Read its final
+  commit, local gates and remote CI/artifact identity before resuming; intermediate
+  counts and an earlier green build are not current-source acceptance.
+- User-facing priority: a visibly redesigned Chinese-first five-workspace interface
+  with charts and permanently visible explanations. Preserve account generations,
+  confirmation/idempotency/unknown locks and mobile broker-write blocking.
+- Integrated surfaces include durable research screens/cases and event paging,
+  backend portfolio analytics/risk, mode-scoped snapshot/runtime/journal evidence,
+  server-side opening authorization, request observability, verified isolated
+  restore tooling and bounded/fair SQL reconciliation. New routes and contracts
+  are listed in `docs/api-route-inventory.md`; the Chinese usage guide is
+  `docs/workbench-guide.zh.md`.
+- Local PostgreSQL was backed up, restored to an isolated database and migrated
+  through `20261004_0024`. Original-column projections of all 24 pre-upgrade
+  business tables were unchanged immediately after migration. The subsequent
+  normal read-only account-sync attempt updated sync-status metadata and returned
+  HTTP 502; it did not submit an order or create a new trusted snapshot. The 775
+  legacy snapshots with unknown mode remain preserved and excluded from paper
+  opening authority. Final artifacts record the verification timestamps.
+- LEAN uses the pinned official `18100` image, native file staging and one
+  canonical algorithm module. Actual custom/native fixture, lifecycle and order
+  ownership evidence are distinct from strategy-performance validation. Source,
+  data and model identities are recorded; partial groups and unsupported data
+  fail closed. The full final engine matrix belongs with the source-specific
+  acceptance artifacts, not an older initialization-only report.
+- The actual Longbridge quote and paper-account read attempts returned HTTP 502.
+  Local API availability is verified separately; external cold connection and
+  warm-market latency goals must not be reported as passed from mock timings.
+- Safe demo: `scripts/mock_dashboard_server.py --host 127.0.0.1 --port 8786
+  --scenario normal`. Its yellow banner identifies synthetic data and its saved
+  records are in-memory. It cannot serve as evidence of real account performance.
+- Full historical backtesting remains in scope. No paid subscription or licensed
+  multi-year option dataset is available; genuine historical performance validation
+  remains `BLOCKED_DATA`. Offline fixture validation is a separate software gate.
+- Real paper order canary and human usability acceptance remain separate gates.
+  No broker submission, model call, live/Zero-DTE unlock, `.cn` switch, `.env` change,
+  destructive cleanup or automatic merge is authorized. Preserve local `.codex/`.
 
 ### 2026-10-02 Project-wide campaign
 

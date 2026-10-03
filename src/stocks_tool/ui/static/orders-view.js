@@ -105,6 +105,7 @@
         const endpoint = kind === "executions" ? "/executions/paged" : "/journals/paged";
         const params = new URLSearchParams({
           external_account_id: order.external_account_id,
+          mode: "paper",
           order_id: order.id,
           limit: String(PAGE_SIZE),
         });

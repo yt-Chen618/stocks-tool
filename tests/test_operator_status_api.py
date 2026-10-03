@@ -658,6 +658,33 @@ def test_ops_reason_codes_route_returns_catalog() -> None:
     assert body["advisor_read_only"] == OperatorStatusService.reason_code_detail("advisor_read_only")
 
 
+def test_operator_status_scopes_mode_reads_and_blocks_live_unattended() -> None:
+    service = _operator_status_service()
+
+    snapshot = service.get_unattended_status(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.LIVE,
+    )
+
+    service.strategy_experiments.get_control_snapshot.assert_called_with(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.LIVE,
+    )
+    service.order_service.list_orders.assert_called_with(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.LIVE,
+    )
+    service.bull_put_strategy.list_spreads.assert_called_with(
+        external_account_id="LBPT10087357",
+        mode=ExecutionMode.LIVE,
+    )
+    assert snapshot.ready_for_unattended is False
+    assert any(
+        check.reason_code == "live_unattended_unsupported"
+        for check in snapshot.checks
+    )
+
+
 def test_ops_audit_summary_route_returns_grouped_summary() -> None:
     service = Mock()
     service.get_audit_summary.return_value = StrategyAuditSummary(

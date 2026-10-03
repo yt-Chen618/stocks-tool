@@ -4,7 +4,7 @@ from unittest.mock import Mock
 from fastapi.testclient import TestClient
 
 from stocks_tool.api.dependencies import get_journal_repository, get_journal_service
-from stocks_tool.domain.enums import JournalEntryType
+from stocks_tool.domain.enums import ExecutionMode, JournalEntryType
 from stocks_tool.domain.models import JournalEntry
 from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.main import app
@@ -55,6 +55,7 @@ def test_list_journals_paged_returns_explicit_page_shape() -> None:
             params={
                 "external_account_id": "LBPT10087357",
                 "entry_type": "review",
+                "mode": "paper",
                 "limit": 1,
                 "cursor": "journal-previous",
             },
@@ -70,6 +71,7 @@ def test_list_journals_paged_returns_explicit_page_shape() -> None:
         order_id=None,
         trade_plan_id=None,
         entry_type=JournalEntryType.REVIEW,
+        mode=ExecutionMode.PAPER,
         limit=1,
         cursor="journal-previous",
     )
@@ -102,6 +104,7 @@ def test_list_journals_filters_by_account_order_and_type() -> None:
         order_id="order-123",
         trade_plan_id=None,
         entry_type=JournalEntryType.REVIEW,
+        mode=None,
     )
 
 

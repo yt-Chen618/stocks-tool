@@ -96,6 +96,7 @@ class LockForEntry(Protocol):
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str,
     ) -> BullPutStrategyRuntimeState | None: ...
 
@@ -170,6 +171,7 @@ class BullPutEntryOrchestrator:
         )
         locked_runtime_state = self.lock_for_entry(
             external_account_id=request.external_account_id,
+            mode=request.mode,
             strategy_id=runtime_state.strategy_id,
         )
         if locked_runtime_state is None:

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from stocks_tool.api.dependencies import get_journal_repository, get_journal_service
 from stocks_tool.application.services.journal import JournalService
-from stocks_tool.domain.enums import JournalEntryType
+from stocks_tool.domain.enums import ExecutionMode, JournalEntryType
 from stocks_tool.domain.models import CreateJournalEntryRequest, JournalEntry
 from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.ports.repository import JournalRepository
@@ -16,6 +16,7 @@ def list_journal_entries(
     order_id: str | None = None,
     trade_plan_id: str | None = None,
     entry_type: JournalEntryType | None = None,
+    mode: ExecutionMode | None = Query(default=None),
     repository: JournalRepository = Depends(get_journal_repository),
 ) -> list[JournalEntry]:
     return repository.list_entries(
@@ -23,6 +24,7 @@ def list_journal_entries(
         order_id=order_id,
         trade_plan_id=trade_plan_id,
         entry_type=entry_type,
+        mode=mode,
     )
 
 
@@ -32,6 +34,7 @@ def list_journal_entries_page(
     order_id: str | None = Query(default=None),
     trade_plan_id: str | None = Query(default=None),
     entry_type: JournalEntryType | None = Query(default=None),
+    mode: ExecutionMode | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = Query(default=None),
     repository: JournalRepository = Depends(get_journal_repository),
@@ -42,6 +45,7 @@ def list_journal_entries_page(
             order_id=order_id,
             trade_plan_id=trade_plan_id,
             entry_type=entry_type,
+            mode=mode,
             limit=limit,
             cursor=cursor,
         )
