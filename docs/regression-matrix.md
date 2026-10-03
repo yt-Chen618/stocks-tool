@@ -169,6 +169,34 @@ For the 2026-08-10 workstation change, cover the following before treating the U
 - Safety behavior: confirmation cancellation, idempotency replay, double-click exact-once submit, unknown-outcome lock, Zero-DTE Preview Only, and broker-write disablement at `<=780px` while read-only drawer review remains available.
 - Capture the current shell at 1440px, 1024px, and 760px in the mock browser workflow. The existing 18-scenario posture matrix remains required, along with `real-ui-refresh` and `p0-safety`; do not weaken either gate for degraded Longbridge conditions.
 
+### Market-session comparison coverage
+
+The market-session comparison is a read-only broker observation plus an immutable
+local save. Run the focused contract tests with:
+
+```powershell
+.venv\Scripts\python.exe -m pytest tests\test_market_session_comparison.py tests\test_mock_workbench_contracts.py tests\test_ui_dashboard.py -q
+```
+
+The focused cases must cover:
+
+- a true premarket baseline from a saved `PreOpenAssessmentRun`, with the selected
+  symbol and account/mode scope preserved;
+- regular-close evidence only after the true exchange close (`16:00 ET`, or `13:00 ET`
+  for a confirmed half day), with same-day daily-bar fallback explicitly labelled;
+- post-market quote evidence from `post_market_quote.last_done`;
+- missing, stale, future, cross-day, timezone-unknown, currency-unknown and
+  pre-close observations remaining unavailable instead of becoming zero;
+- immutable capture and cursor-bounded account/mode/symbol history;
+- idempotent retries using the same account/mode/capture key and original request
+  fingerprint, with a `409` for a changed request and a fresh observation when no
+  capture key is supplied;
+- no broker mutation and no dependency on a client-supplied price or session label.
+
+Migration `20261004_0025` is part of the schema contract. Apply and verify it in an
+isolated or approved database after retention evidence; do not treat a fixture or a
+saved UI card as proof of a live market close or post-market quote.
+
 ## Paper Strategy Gates
 
 ```powershell

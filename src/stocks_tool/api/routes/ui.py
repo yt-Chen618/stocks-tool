@@ -43,6 +43,7 @@ def render_dashboard() -> HTMLResponse:
     research_case_js_url = _asset_url("research-case-view.js")
     portfolio_workbench_js_url = _asset_url("portfolio-workbench.js")
     market_timeline_js_url = _asset_url("market-timeline-view.js")
+    market_session_comparison_js_url = _asset_url("market-session-comparison-view.js")
     strategy_backtest_js_url = _asset_url("strategy-backtest-view.js")
     strategy_readiness_js_url = _asset_url("strategy-readiness-view.js")
     advisor_audit_js_url = _asset_url("advisor-audit-view.js")
@@ -867,6 +868,13 @@ def render_dashboard() -> HTMLResponse:
                         <article class="workbench-card"><header class="workbench-card-header"><div><span class="section-kicker">事件时间线</span><h2>市场催化剂</h2><p>按时间查看已保存的事件和来源。</p></div><button id="market-timeline-refresh" class="table-action" type="button">刷新时间线</button></header><div id="market-event-timeline" class="workbench-timeline"><div class="workbench-blocked"><div><strong>暂未加载</strong><br />选择账户后读取事件时间线。</div></div></div></article>
                         <aside id="market-explanation-panel" class="workbench-explanation"><div class="workbench-explanation-header"><div><span class="section-kicker">市场解释</span><h2>为什么现在值得看</h2></div><span id="market-explanation-status" class="workbench-status-chip" data-tone="warning">等待数据</span></div><div class="workbench-explanation-body"><p id="market-explanation-summary" class="workbench-explanation-summary">事件是背景证据，不会自动变成交易建议。</p><dl id="market-explanation-facts" class="workbench-facts"></dl></div><div class="workbench-task-row"><button id="market-load-preopen-board" class="table-action primary" type="button">加载实时市场板</button><button id="market-load-preopen-overlays" class="table-action" type="button">加载期权叠加层</button><button id="market-save-preopen-board" class="table-action" type="button" disabled>保存当前板面</button></div></aside>
                       </section>
+                      <section id="market-session-comparison-panel" class="workbench-card market-session-comparison-panel" aria-label="盘前收盘盘后对照">
+                        <header class="workbench-card-header"><div><span class="section-kicker">盘前 / 收盘 / 盘后</span><h2>市场时段对照</h2><p>盘前基准、常规收盘参考和盘后报价并排显示；缺口不会用 0 填补。</p></div><span id="market-session-comparison-status" class="workbench-status-chip" data-tone="warning" role="status" aria-live="polite">等待读取</span></header>
+                        <div class="workbench-inline-form"><label class="field"><span>标的</span><input id="market-session-comparison-symbol" type="text" maxlength="32" value="QQQ.US" /></label><label class="field field-wide"><span>已保存的对照</span><select id="market-session-comparison-saved-select" aria-label="选择已保存的市场时段对照"><option value="">选择标的后读取历史记录</option></select></label><button id="market-session-comparison-refresh" class="table-action" type="button">读取最新对照</button><button id="market-session-comparison-capture" class="table-action primary" type="button">采集并记录时段报价</button><button id="market-session-comparison-load-more" class="table-action" type="button" disabled>加载更多历史记录</button></div>
+                        <div id="market-session-comparison-summary" class="market-session-comparison-summary"><div class="market-session-evidence-card"><span>盘前基准</span><strong>--</strong><small>尚未读取</small></div><div class="market-session-evidence-card"><span>常规收盘</span><strong>--</strong><small>尚未读取</small></div><div class="market-session-evidence-card"><span>盘后报价</span><strong>--</strong><small>尚未读取</small></div></div>
+                        <div id="market-session-comparison-explanation" class="workbench-explanation-body"><p class="workbench-explanation-summary">读取后会说明两段变化、来源、时区和证据缺口。</p></div>
+                        <details class="workbench-raw-details"><summary>查看原始时段证据</summary><pre id="market-session-comparison-raw">暂无原始证据。</pre></details>
+                      </section>
                       <div id="macro-workspace-grid" class="strategy-layout"></div>
                     </section>
 
@@ -1236,6 +1244,7 @@ def render_dashboard() -> HTMLResponse:
                 <script src="{research_case_js_url}" defer></script>
                 <script src="{portfolio_workbench_js_url}" defer></script>
                 <script src="{market_timeline_js_url}" defer></script>
+                <script src="{market_session_comparison_js_url}" defer></script>
                 <script src="{strategy_backtest_js_url}" defer></script>
                 <script src="{strategy_readiness_js_url}" defer></script>
                 <script src="{advisor_audit_js_url}" defer></script>

@@ -29,6 +29,7 @@ events are append-only in the adjacent `events.jsonl`. Do not duplicate live val
 | P1.3 | Plain-language labels, visible explanations, time zones, missing/stale/zero distinction | No tooltip-only key meaning; Asia/Shanghai default and ET for market events; no model dependency |
 | P2.1 | Durable account/mode scoped mutable screens and immutable research cases | New session reload, snapshot immutability, reference ownership and evidence traceability |
 | P2.2 | Candidate comparison, complete bounded event timeline and Advisor/proposal links | Filters and old records work; no broker/model mutation on read |
+| P2.3 | Persist and display pre-open versus regular-close and post-market observations | Same-account/mode/trading-day evidence, Chinese/ET times, source links and honest missing/stale states; opening-only follow-through is not this gate |
 | P3.1 | Portfolio history, allocation, concentration, expiry and known strategy risk | Aggregates reconcile to evidence; bounded history reads |
 | P3.2 | NAV change is not return without cash flows; unknown fees/Greeks never become zero | Empty/partial/stale/mixed-mode/negative NAV tests and honest unavailable metrics |
 | P3.3 | Execution/strategy/journal-linked review and scenario assumptions | Read-only traceable results |

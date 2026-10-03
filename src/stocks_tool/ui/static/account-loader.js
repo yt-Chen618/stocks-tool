@@ -898,13 +898,17 @@
       }
       const values = {};
       const errors = {};
+      const errorObjects = {};
       settled.forEach((result, index) => {
         const spec = requestSpecs[index];
         const key = typeof spec === "string" ? String(index) : spec.key || String(index);
         if (result.status === "fulfilled") values[key] = result.value;
-        else errors[key] = result.reason?.message || "Request failed.";
+        else {
+          errors[key] = result.reason?.message || "Request failed.";
+          errorObjects[key] = result.reason;
+        }
       });
-      return { discarded: false, values, errors, accountId, loadGeneration };
+      return { discarded: false, values, errors, errorObjects, accountId, loadGeneration };
     }
 
     function applyAccounts(accounts) {

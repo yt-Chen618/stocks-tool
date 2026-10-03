@@ -139,6 +139,28 @@ def test_constraint_normalization_preserves_literal_spaces_and_rejects_different
     )
 
 
+def test_constraint_normalization_supports_only_typed_nullable_enum_checks() -> None:
+    source = "CHECK (state IS NULL OR (state::text = ANY (ARRAY['open'::character varying]::text[])))"
+    restored = "CHECK (state IS NULL OR (state = ANY (ARRAY['open'::character varying::text])))"
+    metadata = {("orders", "state"): {"data_type": "character varying"}}
+    expected = "CHECK (state IS NULL OR (state = ANY (ARRAY['open'::character varying])))"
+    assert _canonical_constraint_definition(
+        source,
+        table_name="orders",
+        column_metadata=metadata,
+    ) == expected
+    assert _canonical_constraint_definition(
+        restored,
+        table_name="orders",
+        column_metadata=metadata,
+    ) == expected
+    assert _canonical_constraint_definition(
+        "CHECK (other IS NULL OR (state::text = ANY (ARRAY['open'::character varying]::text[])))",
+        table_name="orders",
+        column_metadata=metadata,
+    ) is None
+
+
 def test_constraint_normalization_rejects_non_any_arrays_and_other_expressions() -> None:
     metadata = {("orders", "state"): {"data_type": "character varying"}}
     assert _canonical_constraint_definition(

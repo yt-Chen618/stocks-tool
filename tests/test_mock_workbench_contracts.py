@@ -18,6 +18,43 @@ from stocks_tool.domain.research_records import ResearchCase, ResearchScreen, Re
 ACCOUNT = "LBPT10087357"
 
 
+def test_demo_market_session_capture_is_immutable_paged_and_not_opening_followthrough():
+    from stocks_tool.domain.market_session_comparisons import MarketSessionComparison, MarketSessionComparisonPage
+
+    with TestClient(create_app()) as client:
+        latest = MarketSessionComparison.model_validate(client.get(
+            "/market-session-comparisons/latest",
+            params={"external_account_id": ACCOUNT, "mode": "paper", "symbol": "QQQ.US"},
+        ).json())
+        assert latest.status == "valid"
+        assert latest.pre_to_regular_close_pct == 2
+        assert str(latest.regular_close_to_after_hours_pct) == "0.39"
+        assert latest.regular_close_evidence.session_close_at.hour == 20
+        assert latest.post_market_evidence.timestamp.hour == 22
+        assert latest.source == "mock_market_session_capture"
+        assert latest.raw_evidence["synthetic"] is True
+        baselines = client.get("/strategies/pre-open-runs", params={"external_account_id": ACCOUNT}).json()
+        assert any(row["id"] == latest.pre_open_run_id for row in baselines)
+        payload = {"external_account_id": ACCOUNT, "mode": "paper", "symbol": "QQQ.US", "capture_key": "demo-comparison-retry"}
+        saved = client.post("/market-session-comparisons", json=payload)
+        replay = client.post("/market-session-comparisons", json=payload)
+        assert saved.status_code == 201 and replay.status_code == 200
+        assert saved.json()["comparison"]["id"] == replay.json()["comparison"]["id"]
+        assert replay.json()["duplicate"] is True
+        first = MarketSessionComparisonPage.model_validate(client.get(
+            "/market-session-comparisons", params={"external_account_id": ACCOUNT, "symbol": "QQQ.US", "limit": 1},
+        ).json())
+        assert first.has_more and first.next_cursor
+        second = MarketSessionComparisonPage.model_validate(client.get(
+            "/market-session-comparisons", params={"external_account_id": ACCOUNT, "symbol": "QQQ.US", "limit": 1, "cursor": first.next_cursor},
+        ).json())
+        assert second.items[0].id != first.items[0].id
+        missing = client.post("/market-session-comparisons", json={**payload, "symbol": "AAPL.US", "capture_key": "missing-demo-baseline"}).json()["comparison"]
+        assert missing["status"] == "not_available"
+        assert missing["pre_to_regular_close_pct"] is None
+        assert missing["after_hours_price"] is None
+
+
 def test_demo_chart_quote_and_explanation_share_the_same_observation():
     from mock_dashboard_fixtures import (
         build_mock_research_history, build_mock_research_technicals,

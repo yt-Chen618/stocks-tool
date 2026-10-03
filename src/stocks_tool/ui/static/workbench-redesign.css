@@ -502,6 +502,93 @@ body[data-demo="true"] #demo-data-banner {
   flex-basis: 280px;
 }
 
+.market-session-comparison-panel {
+  margin: 18px 0;
+}
+
+.market-session-comparison-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px 18px 0;
+}
+
+.market-session-evidence-card {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 14px;
+  border: 1px solid var(--wb-line);
+  border-radius: 14px;
+  background: var(--wb-panel);
+}
+
+.market-session-evidence-card.is-missing {
+  border-color: #efd49e;
+  background: var(--wb-warning-soft);
+}
+
+.market-session-evidence-label {
+  color: var(--wb-muted);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.market-session-evidence-card strong {
+  overflow-wrap: anywhere;
+  color: var(--wb-ink);
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.market-session-evidence-card small {
+  color: var(--wb-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.market-session-comparison-panel > .workbench-explanation-body {
+  padding-bottom: 8px;
+}
+
+.market-session-comparison-facts {
+  margin-bottom: 12px;
+}
+
+.market-session-comparison-explanation-line,
+.market-session-comparison-reason {
+  margin: 8px 0 0;
+  color: var(--wb-muted);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.market-session-comparison-reason {
+  padding: 9px 10px;
+  border-left: 3px solid var(--wb-warning);
+  background: var(--wb-warning-soft);
+  color: #81520f;
+}
+
+.market-session-field-explanations {
+  margin-top: 11px;
+  border-top: 1px solid var(--wb-line);
+  padding-top: 9px;
+}
+
+.market-session-field-explanations > summary {
+  color: var(--wb-muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.market-session-comparison-panel .workbench-raw-details {
+  margin: 0 18px 18px;
+}
+
 .workbench-explanation code,
 .workbench-card code,
 .workbench-code {
@@ -780,6 +867,21 @@ body[data-workspace] .workspace-topbar .topbar-reason {
 
   .workbench-facts {
     grid-template-columns: 1fr;
+  }
+
+  .market-session-comparison-summary {
+    grid-template-columns: 1fr;
+    padding-inline: 12px;
+  }
+
+  .market-session-comparison-panel .workbench-card-header,
+  .market-session-comparison-panel .workbench-inline-form,
+  .market-session-comparison-panel > .workbench-explanation-body {
+    padding-inline: 12px;
+  }
+
+  .market-session-comparison-panel .workbench-raw-details {
+    margin-inline: 12px;
   }
 
   .workbench-timeline-item {

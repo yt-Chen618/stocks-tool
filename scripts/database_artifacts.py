@@ -34,6 +34,12 @@ _ENUM_CHECK_PATTERN = re.compile(
     r"(?:::text\[\])?\s*\)\s*\)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_NULLABLE_ENUM_CHECK_PATTERN = re.compile(
+    r"^CHECK\s*\(\s*(?P<outer>[A-Za-z_][A-Za-z0-9_]*)\s+IS\s+NULL\s+OR\s*\(\s*"
+    r"(?P<column>[A-Za-z_][A-Za-z0-9_]*)(?:::text)?\s*=\s*ANY\s*\(\s*ARRAY\["
+    r"(?P<values>.*?)\](?:::text\[\])?\s*\)\s*\)\s*\)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _ENUM_VALUE_PATTERN = re.compile(
     r"\s*'(?P<literal>(?:''|[^'])*)'\s*::character varying"
     r"(?:\s*::text)?\s*(?P<separator>,|$)",
@@ -513,10 +519,15 @@ def table_fingerprints_for_columns(
     return fingerprints
 
 
-def _parse_enum_check(value: str) -> tuple[str, list[str]] | None:
+def _parse_enum_check(value: str) -> tuple[str, list[str], bool] | None:
     match = _ENUM_CHECK_PATTERN.fullmatch(value)
+    nullable = False
     if match is None:
-        return None
+        nullable_match = _NULLABLE_ENUM_CHECK_PATTERN.fullmatch(value)
+        if nullable_match is None or nullable_match.group("outer") != nullable_match.group("column"):
+            return None
+        match = nullable_match
+        nullable = True
     values_text = match.group("values")
     values: list[str] = []
     position = 0
@@ -530,7 +541,7 @@ def _parse_enum_check(value: str) -> tuple[str, list[str]] | None:
             break
     if not values or position != len(values_text):
         return None
-    return match.group("column"), values
+    return match.group("column"), values, nullable
 
 
 def _column_metadata_map(
@@ -564,13 +575,15 @@ def _canonical_constraint_definition(
     parsed = _parse_enum_check(value)
     if parsed is None or table_name is None or column_metadata is None:
         return None
-    column_name, values = parsed
+    column_name, values, nullable = parsed
     metadata = column_metadata.get((table_name, column_name))
     if metadata is None or metadata.get("data_type") not in {"character varying", "text"}:
         return None
     rendered_values = ", ".join(
         f"'{literal}'::character varying" for literal in values
     )
+    if nullable:
+        return f"CHECK ({column_name} IS NULL OR ({column_name} = ANY (ARRAY[{rendered_values}])))"
     return f"CHECK ({column_name} = ANY (ARRAY[{rendered_values}]))"
 
 
@@ -691,10 +704,26 @@ def constraints_match(
             continue
         if comparator_version != CONSTRAINT_COMPARATOR_VERSION:
             return False, "constraint_raw_definition_mismatch"
+        table_name = expected_item.get("table")
         expected_normalized = expected_item.get("normalized_definition")
         actual_normalized = actual_item.get("normalized_definition")
+        if isinstance(table_name, str):
+            if not isinstance(expected_normalized, str):
+                expected_normalized = _canonical_constraint_definition(
+                    str(expected_item.get("definition") or ""),
+                    table_name=table_name,
+                    column_metadata=expected_columns,
+                )
+            if not isinstance(actual_normalized, str):
+                actual_normalized = _canonical_constraint_definition(
+                    str(actual_item.get("definition") or ""),
+                    table_name=table_name,
+                    column_metadata=actual_columns,
+                )
         column_name = expected_item.get("enum_check_column")
-        table_name = expected_item.get("table")
+        if not isinstance(column_name, str) and isinstance(expected_normalized, str):
+            parsed = _parse_enum_check(str(expected_item.get("definition") or ""))
+            column_name = parsed[0] if parsed else None
         if not (
             isinstance(expected_normalized, str)
             and expected_normalized == actual_normalized

@@ -63,6 +63,9 @@ def install_workbench_routes(app: FastAPI, state: Any) -> None:
         }) if has_more else None
         return {"items": deepcopy(items), "limit": limit, "has_more": has_more, "next_cursor": next_cursor}
 
+    from mock_market_session_routes import install_market_session_routes
+    install_market_session_routes(app, state, page_rows)
+
     @app.get("/research/screens")
     def list_screens(external_account_id: str = state.account_id, mode: str = "paper", limit: int = Query(default=50, ge=1, le=100), cursor: str | None = None) -> dict:
         require_scope(external_account_id, mode)

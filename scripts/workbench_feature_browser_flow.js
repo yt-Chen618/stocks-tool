@@ -238,6 +238,15 @@ async function assertResponsive(page, width, timeoutMs) {
   });
   assert(geometry.topbarHeight > 0 && geometry.topbarHeight <= (width <= 780 ? 240 : 170), `Topbar height is unreasonable at ${width}px: ${geometry.topbarHeight}`);
   if (width <= 780) {
+    await waitFor(
+      async () => page.evaluate(() => {
+        const controls = Array.from(document.querySelectorAll("[data-broker-mutation='true']"));
+        const mobile = window.matchMedia?.("(max-width: 780px)")?.matches ?? window.innerWidth <= 780;
+        return mobile && controls.length > 0 && controls.every((node) => node.disabled || node.getAttribute("aria-disabled") === "true");
+      }),
+      timeoutMs,
+      `mobile broker-write safety state at ${width}px`,
+    );
     assert(geometry.mobileMutationState.length > 0, "No broker-write controls were rendered for the mobile safety check.");
     assert(geometry.mobileMutationState.every((item) => item.disabled || item.ariaDisabled === "true"), `Broker-write control was enabled at ${width}px: ${JSON.stringify(geometry.mobileMutationState)}`);
     const expectedLabels = ["研究", "策略", "市场", "持仓", "运行与安全"];
@@ -277,6 +286,7 @@ async function main() {
   const routeAudit = [];
   let activeAccount = PRIMARY_ACCOUNT;
   let delayedRead = null;
+  let marketSessionPagingEnabled = false;
   let phase = "browser-flow";
   let backtestFixtureEnabled = false;
   let backtestRequests = [];
@@ -297,10 +307,10 @@ async function main() {
     },
   ];
 
-  function armDelayedRead(pathname) {
+  function armDelayedRead(pathname, symbol = null) {
     let resolve;
     const promise = new Promise((resolver) => { resolve = resolver; });
-    delayedRead = { pathname, promise, resolve, hitCount: 0, released: false, outcome: null };
+    delayedRead = { pathname, symbol, promise, resolve, hitCount: 0, released: false, outcome: null };
   }
 
   function releaseDelayedRead(outcome = "error") {
@@ -324,7 +334,7 @@ async function main() {
       local_research_or_blocked_writes: localWrites,
       broker_mutations: observer.mutationRequests,
       paper_mode_query_violations: paperModeQueryViolations,
-      delayed_reads: routeAudit.filter((item) => item.pathname === "/portfolio/analytics" || item.pathname === "/strategies/advisor/audit" || item.pathname === "/research/timeline" || item.pathname === "/research/screens" || item.pathname === "/backtests"),
+      delayed_reads: routeAudit.filter((item) => item.pathname === "/portfolio/analytics" || item.pathname === "/strategies/advisor/audit" || item.pathname === "/research/timeline" || item.pathname === "/research/screens" || item.pathname === "/backtests" || item.pathname === "/market-session-comparisons" || item.pathname === "/market-session-comparisons/latest"),
     };
   }
 
@@ -338,7 +348,7 @@ async function main() {
 
     const isGet = method === "GET" || method === "HEAD";
     const effectiveAccount = requestAccount || activeAccount;
-    if (isGet && delayedRead && !delayedRead.released && delayedRead.pathname === url.pathname && effectiveAccount === PRIMARY_ACCOUNT) {
+    if (isGet && delayedRead && !delayedRead.released && delayedRead.pathname === url.pathname && effectiveAccount === PRIMARY_ACCOUNT && (!delayedRead.symbol || url.searchParams.get("symbol") === delayedRead.symbol)) {
       delayedRead.hitCount += 1;
       const outcome = await delayedRead.promise;
       if (outcome === "error") {
@@ -435,7 +445,11 @@ async function main() {
     }
 
     if (isGet && requestAccount === ALT_ACCOUNT) {
-      const response = await route.fetch({ url: replaceAccountInUrl(request.url(), PRIMARY_ACCOUNT) });
+      const forwardedUrl = new URL(replaceAccountInUrl(request.url(), PRIMARY_ACCOUNT));
+      if (marketSessionPagingEnabled && forwardedUrl.pathname === "/market-session-comparisons") {
+        forwardedUrl.searchParams.set("limit", "1");
+      }
+      const response = await route.fetch({ url: forwardedUrl.toString() });
       const contentType = response.headers()["content-type"] || "";
       if (contentType.includes("application/json")) {
         const payload = await response.json();
@@ -443,6 +457,18 @@ async function main() {
       } else {
         await route.fulfill({ response });
       }
+      return;
+    }
+
+    // The UI intentionally asks for a generous page size. Cap the fixture
+    // response to one row only during this gate so the real saved-select and
+    // load-more DOM paths exercise the server cursor contract with two actual
+    // immutable records.
+    if (marketSessionPagingEnabled && isGet && url.pathname === "/market-session-comparisons" && effectiveAccount === PRIMARY_ACCOUNT) {
+      const pagedUrl = new URL(request.url());
+      pagedUrl.searchParams.set("limit", "1");
+      const response = await route.fetch({ url: pagedUrl.toString() });
+      await route.fulfill({ response });
       return;
     }
 
@@ -468,6 +494,7 @@ async function main() {
   let portfolioPayload = null;
   let riskPayload = null;
   let desktopResearchLayout = null;
+  let marketSessionEvidence = null;
 
   try {
     await page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
@@ -587,9 +614,131 @@ async function main() {
     await openDetails(page, "#portfolio-raw-snapshot", timeoutMs);
     await expectText(page.locator("#positions-body"), "MOCK.US", timeoutMs);
 
-    // P2.2: visible timeline plus explicit date/symbol filter and keyset page.
+    // P2.3: market close / after-hours comparison stays separate from the
+    // opening-follow-through review.  Exercise the real mock service through
+    // the DOM, including saved-record pagination and immutable detail loads.
+    marketSessionPagingEnabled = true;
     await page.locator("#macro-workspace-tab").click();
     await waitWorkspace(page, "macro", timeoutMs);
+    const marketSessionInput = page.locator("#market-session-comparison-symbol");
+    const marketSessionRefresh = page.locator("#market-session-comparison-refresh");
+    const marketSessionCapture = page.locator("#market-session-comparison-capture");
+    const marketSessionSaved = page.locator("#market-session-comparison-saved-select");
+    const marketSessionLoadMore = page.locator("#market-session-comparison-load-more");
+    await waitFor(() => marketSessionInput.isVisible(), timeoutMs, "market-session comparison panel");
+    await marketSessionInput.fill("QQQ.US");
+    await marketSessionRefresh.click();
+    await expectText(page.locator("#market-session-comparison-summary"), "500.00 USD", timeoutMs);
+    await expectText(page.locator("#market-session-comparison-summary"), "510.00 USD", timeoutMs);
+    await expectText(page.locator("#market-session-comparison-summary"), "512.00 USD", timeoutMs);
+    const marketQqqExplanation = await textOf(page, "#market-session-comparison-explanation");
+    assert(marketQqqExplanation.includes("+2.00%") && marketQqqExplanation.includes("+0.39%"), `Market-session percentages were not rendered: ${marketQqqExplanation}`);
+    assert(/中国/.test(marketQqqExplanation) && /美东/.test(marketQqqExplanation) && /16:00/.test(marketQqqExplanation), `Market-session explanation omitted China/ET evidence time: ${marketQqqExplanation}`);
+    const qqqBeforeCapture = (await pageJson(page, `/market-session-comparisons/latest?external_account_id=${encodeURIComponent(PRIMARY_ACCOUNT)}&mode=paper&symbol=QQQ.US`)).body;
+    assert(qqqBeforeCapture.status === "valid" && qqqBeforeCapture.data_quality === "verified", `QQQ market-session latest was not verified: ${JSON.stringify(qqqBeforeCapture)}`);
+    assert(qqqBeforeCapture.baseline_price === "500" && qqqBeforeCapture.regular_close_price === "510" && qqqBeforeCapture.after_hours_price === "512", `QQQ market-session prices did not match the fixture: ${JSON.stringify(qqqBeforeCapture)}`);
+    assert(qqqBeforeCapture.pre_to_regular_close_pct === "2.00" && qqqBeforeCapture.regular_close_to_after_hours_pct === "0.39", `QQQ market-session percentages did not match the backend: ${JSON.stringify(qqqBeforeCapture)}`);
+    assert(qqqBeforeCapture.target_trading_day === "2026-10-02" && qqqBeforeCapture.baseline_evidence?.trading_date === "2026-10-02" && qqqBeforeCapture.regular_close_evidence?.trading_date === "2026-10-02" && qqqBeforeCapture.post_market_evidence?.trading_date === "2026-10-02", `QQQ market-session evidence did not share the 2026-10-02 ET trading date: ${JSON.stringify(qqqBeforeCapture)}`);
+    const sessionCloseAt = new Date(qqqBeforeCapture.regular_close_evidence?.session_close_at || "");
+    assert(sessionCloseAt.toISOString() === "2026-10-02T20:00:00.000Z", `Backend session_close_at was not 16:00 ET / 04:00 China: ${qqqBeforeCapture.regular_close_evidence?.session_close_at}`);
+    const qqqCapturePostsBefore = routeAudit.filter((item) => item.method === "POST" && item.pathname === "/market-session-comparisons").length;
+    await marketSessionCapture.click();
+    await waitFor(() => routeAudit.filter((item) => item.method === "POST" && item.pathname === "/market-session-comparisons").length > qqqCapturePostsBefore, timeoutMs, "QQQ market-session capture request");
+    await expectText(page.locator("#market-session-comparison-status"), "三段证据", timeoutMs);
+    const qqqCaptured = (await pageJson(page, `/market-session-comparisons/latest?external_account_id=${encodeURIComponent(PRIMARY_ACCOUNT)}&mode=paper&symbol=QQQ.US`)).body;
+    assert(qqqCaptured.id && qqqCaptured.id !== qqqBeforeCapture.id, `QQQ capture did not create a new immutable record: before=${qqqBeforeCapture.id} after=${qqqCaptured.id}`);
+    assert(qqqCaptured.baseline_price === "500" && qqqCaptured.regular_close_price === "510" && qqqCaptured.after_hours_price === "512", `Captured QQQ record changed the three prices: ${JSON.stringify(qqqCaptured)}`);
+    const savedPage1 = (await pageJson(page, `/market-session-comparisons?external_account_id=${encodeURIComponent(PRIMARY_ACCOUNT)}&mode=paper&symbol=QQQ.US&limit=1`)).body;
+    assert(savedPage1.has_more === true && savedPage1.next_cursor, `Market-session saved history did not expose a next cursor: ${JSON.stringify(savedPage1)}`);
+    const savedPage2 = (await pageJson(page, `/market-session-comparisons?external_account_id=${encodeURIComponent(PRIMARY_ACCOUNT)}&mode=paper&symbol=QQQ.US&limit=1&cursor=${encodeURIComponent(savedPage1.next_cursor)}`)).body;
+    assert(savedPage2.items?.length === 1 && savedPage2.items[0].id !== savedPage1.items[0].id, `Market-session saved history cursor repeated its first record: ${JSON.stringify({ savedPage1, savedPage2 })}`);
+    await waitFor(async () => (await marketSessionSaved.locator("option").count()) >= 2, timeoutMs, "first saved market-session page");
+    await waitFor(async () => !(await marketSessionLoadMore.isDisabled()), timeoutMs, "market-session load-more enabled");
+    await marketSessionLoadMore.click();
+    await waitFor(async () => (await marketSessionSaved.locator("option").count()) >= 3, timeoutMs, "second saved market-session page");
+    await waitFor(async () => await marketSessionLoadMore.isDisabled(), timeoutMs, "market-session load-more settled");
+    const savedIds = await marketSessionSaved.locator("option").evaluateAll((options) => options.map((option) => option.value).filter(Boolean));
+    const oldQqqId = savedIds.find((id) => id !== qqqCaptured.id);
+    assert(oldQqqId, `Market-session history did not retain the older QQQ record: ${JSON.stringify(savedIds)}`);
+    await marketSessionSaved.selectOption(oldQqqId);
+    await waitFor(async () => (await page.locator("#market-session-comparison-raw").textContent() || "").includes(`\"id\": \"${oldQqqId}\"`), timeoutMs, "saved market-session detail selection");
+    assert((await marketSessionSaved.inputValue()) === oldQqqId, "Saved market-session select did not retain the older record.");
+
+    // A symbol with no pre-open baseline remains unavailable.  The panel must
+    // preserve null evidence instead of turning the missing values into zero.
+    await marketSessionInput.fill("AAPL.US");
+    await marketSessionRefresh.click();
+    await expectText(page.locator("#market-session-comparison-explanation"), "BLOCKED_DATA", timeoutMs);
+    const aaplCapturePostsBefore = routeAudit.filter((item) => item.method === "POST" && item.pathname === "/market-session-comparisons").length;
+    await marketSessionCapture.click();
+    await waitFor(() => routeAudit.filter((item) => item.method === "POST" && item.pathname === "/market-session-comparisons").length > aaplCapturePostsBefore, timeoutMs, "AAPL market-session capture request");
+    const aaplComparison = (await pageJson(page, `/market-session-comparisons/latest?external_account_id=${encodeURIComponent(PRIMARY_ACCOUNT)}&mode=paper&symbol=AAPL.US`)).body;
+    assert(aaplComparison.status === "not_available" && aaplComparison.data_quality === "unavailable", `AAPL missing-baseline comparison was not unavailable: ${JSON.stringify(aaplComparison)}`);
+    assert(aaplComparison.baseline_price == null && aaplComparison.regular_close_price == null && aaplComparison.after_hours_price == null && aaplComparison.pre_to_regular_close_pct == null && aaplComparison.regular_close_to_after_hours_pct == null, `AAPL missing-baseline evidence was filled with values: ${JSON.stringify(aaplComparison)}`);
+    const aaplSummary = await textOf(page, "#market-session-comparison-summary");
+    const aaplExplanation = await textOf(page, "#market-session-comparison-explanation");
+    assert((aaplSummary.match(/缺少证据/g) || []).length >= 3 && !aaplSummary.includes("0.00"), `AAPL summary did not preserve missing prices: ${aaplSummary}`);
+    assert(aaplExplanation.includes("未计算（证据不足）") && !aaplExplanation.includes("0.00%"), `AAPL explanation did not preserve missing percentage evidence: ${aaplExplanation}`);
+
+    // Late latest response after an in-flight symbol change must be discarded,
+    // and the new symbol must release all controls immediately.
+    await marketSessionInput.fill("QQQ.US");
+    armDelayedRead("/market-session-comparisons/latest", "QQQ.US");
+    await marketSessionRefresh.click();
+    await waitFor(() => delayedRead?.hitCount > 0, timeoutMs, "delayed QQQ market-session latest read");
+    const busyMarketSession = await page.evaluate(() => ({
+      refresh: document.getElementById("market-session-comparison-refresh")?.disabled,
+      capture: document.getElementById("market-session-comparison-capture")?.disabled,
+    }));
+    assert(busyMarketSession.refresh && busyMarketSession.capture, `Market-session controls were not busy during the delayed read: ${JSON.stringify(busyMarketSession)}`);
+    await marketSessionInput.fill("AAPL.US");
+    await waitFor(async () => !(await marketSessionRefresh.isDisabled()) && !(await marketSessionCapture.isDisabled()), timeoutMs, "market-session controls after symbol change");
+    releaseDelayedRead("error");
+    await sleep(350);
+    assert((await marketSessionInput.inputValue()) === "AAPL.US", "Late QQQ market-session response changed the current symbol.");
+    assert((await textOf(page, "#market-session-comparison-explanation")).includes("标的已改变"), "Late QQQ market-session response polluted the AAPL empty state.");
+    assert(!(await marketSessionRefresh.isDisabled()) && !(await marketSessionCapture.isDisabled()), "Market-session controls remained disabled after the late symbol response.");
+    delayedRead = null;
+
+    // The saved-list request gets a finite delay while the account generation
+    // changes.  The late primary response must not overwrite the alternate
+    // account, and its pagination control must settle for the new generation.
+    await marketSessionInput.fill("QQQ.US");
+    await marketSessionRefresh.click();
+    await expectText(page.locator("#market-session-comparison-summary"), "500.00 USD", timeoutMs);
+    await waitFor(async () => !(await marketSessionLoadMore.isDisabled()), timeoutMs, "QQQ market-session page before account race");
+    armDelayedRead("/market-session-comparisons", "QQQ.US");
+    await marketSessionRefresh.click();
+    await waitFor(() => delayedRead?.hitCount > 0, timeoutMs, "delayed primary market-session saved page");
+    await selectAccount(page, ALT_ACCOUNT, timeoutMs);
+    await waitFor(async () => !(await marketSessionRefresh.isDisabled()) && !(await marketSessionCapture.isDisabled()) && !(await marketSessionSaved.locator("option").first().isDisabled()), timeoutMs, "alternate market-session controls after account generation");
+    releaseDelayedRead("error");
+    await sleep(350);
+    assert((await page.locator("#topbar-account-select").inputValue()) === ALT_ACCOUNT, "Market-session account race did not settle on the alternate account.");
+    const alternateMarketSessionRaw = String(await page.locator("#market-session-comparison-raw").textContent() || "");
+    assert(alternateMarketSessionRaw.includes(ALT_ACCOUNT) && !alternateMarketSessionRaw.includes(`\"external_account_id\": \"${PRIMARY_ACCOUNT}\"`), `Late primary market-session response polluted the alternate account: ${alternateMarketSessionRaw}`);
+    await waitFor(async () => !(await marketSessionLoadMore.isDisabled()), timeoutMs, "alternate market-session load-more enabled");
+    await marketSessionLoadMore.click();
+    await waitFor(async () => await marketSessionLoadMore.isDisabled(), timeoutMs, "alternate market-session pagination settled");
+    const marketSessionAccountRace = { alternate_account: ALT_ACCOUNT, stale_primary_response_discarded: true, load_more_settled: true };
+    releaseDelayedRead("error");
+    delayedRead = null;
+    await selectAccount(page, PRIMARY_ACCOUNT, timeoutMs);
+    await waitFor(async () => !(await marketSessionRefresh.isDisabled()) && !(await marketSessionCapture.isDisabled()), timeoutMs, "primary market-session controls restored");
+    marketSessionEvidence = {
+      symbol: "QQQ.US",
+      prices: { baseline: qqqBeforeCapture.baseline_price, regular_close: qqqBeforeCapture.regular_close_price, after_hours: qqqBeforeCapture.after_hours_price },
+      percentages: { pre_to_regular_close: qqqBeforeCapture.pre_to_regular_close_pct, regular_close_to_after_hours: qqqBeforeCapture.regular_close_to_after_hours_pct },
+      target_trading_day: qqqBeforeCapture.target_trading_day,
+      session_close_at: qqqBeforeCapture.regular_close_evidence?.session_close_at,
+      captured_record_id: qqqCaptured.id,
+      older_record_id: oldQqqId,
+      aapl_missing_baseline: true,
+      symbol_change_race: { stale_response_discarded: true, controls_restored: true },
+      account_generation_race: marketSessionAccountRace,
+    };
+
+    // P2.2: visible timeline plus explicit date/symbol filter and keyset page.
     await waitFor(async () => await page.locator("#market-event-timeline .workbench-timeline-item").count() >= 2, timeoutMs, "market timeline rows");
     await expectText(page.locator("#market-explanation-summary"), "事件", timeoutMs);
     const timelinePage1 = await pageJson(page, "/research/timeline?external_account_id=LBPT10087357&mode=paper&symbols=UNH.US&symbols=QQQ.US&start=2026-05-01T00:00:00Z&end=2026-06-30T23:59:59Z&limit=1");
@@ -736,6 +885,7 @@ async function main() {
       workflow: { screen_id: screenId, case_id: caseId, selected_symbol_after_case: "MOCK.US", selected_range_after_case: "1y", candidate_compare: true, strategy_evaluation: true },
       research_layout: desktopResearchLayout,
       portfolio: { nav: portfolioPayload.latest?.net_liquidation, investment_return: portfolioPayload.change?.investment_return, investment_return_unavailable: portfolioPayload.change?.investment_return_unavailable, weights: (portfolioPayload.allocation || []).map((item) => ({ symbol: item.symbol, weight_of_net_liquidation: item.weight_of_net_liquidation })), risk_known_max_loss: riskPayload.known_max_loss },
+      market_session: marketSessionEvidence,
       timeline: { rendered_events: await page.locator("#market-event-timeline .workbench-timeline-item").count(), filtered_pages: 2 },
       backtest: {
         datasets_empty: true,

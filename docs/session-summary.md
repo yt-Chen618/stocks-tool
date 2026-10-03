@@ -86,6 +86,13 @@ Open:
   HTTP 502; it did not submit an order or create a new trusted snapshot. The 775
   legacy snapshots with unknown mode remain preserved and excluded from paper
   opening authority. Final artifacts record the verification timestamps.
+- The subsequent market-session slice adds immutable pre-open, regular-close
+  reference and post-market evidence at `/market-session-comparisons`. The operator
+  database is now at `20261004_0025`; a fresh isolated restore passed first, and all
+  30 existing business tables matched their pre-0025 original-column row hashes.
+  New comparison records remain empty until explicitly captured. Missing prices
+  stay unavailable, capture retries preserve the original request and evidence,
+  and stored history uses account/mode/symbol-scoped cursor paging.
 - LEAN uses the pinned official `18100` image, native file staging and one
   canonical algorithm module. Actual custom/native fixture, lifecycle and order
   ownership evidence are distinct from strategy-performance validation. Source,

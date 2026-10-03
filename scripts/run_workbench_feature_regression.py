@@ -28,6 +28,9 @@ SOURCE_FILES = (
     Path("scripts/mock_dashboard_server.py"),
     Path("scripts/mock_dashboard_fixtures.py"),
     Path("scripts/mock_workbench_routes.py"),
+    Path("scripts/mock_market_session_routes.py"),
+    Path("src/stocks_tool/application/services/market_session_comparison.py"),
+    Path("src/stocks_tool/domain/market_session_comparisons.py"),
     Path("src/stocks_tool/api/routes/ui.py"),
 )
 
