@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from stocks_tool.adapters.brokers.longbridge import LongbridgeDependencyError
 from stocks_tool.api.dependencies import get_order_service
+from stocks_tool.application.services.order_authorization import OrderAuthorizationError
 from stocks_tool.application.services.orders import (
     TradingIntentConflictError,
     TradingIntentOutcomeUnknownError,
@@ -189,6 +190,38 @@ def test_submit_order_rejects_invalid_idempotency_key() -> None:
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "idempotency_key_invalid"
     service.submit_order.assert_not_called()
+
+
+def test_submit_order_returns_stable_manual_authorization_error() -> None:
+    service = Mock()
+    service.submit_order.side_effect = OrderAuthorizationError(
+        "account_snapshot_stale",
+        "The broker account snapshot is stale; refresh the selected paper account before submitting this order.",
+    )
+    client = with_order_service(service)
+    try:
+        response = client.post(
+            "/orders/submit",
+            headers={"Idempotency-Key": "ui-order-submit-auth-01"},
+            json={
+                "external_account_id": "LBPT10087357",
+                "symbol": "UNH.US",
+                "side": "buy",
+                "quantity": 1,
+                "order_type": "limit",
+                "mode": "paper",
+                "limit_price": 10,
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "account_snapshot_stale",
+        "message": "The broker account snapshot is stale; refresh the selected paper account before submitting this order.",
+        "retryable": False,
+    }
 
 
 def test_submit_order_sets_replay_header_without_changing_body() -> None:

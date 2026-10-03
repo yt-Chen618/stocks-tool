@@ -310,16 +310,22 @@ class StrategyExperimentService:
         )
         return rejected
 
-    def get_control_snapshot(self, *, external_account_id: str | None = None) -> StrategyControlSnapshot:
+    def get_control_snapshot(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> StrategyControlSnapshot:
         if external_account_id is not None:
             self._ensure_account(external_account_id)
         if self.settings is None:
             raise RuntimeError("Strategy controls require settings to be available.")
         covered_call = self.settings.covered_call_strategy
         zero_dte_lottery = self.settings.zero_dte_lottery_strategy
+        selected_mode = mode or self.settings.execution_mode
         return StrategyControlSnapshot(
             external_account_id=external_account_id,
-            execution_mode=self.settings.execution_mode,
+            execution_mode=selected_mode,
             live_trading_enabled=self.settings.allow_live_trading,
             scheduler_enabled=self.settings.reconciliation_scheduler_enabled,
             live_execution_allowed=self.settings.allow_live_trading,
@@ -368,7 +374,10 @@ class StrategyExperimentService:
         mode: ExecutionMode | None = None,
         limit: int = 10,
     ) -> StrategyAdvisorContext:
-        controls = self.get_control_snapshot(external_account_id=external_account_id)
+        controls = self.get_control_snapshot(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
         return StrategyAdvisorContext(
             external_account_id=external_account_id,
             controls=controls,
@@ -748,6 +757,7 @@ class StrategyExperimentService:
         self,
         *,
         external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 50,
     ) -> list[StrategyAuditEvent]:
         if external_account_id is not None:
@@ -756,6 +766,7 @@ class StrategyExperimentService:
         for signal in self.experiments.list_signals(
             external_account_id=external_account_id,
             strategy_id=None,
+            mode=mode,
             limit=limit,
         ):
             event = self._audit_event_from_signal(signal)
@@ -764,6 +775,7 @@ class StrategyExperimentService:
         for run in self.experiments.list_advisor_runs(
             external_account_id=external_account_id,
             source=None,
+            mode=mode,
             limit=limit,
         ):
             events.append(self._audit_event_from_advisor_run(run))

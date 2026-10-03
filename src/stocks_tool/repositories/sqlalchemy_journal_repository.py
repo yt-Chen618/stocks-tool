@@ -1,10 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import and_, exists, or_, select, tuple_
 from sqlalchemy.orm import Session
 
-from stocks_tool.db.models import JournalEntryRecord
-from stocks_tool.domain.enums import JournalEntryType
+from stocks_tool.db.models import (
+    BrokerAccountRecord,
+    ExecutionRecord,
+    JournalEntryRecord,
+    OrderRecord,
+)
+from stocks_tool.domain.enums import ExecutionMode, JournalEntryType
 from stocks_tool.domain.models import JournalEntry
 from stocks_tool.domain.pagination import (
     CursorPage,
@@ -33,20 +38,22 @@ class SQLAlchemyJournalRepository(JournalRepository):
         order_id: str | None = None,
         trade_plan_id: str | None = None,
         entry_type: JournalEntryType | None = None,
+        *,
+        mode: ExecutionMode | None = None,
     ) -> list[JournalEntry]:
         query = select(JournalEntryRecord).order_by(
             JournalEntryRecord.updated_at.desc(),
             JournalEntryRecord.created_at.desc(),
             JournalEntryRecord.id.desc(),
         )
-        if external_account_id is not None:
-            query = query.where(JournalEntryRecord.external_account_id == external_account_id)
-        if order_id is not None:
-            query = query.where(JournalEntryRecord.order_id == order_id)
-        if trade_plan_id is not None:
-            query = query.where(JournalEntryRecord.trade_plan_id == trade_plan_id)
-        if entry_type is not None:
-            query = query.where(JournalEntryRecord.entry_type == entry_type.value)
+        query = self._apply_scope(
+            query,
+            external_account_id=external_account_id,
+            order_id=order_id,
+            trade_plan_id=trade_plan_id,
+            entry_type=entry_type,
+            mode=mode,
+        )
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
 
@@ -57,6 +64,7 @@ class SQLAlchemyJournalRepository(JournalRepository):
         order_id: str | None = None,
         trade_plan_id: str | None = None,
         entry_type: JournalEntryType | None = None,
+        mode: ExecutionMode | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> CursorPage[JournalEntry]:
@@ -66,19 +74,20 @@ class SQLAlchemyJournalRepository(JournalRepository):
             "order_id": order_id,
             "trade_plan_id": trade_plan_id,
             "entry_type": entry_type.value if entry_type is not None else None,
+            "mode": mode.value if mode is not None else None,
         }
         query = select(JournalEntryRecord.id).order_by(
             JournalEntryRecord.created_at.desc(),
             JournalEntryRecord.id.desc(),
         )
-        if external_account_id is not None:
-            query = query.where(JournalEntryRecord.external_account_id == external_account_id)
-        if order_id is not None:
-            query = query.where(JournalEntryRecord.order_id == order_id)
-        if trade_plan_id is not None:
-            query = query.where(JournalEntryRecord.trade_plan_id == trade_plan_id)
-        if entry_type is not None:
-            query = query.where(JournalEntryRecord.entry_type == entry_type.value)
+        query = self._apply_scope(
+            query,
+            external_account_id=external_account_id,
+            order_id=order_id,
+            trade_plan_id=trade_plan_id,
+            entry_type=entry_type,
+            mode=mode,
+        )
         if cursor is not None:
             position = decode_cursor(cursor, resource="journals", scope=scope)
             try:
@@ -122,11 +131,60 @@ class SQLAlchemyJournalRepository(JournalRepository):
         )
 
     @staticmethod
+    def _apply_scope(
+        query,
+        *,
+        external_account_id: str | None,
+        order_id: str | None,
+        trade_plan_id: str | None,
+        entry_type: JournalEntryType | None,
+        mode: ExecutionMode | None,
+    ):
+        if external_account_id is not None:
+            query = query.where(JournalEntryRecord.external_account_id == external_account_id)
+        if order_id is not None:
+            query = query.where(JournalEntryRecord.order_id == order_id)
+        if trade_plan_id is not None:
+            query = query.where(JournalEntryRecord.trade_plan_id == trade_plan_id)
+        if entry_type is not None:
+            query = query.where(JournalEntryRecord.entry_type == entry_type.value)
+        if mode is None:
+            return query
+
+        direct_order = exists(
+            select(OrderRecord.id)
+            .join(BrokerAccountRecord, OrderRecord.broker_account_id == BrokerAccountRecord.id)
+            .where(
+                OrderRecord.id == JournalEntryRecord.order_id,
+                OrderRecord.execution_mode == mode.value,
+                BrokerAccountRecord.external_account_id == JournalEntryRecord.external_account_id,
+            )
+        )
+        execution_order = exists(
+            select(ExecutionRecord.id)
+            .join(OrderRecord, ExecutionRecord.order_id == OrderRecord.id)
+            .join(BrokerAccountRecord, OrderRecord.broker_account_id == BrokerAccountRecord.id)
+            .where(
+                ExecutionRecord.id == JournalEntryRecord.execution_id,
+                ExecutionRecord.external_account_id == JournalEntryRecord.external_account_id,
+                OrderRecord.execution_mode == mode.value,
+                BrokerAccountRecord.external_account_id == JournalEntryRecord.external_account_id,
+            )
+        )
+        standalone_mode = and_(
+            JournalEntryRecord.order_id.is_(None),
+            JournalEntryRecord.execution_id.is_(None),
+            JournalEntryRecord.execution_mode == mode.value,
+        )
+        return query.where(or_(direct_order, execution_order, standalone_mode))
+
+    @staticmethod
     def _apply_entry(record: JournalEntryRecord, entry: JournalEntry) -> None:
         record.trade_plan_id = entry.trade_plan_id
         record.order_id = entry.order_id
         record.execution_id = entry.execution_id
         record.external_account_id = entry.external_account_id
+        record.execution_mode = entry.mode.value if entry.mode is not None else None
         record.symbol = entry.symbol
         record.entry_type = entry.entry_type.value
         record.title = entry.title
@@ -138,6 +196,7 @@ class SQLAlchemyJournalRepository(JournalRepository):
         return JournalEntry(
             id=record.id,
             external_account_id=record.external_account_id,
+            mode=ExecutionMode(record.execution_mode) if record.execution_mode is not None else None,
             symbol=record.symbol,
             entry_type=JournalEntryType(record.entry_type),
             title=record.title,

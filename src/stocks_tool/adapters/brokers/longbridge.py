@@ -553,6 +553,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             return AccountSnapshot(
                 broker=self.name,
                 account_id=external_account_id,
+                mode=mode,
                 currency=(getattr(balance, "currency", None) or currency or "USD"),
                 cash_balance=self._to_decimal(getattr(balance, "total_cash", None)),
                 net_liquidation=self._to_decimal(getattr(balance, "net_assets", None)),

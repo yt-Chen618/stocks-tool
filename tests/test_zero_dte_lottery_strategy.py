@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from stocks_tool.application.services.zero_dte_lottery_strategy import (
@@ -293,6 +293,25 @@ def test_preview_selects_zero_dte_call_under_150_premium_cap() -> None:
     assert result.candidate.option_symbol == "QQQ260604C736000.US"
     assert result.candidate.premium_at_ask == Decimal("145.00")
     assert result.candidate.max_loss == Decimal("145.00")
+
+
+def test_preview_rejects_future_option_quote() -> None:
+    future_quote = build_option_quote(symbol="QQQ260604C736000.US").model_copy(
+        update={"timestamp": NOW + timedelta(seconds=1)}
+    )
+    adapter = FakeLongbridgeAdapter(option_quotes=[future_quote])
+    service = build_service(adapter=adapter)
+
+    result = service.preview(
+        external_account_id="LBPT10087357",
+        symbol="QQQ.US",
+        direction="auto",
+        mode=ExecutionMode.PAPER,
+        as_of=NOW,
+    )
+
+    assert result.eligible is False
+    assert any("freshness" in reason.lower() or "filters" in reason.lower() for reason in result.reasons)
 
 
 def test_preview_blocks_candidate_above_150_premium_cap() -> None:

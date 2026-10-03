@@ -70,6 +70,11 @@
       panel.setAttribute("aria-hidden", String(!selected));
     });
     writeStorage(WORKSPACE_STORAGE_KEY, workspace);
+    try {
+      window.dispatchEvent(new CustomEvent("stocks-tool:workspace-change", { detail: { workspace } }));
+    } catch (_error) {
+      // The workspace remains usable when CustomEvent is unavailable.
+    }
     return workspace;
   }
 

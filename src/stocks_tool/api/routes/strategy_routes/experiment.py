@@ -2,7 +2,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from stocks_tool.api.dependencies import get_strategy_experiment_service
 from stocks_tool.application.services.strategy_experiments import StrategyExperimentService
-from stocks_tool.domain.enums import StrategyProposalStatus
+from stocks_tool.domain.enums import ExecutionMode, StrategyProposalStatus
 from stocks_tool.domain.models import (
     CreateStrategyProposalRequest,
     CreateStrategyReviewRequest,
@@ -40,10 +40,11 @@ def get_strategy_experiment_snapshot(
 @router.get("/controls", response_model=StrategyControlSnapshot)
 def get_strategy_controls(
     external_account_id: str | None = Query(default=None),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> StrategyControlSnapshot:
     try:
-        return service.get_control_snapshot(external_account_id=external_account_id)
+        return service.get_control_snapshot(external_account_id=external_account_id, mode=mode)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

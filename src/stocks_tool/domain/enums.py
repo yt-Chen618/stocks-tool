@@ -100,6 +100,14 @@ class ExecutionMode(str, Enum):
     LIVE = "live"
 
 
+class AccountSnapshotProvenance(str, Enum):
+    """Server-assigned origin of an account snapshot."""
+
+    BROKER_SYNC = "broker_sync"
+    PUBLIC_UPLOAD = "public_upload"
+    LEGACY_UNKNOWN = "legacy_unknown"
+
+
 class MarketBias(str, Enum):
     BULLISH = "bullish"
     BEARISH = "bearish"

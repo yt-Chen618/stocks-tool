@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from stocks_tool.domain.enums import ExecutionMode
 from stocks_tool.domain.models import CreateJournalEntryRequest, JournalEntry
 from stocks_tool.ports.repository import (
     ExecutionRepository,
@@ -63,6 +64,8 @@ class JournalService:
                 raise ValueError("Journal account does not match the linked order.")
             if order.symbol != symbol:
                 raise ValueError("Journal symbol does not match the linked order.")
+            if request.mode is not None and order.mode != request.mode:
+                raise ValueError("Journal mode does not match the linked order.")
             if execution is not None and execution.order_id != order.id:
                 raise ValueError("Linked execution does not belong to the linked order.")
             if trade_plan_id is None:
@@ -72,6 +75,8 @@ class JournalService:
 
         if trade_plan_id is not None and self.trade_plans.get_plan(trade_plan_id) is None:
             raise LookupError(f"Trade plan '{trade_plan_id}' was not found.")
+
+        mode: ExecutionMode | None = order.mode if order is not None else request.mode
 
         tags: list[str] = []
         seen_tags: set[str] = set()
@@ -87,6 +92,7 @@ class JournalService:
             JournalEntry(
                 id=str(uuid4()),
                 external_account_id=external_account_id,
+                mode=mode,
                 symbol=symbol,
                 entry_type=request.entry_type,
                 title=title,

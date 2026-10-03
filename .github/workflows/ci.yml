@@ -20,6 +20,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       RECONCILIATION_SCHEDULER_ENABLED: "false"
+      BACKTEST_DISPATCHER_ENABLED: "false"
       LONGBRIDGE_MARKET_DATA_PREWARM_ENABLED: "false"
       ALLOW_LIVE_TRADING: "false"
       EXECUTION_MODE: paper
@@ -58,8 +59,19 @@ jobs:
         run: .venv/bin/python scripts/run_regression.py history-query --json-output artifacts/ci/history-query.json
       - name: Verify global strategy summaries and lifecycle reads
         run: .venv/bin/python scripts/run_regression.py strategy-query --json-output artifacts/ci/strategy-query.json
+      - name: Verify bounded capacity and fair intent reconciliation
+        run: .venv/bin/python scripts/run_regression.py p6-query --json-output artifacts/ci/p6-query.json
       - name: Verify the deterministic strategy flow
         run: .venv/bin/python scripts/run_regression.py bull-put-paper --json-output artifacts/ci/bull-put-paper.json
+      - name: Run focused operations reliability tests
+        run: .venv/bin/python -m pytest tests/test_health.py tests/test_observability.py tests/test_database_artifacts.py -q
+      - name: Capture source and migration identity
+        if: always()
+        shell: bash
+        run: |
+          git rev-parse HEAD > artifacts/ci/source-commit.txt
+          .venv/bin/python -m alembic current > artifacts/ci/alembic-current.txt 2>&1 || true
+          .venv/bin/python -m alembic heads > artifacts/ci/alembic-heads.txt 2>&1 || true
       - name: Save verification evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -72,3 +84,120 @@ jobs:
       - name: Stop the CI database
         if: always()
         run: docker compose down
+
+  windows-operations:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: 验证工作区
+    env:
+      PYTHONUTF8: "1"
+      RECONCILIATION_SCHEDULER_ENABLED: "false"
+      BACKTEST_DISPATCHER_ENABLED: "false"
+      ALLOW_LIVE_TRADING: "false"
+      EXECUTION_MODE: paper
+      LONGBRIDGE_APP_KEY: ""
+      LONGBRIDGE_APP_SECRET: ""
+      LONGBRIDGE_ACCESS_TOKEN: ""
+      LONGBRIDGE_PAPER_ACCESS_TOKEN: ""
+      DEEPSEEK_API_KEY: ""
+      FMP_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: 验证工作区
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: 验证工作区/.python-version
+      - name: Install locked Python environment
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.12.22
+          uv sync --locked --extra dev --no-python-downloads
+      - name: Run focused Windows operations tests
+        shell: pwsh
+        run: .venv\Scripts\python.exe -m pytest tests\test_health.py tests\test_observability.py tests\test_database_artifacts.py tests\test_regression_observability.py -q --junitxml=artifacts/ci-windows/tests.xml
+      - name: Verify Unicode checkout process path
+        shell: pwsh
+        run: |
+          Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+          $expected = (Resolve-Path "src\stocks_tool\__init__.py").Path
+          $code = "from pathlib import Path; import stocks_tool,sys; raise SystemExit(0 if Path(stocks_tool.__file__).resolve() == Path(sys.argv[1]).resolve() else 2)"
+          .venv\Scripts\python.exe -c $code $expected
+      - name: Save Windows operations evidence
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts\ci-windows | Out-Null
+          git rev-parse HEAD | Out-File -Encoding utf8 artifacts\ci-windows\source-commit.txt
+          .venv\Scripts\python.exe -c "import sys; print(sys.executable); print(sys.version)" | Out-File -Encoding utf8 artifacts\ci-windows\python.txt
+      - name: Upload Windows operations evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-operations-evidence
+          path: 验证工作区/artifacts/ci-windows/
+          if-no-files-found: warn
+
+  lean-offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      RECONCILIATION_SCHEDULER_ENABLED: "false"
+      BACKTEST_DISPATCHER_ENABLED: "false"
+      LONGBRIDGE_MARKET_DATA_PREWARM_ENABLED: "false"
+      ALLOW_LIVE_TRADING: "false"
+      LONGBRIDGE_APP_KEY: ""
+      LONGBRIDGE_APP_SECRET: ""
+      LONGBRIDGE_ACCESS_TOKEN: ""
+      LONGBRIDGE_PAPER_ACCESS_TOKEN: ""
+      DEEPSEEK_API_KEY: ""
+      FMP_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Install locked Python environment
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.12.22
+          uv sync --locked --extra dev --no-python-downloads
+      - name: Provision the pinned official LEAN image
+        timeout-minutes: 20
+        run: |
+          df -h /
+          .venv/bin/python -c "import subprocess; from stocks_tool.adapters.backtesting.engine_lock import LEAN_ENGINE_IMAGE_REPOSITORY, LEAN_ENGINE_IMAGE_DIGEST; subprocess.run(['docker', 'pull', LEAN_ENGINE_IMAGE_REPOSITORY + '@' + LEAN_ENGINE_IMAGE_DIGEST], check=True, timeout=1100)"
+      - name: Execute actual LEAN without network or broker credentials
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --output artifacts/ci-lean/lean-offline-smoke.json
+      - name: Verify native equity and multiple option contracts
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --registered-fixture --output artifacts/ci-lean/lean-native-fixture.json
+      - name: Verify quote size limits and partial leg state
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --registered-fixture --partial-fill-fixture --output artifacts/ci-lean/lean-partial-fill.json
+      - name: Verify split and dividend accounting
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --lifecycle-fixture --lifecycle-scenario split_dividend --output artifacts/ci-lean/lean-split-dividend.json
+      - name: Verify covered call assignment
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --lifecycle-fixture --lifecycle-scenario covered_call_assignment --output artifacts/ci-lean/lean-assignment.json
+      - name: Verify long call exercise
+        timeout-minutes: 10
+        run: .venv/bin/python scripts/lean_offline_smoke.py --lifecycle-fixture --lifecycle-scenario long_call_exercise --output artifacts/ci-lean/lean-exercise.json
+      - name: Save LEAN source identity
+        if: always()
+        run: |
+          mkdir -p artifacts/ci-lean
+          git rev-parse HEAD > artifacts/ci-lean/source-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lean-offline-evidence
+          path: artifacts/ci-lean/
+          if-no-files-found: warn

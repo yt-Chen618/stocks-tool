@@ -104,7 +104,11 @@ class ResearchWorkspaceService:
                 self._append_unique(row.sources, "watchlist")
 
         if external_account_id:
-            snapshot = self.account_snapshots.get_latest_account_snapshot(external_account_id)
+            snapshot = self.account_snapshots.get_latest_account_snapshot(
+                external_account_id=external_account_id,
+                mode=mode,
+                trusted_only=True,
+            )
             if snapshot is None:
                 warnings.append("account_snapshot_unavailable")
             else:

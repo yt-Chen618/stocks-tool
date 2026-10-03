@@ -52,7 +52,11 @@ from stocks_tool.domain.models import (
     TradingActionContext,
     TradingIntentReconciliationResult,
 )
-from stocks_tool.domain.enums import TradingIntentState, TradingOperation
+from stocks_tool.domain.enums import (
+    AccountSnapshotProvenance,
+    TradingIntentState,
+    TradingOperation,
+)
 from stocks_tool.application.services.orders import (
     TradingIntentConflictError,
     TradingIntentOutcomeUnknownError,
@@ -68,11 +72,16 @@ class InMemoryRuntimeRepository:
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         if self.state is None:
             return None
-        if self.state.external_account_id != external_account_id or self.state.strategy_id != strategy_id:
+        if (
+            self.state.external_account_id != external_account_id
+            or self.state.strategy_id != strategy_id
+            or self.state.mode != mode
+        ):
             return None
         return self.state
 
@@ -80,10 +89,12 @@ class InMemoryRuntimeRepository:
         self,
         *,
         external_account_id: str,
+        mode: ExecutionMode,
         strategy_id: str = "paper_bull_put_v1",
     ) -> BullPutStrategyRuntimeState | None:
         return self.get_runtime_state(
             external_account_id=external_account_id,
+            mode=mode,
             strategy_id=strategy_id,
         )
 
@@ -203,14 +214,43 @@ class StaticSnapshots:
     def __init__(self, snapshot: AccountSnapshot) -> None:
         self.snapshot = snapshot
 
-    def list_account_snapshots(self, external_account_id: str | None = None) -> list[AccountSnapshot]:
+    def get_latest_account_snapshot(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        trusted_only: bool,
+    ) -> AccountSnapshot | None:
+        snapshots = self.list_account_snapshots(
+            external_account_id=external_account_id,
+            mode=mode,
+            trusted_only=trusted_only,
+        )
+        return max(snapshots, key=lambda item: item.captured_at) if snapshots else None
+
+    def list_account_snapshots(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        trusted_only: bool = False,
+    ) -> list[AccountSnapshot]:
         if external_account_id is not None and external_account_id != self.snapshot.account_id:
+            return []
+        if mode is not None and self.snapshot.mode != mode:
+            return []
+        if trusted_only and self.snapshot.provenance is not AccountSnapshotProvenance.BROKER_SYNC:
             return []
         return [self.snapshot]
 
-    def create_account_snapshot(self, snapshot: AccountSnapshot) -> AccountSnapshot:
-        self.snapshot = snapshot
-        return snapshot
+    def create_account_snapshot(
+        self,
+        snapshot: AccountSnapshot,
+        *,
+        provenance: AccountSnapshotProvenance,
+    ) -> AccountSnapshot:
+        self.snapshot = snapshot.model_copy(update={"provenance": provenance})
+        return self.snapshot
 
 
 class FakeAdapter:
@@ -708,6 +748,8 @@ def build_snapshot() -> AccountSnapshot:
         id="snapshot-1",
         broker=BrokerName.LONGBRIDGE,
         account_id="LBPT10087357",
+        mode=ExecutionMode.PAPER,
+        provenance=AccountSnapshotProvenance.BROKER_SYNC,
         currency="USD",
         cash_balance=Decimal("25000"),
         net_liquidation=Decimal("50000"),

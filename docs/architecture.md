@@ -1,6 +1,6 @@
 # Architecture
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 ## Product Boundary
 
@@ -168,6 +168,53 @@ Longbridge market-data reads keep a short in-process quote cache for degraded re
 - Operator posture is explained through `/ops/unattended-status`, including broker profiles, paper mandate state, audit summaries, consistency summaries, scheduler summaries, lifecycle warnings, `primary_blocker`, `local_repair_available`, `latest_evidence_at`, and a short `operator_posture_reason`.
 - Operator checks and paper mandates may include reason codes, reason details, and severity fields. Dashboard and unattended scripts consume the same explanation fields for broker degradation, scheduler backoff, manual pause, kill switch, advisor pending record, and manual action required states.
 - `.env` secrets must not be printed or copied into chat or committed artifacts.
+
+## Professional Workbench Modules
+
+The October 4 upgrade keeps the same web application and database. New research
+and backtest records have their own tables and application modules; they do not
+replace the trading ledger or create a second frontend.
+
+- Account snapshots carry nullable `execution_mode` and server-assigned
+  `broker_sync`, `public_upload`, or `legacy_unknown` provenance. Historical
+  unknown records remain intact. New public uploads default to declared paper
+  mode when omitted, but always remain untrusted for opening authorization.
+- Snapshot sync validates provider account, broker, typed mode and timestamp
+  before persisting. Bull Put runtime identity includes account, strategy and
+  mode; an existing ID cannot be moved into another scope.
+- Generic order opening and risk-increasing replacement require an injected
+  authorization module, trusted current account evidence, working-order
+  reservations and current quote evidence. Exact idempotent replay returns the
+  original result before fetching fresh evidence. Valid protective actions keep
+  their original linked-order/unknown/quarantine guards without new-entry caps.
+- Execution and journal reads accept optional mode filtering through verified
+  order links. New standalone journals can persist an explicit mode; old
+  unscoped journals stay unknown. Omitted-mode legacy list reads remain complete.
+- Research screens are mutable saved configurations; research cases freeze the
+  selected configuration, primary symbol, universe, technicals, history, source,
+  warnings and linked proposal/advisor IDs. Capture fetches data only on an
+  explicit action. Screen/case/timeline lists use bounded cursors.
+- Portfolio analytics are server read models. Every time point carries currency
+  and provenance. NAV change is not investment return without cash-flow evidence;
+  fees and Greeks are not inferred as zero. Known maximum loss is explicitly
+  Bull Put-only, with excluded risks and currency-aware NAV ratios disclosed.
+- New browser modules request account data through `account-loader` generation
+  guards. Entity selections also have request tokens. Historical case details
+  display their immutable saved evidence rather than current live research.
+- LEAN runs are isolated local compute jobs with a global database lease,
+  owned-container identity, worker sessions, heartbeat and interruption recovery.
+  The launcher uses a fixed official image, `--pull never`, no network, read-only
+  verified inputs and separate results. It receives no broker credentials and
+  cannot write orders, executions or trading intents.
+- Pure rules under `domain/strategies/` are shared with supported online
+  selectors. Run manifests bind strategy, actual algorithm source, dataset,
+  parameters, capital, fees, slippage and lifecycle assumptions. Formal holdout
+  access requires a matching frozen validation run. Fixture evidence is never
+  historical performance evidence.
+- `/health/live` reports process liveness; `/health/ready` separates database and
+  schema usability from account/action authorization. A global health result
+  never grants trading permission. Request IDs and bounded latency observations
+  aid diagnosis; errors exposed to users and logs are sanitized.
 
 ## Supporting Docs
 

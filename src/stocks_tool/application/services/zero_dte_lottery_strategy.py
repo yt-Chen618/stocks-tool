@@ -30,6 +30,7 @@ from stocks_tool.domain.models import (
     ZeroDteLotteryRuntimeState,
     ZeroDteLotteryScanResult,
 )
+from stocks_tool.domain.strategies.common import is_timestamp_fresh as shared_is_timestamp_fresh
 from stocks_tool.ports.repository import BrokerAccountRepository, StrategyExperimentRepository
 from stocks_tool.ports.broker_gateway import BrokerMarketDataGateway
 
@@ -642,15 +643,11 @@ class ZeroDteLotteryStrategyService:
         *,
         evaluated_at: datetime,
     ) -> bool:
-        quote_time = quote.timestamp
-        if quote_time.tzinfo is None:
-            quote_time = quote_time.replace(tzinfo=timezone.utc)
-        age_seconds = (
-            evaluated_at.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
-        ).total_seconds()
-        if age_seconds < -300:
-            return False
-        return age_seconds <= self.settings.zero_dte_lottery_strategy.max_option_quote_age_seconds
+        return shared_is_timestamp_fresh(
+            quote.timestamp,
+            evaluated_at=evaluated_at,
+            max_age_seconds=self.settings.zero_dte_lottery_strategy.max_option_quote_age_seconds,
+        )
 
     def _days_to_expiration(self, expiry_date: date, evaluated_at: datetime) -> int:
         return (expiry_date - evaluated_at.astimezone(self.new_york).date()).days

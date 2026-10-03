@@ -43,6 +43,7 @@ SCHEDULER_PROBLEM_STATUSES = {SchedulerJobRunStatus.FAILED, SchedulerJobRunStatu
 OPERATOR_REASON_CODE_DETAILS = {
     "paper_first_controls_ok": "Paper execution is allowed and live execution is blocked.",
     "live_boundary_not_blocked": "Paper/live execution boundaries are not in the expected unattended posture.",
+    "live_unattended_unsupported": "The unattended reconciliation pipeline is paper-only for the selected mode.",
     "degraded_broker": "Broker profile or credentials are degraded for the selected paper account.",
     "scheduler_enabled": "The in-process scheduler is enabled.",
     "scheduler_disabled": "The in-process scheduler is disabled.",
@@ -387,7 +388,10 @@ class OperatorStatusService:
     ) -> OperatorStatusSnapshot:
         generated_at = datetime.now(timezone.utc)
         checks: list[OperatorStatusCheck] = []
-        controls = self.strategy_experiments.get_control_snapshot(external_account_id=external_account_id)
+        controls = self.strategy_experiments.get_control_snapshot(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
         recent_scheduler_runs = self._recent_scheduler_runs(external_account_id=external_account_id, limit=20)
         recent_scheduler_states = self._recent_scheduler_task_states(external_account_id=external_account_id, limit=100)
         recent_scheduler_summaries = scheduler_job_summaries(
@@ -398,7 +402,10 @@ class OperatorStatusService:
         bull_put_runtime = None
         zero_dte_runtime = None
         spreads: list[BullPutSpread] = []
-        orders = self.order_service.list_orders(external_account_id=external_account_id)
+        orders = self.order_service.list_orders(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
 
         self._add_check(
             checks,
@@ -416,6 +423,15 @@ class OperatorStatusService:
             ),
             severity="info" if controls.paper_execution_allowed and not controls.live_execution_allowed else "critical",
         )
+        if mode != ExecutionMode.PAPER:
+            self._add_check(
+                checks,
+                name="unattended_mode_supported",
+                status="fail",
+                detail="The unattended reconciliation pipeline is paper-only; live mode cannot be marked ready.",
+                reason_code="live_unattended_unsupported",
+                severity="critical",
+            )
         scheduler_problem_count = sum(summary.recent_problem_count for summary in recent_scheduler_summaries)
         if recent_scheduler_runs:
             summary_postures = {summary.posture for summary in recent_scheduler_summaries}
@@ -546,7 +562,10 @@ class OperatorStatusService:
             )
 
         try:
-            spreads = self.bull_put_strategy.list_spreads(external_account_id=external_account_id)
+            spreads = self.bull_put_strategy.list_spreads(
+                external_account_id=external_account_id,
+                mode=mode,
+            )
         except LookupError as exc:
             self._add_check(
                 checks,
@@ -705,7 +724,10 @@ class OperatorStatusService:
         orders: list[Order] = []
         if external_account_id is not None:
             try:
-                orders = self.order_service.list_orders(external_account_id=external_account_id)
+                orders = self.order_service.list_orders(
+                    external_account_id=external_account_id,
+                    mode=mode,
+                )
             except LookupError:
                 orders = []
         return self._combined_audit_events(
@@ -845,6 +867,7 @@ class OperatorStatusService:
         try:
             strategy_events = self.strategy_experiments.list_audit_events(
                 external_account_id=external_account_id,
+                mode=mode,
                 limit=limit,
             )
             if isinstance(strategy_events, list):
@@ -907,7 +930,7 @@ class OperatorStatusService:
                     id=f"order-{order.id}",
                     emitted_at=order.updated_at,
                     external_account_id=order.external_account_id,
-                    mode=mode or order.mode,
+                    mode=order.mode,
                     actor="broker_gateway",
                     source="orders",
                     strategy="paper_order",
@@ -1029,8 +1052,11 @@ class OperatorStatusService:
     ) -> list[StrategyAuditEvent]:
         filtered: list[StrategyAuditEvent] = []
         for event in events:
-            if mode is not None and event.mode is not None and event.mode != mode:
-                continue
+            if mode is not None:
+                if event.mode is not None and event.mode != mode:
+                    continue
+                if event.mode is None and mode != ExecutionMode.PAPER:
+                    continue
             if source is not None and event.source != source:
                 continue
             if strategy is not None and event.strategy != strategy:

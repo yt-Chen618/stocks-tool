@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
 from stocks_tool.core.config import get_settings
 from stocks_tool.db.base import Base
 from stocks_tool.db import models as db_models  # noqa: F401
+from stocks_tool.db import research_models, backtest_models  # noqa: F401
 
 config = context.config
 
@@ -63,4 +64,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

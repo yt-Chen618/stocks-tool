@@ -7,6 +7,7 @@ from stocks_tool.adapters.brokers.longbridge import (
 )
 from stocks_tool.api.dependencies import get_order_service
 from stocks_tool.api.idempotency import require_idempotency_key
+from stocks_tool.application.services.order_authorization import OrderAuthorizationError
 from stocks_tool.application.services.orders import (
     OrderService,
     TradingIntentConflictError,
@@ -100,6 +101,11 @@ def submit_order(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OrderAuthorizationError as exc:
+        raise HTTPException(
+            status_code=409 if exc.code.startswith("account_snapshot_") else 422,
+            detail={"code": exc.code, "message": exc.message, "retryable": False},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:
@@ -184,6 +190,11 @@ def replace_order(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NotImplementedError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OrderAuthorizationError as exc:
+        raise HTTPException(
+            status_code=409 if exc.code.startswith("account_snapshot_") else 422,
+            detail={"code": exc.code, "message": exc.message, "retryable": False},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LongbridgeDependencyError as exc:

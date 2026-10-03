@@ -53,6 +53,10 @@ from stocks_tool.application.services.orders import (
     TradingIntentOutcomeUnknownError,
     TradingIntentRejectedError,
 )
+from stocks_tool.application.services.order_authorization import (
+    OrderAuthorizationError,
+    OrderAuthorizationService,
+)
 from stocks_tool.application.services.option_snapshot_planner import ranked_otm_call_symbols
 from stocks_tool.core.config import Settings
 from stocks_tool.domain.enums import (
@@ -102,6 +106,15 @@ from stocks_tool.domain.option_symbols import (
     parse_us_option_symbol,
     same_day_expiring_option_positions,
 )
+from stocks_tool.domain.strategies.common import (
+    is_timestamp_fresh as shared_is_timestamp_fresh,
+    passes_top_of_book as shared_passes_top_of_book,
+    select_nearest_expiration as shared_select_nearest_expiration,
+)
+from stocks_tool.domain.strategies.covered_call import (
+    CoveredCallRules,
+    is_covered_call_quote_candidate,
+)
 from stocks_tool.ports.repository import (
     AccountSnapshotRepository,
     BrokerAccountRepository,
@@ -129,6 +142,7 @@ class _CoveredCallLifecyclePolicy:
         refresh_candidate: Callable[
             [CoveredCallCandidate, str, ExecutionMode, datetime], CoveredCallCandidate
         ],
+        ensure_current_snapshot: Callable[[str, ExecutionMode, datetime], None],
         ensure_covered: Callable[[str, CoveredCallCandidate, ExecutionMode, set[str]], None],
         current_mark: Callable[[CoveredCallCandidate, ExecutionMode], Decimal | None],
         parse_roll_payload: Callable[[dict, str], tuple[CoveredCallCandidate, CoveredCallCandidate]],
@@ -143,6 +157,7 @@ class _CoveredCallLifecyclePolicy:
         self.assert_no_same_day = assert_no_same_day
         self.assert_no_unresolved = assert_no_unresolved
         self.refresh_candidate = refresh_candidate
+        self.ensure_current_snapshot = ensure_current_snapshot
         self.ensure_covered = ensure_covered
         self.current_mark = current_mark
         self.parse_roll_payload = parse_roll_payload
@@ -170,6 +185,7 @@ class _CoveredCallLifecyclePolicy:
         )
         candidate = self.current_candidate(proposal, proposal.id)
         evaluated_at = self.authorization_clock()
+        self.ensure_current_snapshot(proposal.external_account_id, proposal.mode, evaluated_at)
         self.assert_no_same_day(proposal.external_account_id, proposal.mode, datetime.now(timezone.utc))
         self.assert_no_unresolved(proposal.external_account_id, proposal.mode, parent_action_intent_id)
         candidate = self.refresh_candidate(
@@ -184,6 +200,11 @@ class _CoveredCallLifecyclePolicy:
             proposal.mode,
             {proposal.id},
         )
+        # Candidate/quote refresh can take long enough for the account
+        # snapshot evidence to expire. Recheck immediately before returning
+        # the opening authorization; this is a local evidence read and does
+        # not trigger a second broker account sync.
+        self.ensure_current_snapshot(proposal.external_account_id, proposal.mode, self.authorization_clock())
         limit_price = request.limit_price or candidate.call_bid
         if limit_price <= Decimal("0"):
             raise ValueError(f"Strategy proposal '{proposal.id}' has no positive limit price.")
@@ -252,6 +273,11 @@ class _CoveredCallLifecyclePolicy:
     ) -> ContinueSellAuthorization:
         del buyback_order
         try:
+            self.ensure_current_snapshot(
+                proposal.external_account_id,
+                proposal.mode,
+                self.authorization_clock(),
+            )
             self.assert_no_same_day(proposal.external_account_id, proposal.mode, datetime.now(timezone.utc))
             roll_to = self.refresh_candidate(
                 roll_to,
@@ -264,6 +290,11 @@ class _CoveredCallLifecyclePolicy:
                 roll_to,
                 proposal.mode,
                 {proposal.id, str(proposal.candidate_payload.get("source_proposal_id") or "")},
+            )
+            self.ensure_current_snapshot(
+                proposal.external_account_id,
+                proposal.mode,
+                self.authorization_clock(),
             )
             sell_limit = request.sell_limit_price or proposed_sell_limit
             if sell_limit <= Decimal("0"):
@@ -313,6 +344,11 @@ class _CoveredCallLifecyclePolicy:
             sell_order = self.refresh_order(request.sell_order_id)
             self.validate_roll_sell(sell_order, proposal, roll_to)
             return ContinueSellAuthorization(sell_order=sell_order, roll_to=roll_to, sell_limit=None)
+        self.ensure_current_snapshot(
+            proposal.external_account_id,
+            proposal.mode,
+            self.authorization_clock(),
+        )
         self.assert_no_same_day(proposal.external_account_id, proposal.mode, datetime.now(timezone.utc))
         roll_to = self.refresh_candidate(
             roll_to,
@@ -325,6 +361,11 @@ class _CoveredCallLifecyclePolicy:
             roll_to,
             proposal.mode,
             {proposal.id, str(proposal.candidate_payload.get("source_proposal_id") or "")},
+        )
+        self.ensure_current_snapshot(
+            proposal.external_account_id,
+            proposal.mode,
+            self.authorization_clock(),
         )
         sell_limit = request.sell_limit_price or roll_to.call_bid
         if sell_limit <= Decimal("0"):
@@ -347,6 +388,7 @@ class CoveredCallStrategyService:
         experiments: StrategyExperimentRepository,
         longbridge_adapter: BrokerMarketDataGateway,
         order_service: OrderService | None = None,
+        order_authorization: OrderAuthorizationService | None = None,
         market_events: MarketEventRepository | None = None,
         audit_events: StrategyAuditEventRepository | None = None,
         authorization_clock: Callable[[], datetime] | None = None,
@@ -357,6 +399,7 @@ class CoveredCallStrategyService:
         self.experiments = experiments
         self.longbridge_adapter = longbridge_adapter
         self.order_service = order_service
+        self.order_authorization = order_authorization
         self.market_events = market_events
         self.audit_events = audit_events
         self.authorization_clock = authorization_clock or (lambda: datetime.now(timezone.utc))
@@ -386,6 +429,11 @@ class CoveredCallStrategyService:
                 ),
                 refresh_candidate=lambda candidate, external_account_id, mode, evaluated_at: self._refresh_entry_authorization_candidate(
                     candidate=candidate,
+                    external_account_id=external_account_id,
+                    mode=mode,
+                    evaluated_at=evaluated_at,
+                ),
+                ensure_current_snapshot=lambda external_account_id, mode, evaluated_at: self._ensure_current_account_snapshot(
                     external_account_id=external_account_id,
                     mode=mode,
                     evaluated_at=evaluated_at,
@@ -574,7 +622,7 @@ class CoveredCallStrategyService:
     ) -> CoveredCallPreviewResult:
         evaluated_at = self._reference_time(as_of)
         self._ensure_account(external_account_id)
-        account_snapshot = self._get_latest_account_snapshot(external_account_id)
+        account_snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         position = self._select_position(account_snapshot, symbol=symbol)
         if position is None:
             return CoveredCallPreviewResult(
@@ -1593,13 +1641,40 @@ class CoveredCallStrategyService:
             advisor_sources=self.advisor_sources,
         )
 
-    def _get_latest_account_snapshot(self, external_account_id: str) -> AccountSnapshot:
-        snapshot = self.account_snapshots.get_latest_account_snapshot(external_account_id)
+    def _get_latest_account_snapshot(
+        self,
+        external_account_id: str,
+        *,
+        mode: ExecutionMode,
+    ) -> AccountSnapshot:
+        snapshot = self.account_snapshots.get_latest_account_snapshot(
+            external_account_id=external_account_id,
+            mode=mode,
+            trusted_only=True,
+        )
         if snapshot is None:
             raise LookupError(
                 f"No local account snapshot was found for '{external_account_id}'. Run account sync first."
             )
         return snapshot
+
+    def _ensure_current_account_snapshot(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        evaluated_at: datetime,
+    ) -> None:
+        if self.order_authorization is None:
+            raise OrderAuthorizationError(
+                "order_authorization_unavailable",
+                "Opening broker authorization is unavailable; the Covered Call order was not submitted.",
+            )
+        self.order_authorization.require_current_account_snapshot(
+            external_account_id=external_account_id,
+            mode=mode,
+            evaluated_at=evaluated_at,
+        )
 
     def _select_position(
         self,
@@ -1631,7 +1706,7 @@ class CoveredCallStrategyService:
         mode: ExecutionMode,
         excluded_proposal_ids: set[str] | None = None,
     ) -> None:
-        snapshot = self._get_latest_account_snapshot(external_account_id)
+        snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         position = next(
             (
                 position
@@ -1823,7 +1898,7 @@ class CoveredCallStrategyService:
                     return 2**31 - 1
                 reserved_shares += max(0, quantity) * 100
 
-        snapshot = self._get_latest_account_snapshot(external_account_id)
+        snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         for position in snapshot.positions:
             if position.quantity >= 0 or position.symbol.upper() in excluded_call_symbols:
                 continue
@@ -1870,7 +1945,7 @@ class CoveredCallStrategyService:
         mode: ExecutionMode,
         as_of: datetime,
     ) -> None:
-        snapshot = self._get_latest_account_snapshot(external_account_id)
+        snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         positions = same_day_expiring_option_positions(snapshot, as_of=as_of)
         if not positions:
             return
@@ -1915,15 +1990,13 @@ class CoveredCallStrategyService:
 
     def _select_expiration(self, expiry_dates: list[date], evaluated_at: datetime) -> date | None:
         strategy = self.settings.covered_call_strategy
-        evaluated_date = evaluated_at.astimezone(self.new_york).date()
-        candidates = [
-            expiry_date
-            for expiry_date in expiry_dates
-            if strategy.min_dte <= (expiry_date - evaluated_date).days <= strategy.max_dte
-        ]
-        if not candidates:
-            return None
-        return min(candidates, key=lambda expiry_date: (expiry_date - evaluated_date).days)
+        return shared_select_nearest_expiration(
+            expiry_dates,
+            evaluated_at,
+            min_dte=strategy.min_dte,
+            max_dte=strategy.max_dte,
+            market_timezone=self.new_york,
+        )
 
     def _select_roll_expiration(
         self,
@@ -1958,7 +2031,7 @@ class CoveredCallStrategyService:
     ) -> CoveredCallPreviewResult:
         evaluated_at = self._reference_time(as_of)
         self._ensure_account(external_account_id)
-        account_snapshot = self._get_latest_account_snapshot(external_account_id)
+        account_snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         position = self._select_position(account_snapshot, symbol=symbol)
         normalized_symbol = self._normalize_symbol(symbol)
         if position is None:
@@ -2092,18 +2165,18 @@ class CoveredCallStrategyService:
         mode: ExecutionMode,
     ) -> OptionMarketSnapshot | None:
         strategy = self.settings.covered_call_strategy
-        min_strike = underlying_price * (Decimal("1") + strategy.min_otm_pct)
-        max_strike = underlying_price * (Decimal("1") + strategy.max_otm_pct)
+        rules = CoveredCallRules.from_settings(strategy)
         prelim = [
             quote
             for quote in quotes
-            if quote.right == OptionRight.CALL
-            and min_strike <= quote.strike <= max_strike
-            and quote.delta is not None
-            and strategy.delta_min <= quote.delta <= strategy.delta_max
-            and (quote.open_interest or 0) >= strategy.min_open_interest
-            and quote.volume >= strategy.min_volume
-            and self._is_option_quote_fresh(quote, evaluated_at=evaluated_at)
+            if is_covered_call_quote_candidate(
+                quote,
+                underlying_price=underlying_price,
+                expiration=quote.expiration_date,
+                evaluated_at=evaluated_at,
+                rules=rules,
+                check_liquidity=False,
+            )
         ]
         ranked = sorted(
             prelim,
@@ -2257,7 +2330,7 @@ class CoveredCallStrategyService:
         if not self._passes_liquidity_filter(quote):
             raise ValueError("Selected covered call no longer passes the execution liquidity filter.")
 
-        snapshot = self._get_latest_account_snapshot(external_account_id)
+        snapshot = self._get_latest_account_snapshot(external_account_id, mode=mode)
         position = next(
             (
                 item
@@ -2289,10 +2362,11 @@ class CoveredCallStrategyService:
             if evaluated_at.tzinfo is not None
             else evaluated_at.replace(tzinfo=timezone.utc)
         )
-        age_seconds = (
-            reference_time.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
-        ).total_seconds()
-        return -300 <= age_seconds <= self.settings.covered_call_strategy.trade_authorization_max_quote_age_seconds
+        return shared_is_timestamp_fresh(
+            quote_time,
+            evaluated_at=reference_time,
+            max_age_seconds=self.settings.covered_call_strategy.trade_authorization_max_quote_age_seconds,
+        )
 
     def _covered_call_order_request(
         self,
@@ -2418,14 +2492,12 @@ class CoveredCallStrategyService:
 
     def _passes_liquidity_filter(self, quote: OptionMarketSnapshot) -> bool:
         strategy = self.settings.covered_call_strategy
-        if quote.bid is None or quote.ask is None:
+        if quote.bid is None or quote.bid < strategy.min_bid:
             return False
-        if quote.bid < strategy.min_bid or quote.ask <= quote.bid:
-            return False
-        mid = self._quote_mid(quote)
-        if mid <= Decimal("0"):
-            return False
-        return ((quote.ask - quote.bid) / mid) <= strategy.max_bid_ask_spread_pct
+        return shared_passes_top_of_book(
+            quote,
+            max_bid_ask_spread_pct=strategy.max_bid_ask_spread_pct,
+        )
 
     def _is_option_quote_fresh(
         self,
@@ -2433,15 +2505,11 @@ class CoveredCallStrategyService:
         *,
         evaluated_at: datetime,
     ) -> bool:
-        quote_time = quote.timestamp
-        if quote_time.tzinfo is None:
-            quote_time = quote_time.replace(tzinfo=timezone.utc)
-        age_seconds = (
-            evaluated_at.astimezone(timezone.utc) - quote_time.astimezone(timezone.utc)
-        ).total_seconds()
-        if age_seconds < -300:
-            return False
-        return age_seconds <= self.settings.covered_call_strategy.max_option_quote_age_seconds
+        return shared_is_timestamp_fresh(
+            quote.timestamp,
+            evaluated_at=evaluated_at,
+            max_age_seconds=self.settings.covered_call_strategy.max_option_quote_age_seconds,
+        )
 
     def _proposal_rationale(self, preview: CoveredCallPreviewResult) -> str:
         candidate = preview.candidate

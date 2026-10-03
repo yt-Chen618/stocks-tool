@@ -1,6 +1,6 @@
 # API Route Inventory
 
-Last updated: 2026-10-02
+Last updated: 2026-10-04
 
 This inventory groups public routes by bounded context. Paths are part of the compatibility surface for the dashboard and regression scripts.
 
@@ -9,14 +9,50 @@ This inventory groups public routes by bounded context. Paths are part of the co
 - `GET /`
 - `GET /app`
 - `GET /health`
+- `GET /health/live`
+- `GET /health/ready`
 - `GET /docs`
 
+## Portfolio and Offline Backtests
+
+- `GET /portfolio/analytics`
+- `GET /portfolio/risk`
+- `GET|POST /backtests/datasets`
+- `GET /backtests/datasets/{dataset_id}`
+- `POST /backtests/datasets/{dataset_id}/validate`
+- `GET|POST /backtests`
+- `GET /backtests/{run_id}`
+- `POST /backtests/{run_id}/start`
+- `POST /backtests/{run_id}/cancel`
+- `POST /backtests/compare`
+
+Portfolio reads default to paper mode. Analytics accept `start`, `end` and bounded
+`max_points`; risk currently describes current persisted exposures, and rejects
+historical `as_of` requests rather than combining historical balances with current
+strategy state. Unknown currencies, cash flows, fees and Greeks are explicit gaps.
+
+Backtests operate on registered local datasets and separate run/result tables.
+They have no broker execution mode or implicit account holdings. Formal runs
+covering the holdout period require a frozen validation reference. Dataset
+registration and a queued job are not evidence of a successful simulation.
+
 ## Research and Plans
+
+New screen/case/timeline reads return bounded cursor envelopes, with `limit`
+at most 100. Timeline ranges are at most 366 days. Capturing a case is an
+explicit server read of the selected symbol and configuration; subsequent GETs
+read the immutable saved evidence and do not call a provider.
 
 - `POST /research/rank`
 - `GET /research/universe`
 - `GET /research/technicals`
 - `GET /research/symbols/{symbol}/history`
+- `GET|POST /research/screens`
+- `GET|PATCH /research/screens/{screen_id}`
+- `POST /research/screens/{screen_id}/copy`
+- `GET|POST /research/cases`
+- `GET /research/cases/{case_id}`
+- `GET /research/timeline`
 - `POST /plans/draft`
 - `POST /plans/validate`
 
