@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from stocks_tool.db.models import BrokerAccountRecord, SchedulerJobRunRecord, SchedulerTaskStateRecord
@@ -78,14 +79,60 @@ class SQLAlchemySchedulerJobRunRepository(SchedulerJobRunRepository, SchedulerTa
         lease_expires_at: datetime,
         now: datetime,
     ) -> SchedulerTaskState:
-        record = self._get_state_record(external_account_id=external_account_id, job_key=job_key, for_update=True)
-        if record is None:
-            record = SchedulerTaskStateRecord(
-                broker_account_id=self._resolve_broker_account_id(self.session, external_account_id),
+        try:
+            record = self._get_state_record(
                 external_account_id=external_account_id,
                 job_key=job_key,
+                for_update=True,
             )
-            self.session.add(record)
+            if record is None:
+                record = SchedulerTaskStateRecord(
+                    broker_account_id=self._resolve_broker_account_id(self.session, external_account_id),
+                    external_account_id=external_account_id,
+                    job_key=job_key,
+                )
+                self.session.add(record)
+            try:
+                return self._commit_lease_attempt(
+                    record,
+                    job_label=job_label,
+                    lease_owner=lease_owner,
+                    lease_expires_at=lease_expires_at,
+                    now=now,
+                )
+            except IntegrityError:
+                # A concurrent scheduler may have inserted the missing state
+                # row after the initial SELECT ... FOR UPDATE. Roll back the
+                # failed insert, wait for the committed row, and evaluate the
+                # lease again.
+                self.session.rollback()
+                record = self._get_state_record(
+                    external_account_id=external_account_id,
+                    job_key=job_key,
+                    for_update=True,
+                )
+                if record is None:
+                    raise
+                return self._commit_lease_attempt(
+                    record,
+                    job_label=job_label,
+                    lease_owner=lease_owner,
+                    lease_expires_at=lease_expires_at,
+                    now=now,
+                )
+        except Exception:
+            self.session.rollback()
+            raise
+
+    def _commit_lease_attempt(
+        self,
+        record: SchedulerTaskStateRecord,
+        *,
+        job_label: str | None,
+        lease_owner: str,
+        lease_expires_at: datetime,
+        now: datetime,
+    ) -> SchedulerTaskState:
         if (
             record.lease_owner
             and record.lease_owner != lease_owner

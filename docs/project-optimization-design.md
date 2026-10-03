@@ -1,6 +1,47 @@
 # Full Project Optimization Design
 
-Last updated: 2026-06-15
+Last updated: 2026-10-02
+
+Historical design and acceptance record for the four-batch baseline `c163995`. Subsequent implementation is tracked in `project-wide-optimization-campaign.md`; current interfaces and operations are documented in `architecture.md`, `api-route-inventory.md`, and `runtime-operations.md`. Test counts and statements about pending remote CI below describe that earlier checkpoint.
+
+## Four-Batch Implementation — Completed 2026-10-02
+
+Baseline: commit `3f708ef`, 509 Python tests, 22 P0 gate checks, 18 mock browser scenarios, Alembic `20261002_0017`.
+
+The user has authorized implementation of all four batches below. Earlier phase/backlog sections in this document describe the historical design and are not a list of still-unimplemented work. The current scope keeps FastAPI, SQLAlchemy, the native browser UI, public route contracts, persisted records, paper guards, and the Zero-DTE execution lock. Mainland broker access and regional buy-side restrictions are explicitly deferred by the user; external-market checks remain separate evidence and cannot be marked passed without a successful run.
+
+| Batch | Required deliverables | Completion evidence |
+| --- | --- | --- |
+| 1. Reproducible validation | Supported Python version and complete dependency lock; pinned PostgreSQL and project-local Playwright/browser versions; read-only environment preflight; CI and documented clean-checkout entry point | Install into a fresh environment using committed declarations; run migrations, all Python/JS checks, temporary PostgreSQL concurrency/rollback proof and all browser scenarios without real broker credentials; report actual tool/runtime versions and actionable missing-dependency errors |
+| 2. Complete, bounded reads | Exact account/mode/status/entity lifecycle queries replacing decision-making over fixed recent-history caps; database-filtered active spreads; stable paged order/execution/journal reads with detail access; bounded dashboard consumption | Active records remain discoverable beyond 100/500 historical records; tied timestamps, page boundaries and account isolation have no duplicates/omissions; 10,000/100,000-row fixtures verify bounded materialization and inspect query plans; reconciliation and audit retain complete-history semantics |
+| 3. Clear module responsibilities | Extract Bull Put pre-open research with explicit dependencies while preserving the facade; extract account loading, Advisor interaction and order views from `app.js` | Unchanged public URLs/payloads, partial/fallback/unavailable semantics and transaction boundaries; deterministic pre-open fixtures; browser confirmation, idempotency, unknown-state, mobile and paging behavior pass after extraction |
+| 4. Recovery explanations and interaction resilience | Operations view of unresolved parent/child intents, reconciliation count, coverage, blocking reasons and next actions; SDK quarantine observation without connection side effects; race/partial-failure UI tests | Local states map to understandable guidance; read endpoints do not initialize broker contexts or mutate accounts; stale async responses cannot replace the selected account/symbol; partial failures preserve healthy panels and never relax mutation guards |
+
+Implementation was delivered in small, reviewable commits. Backend read contracts may land before their bounded UI consumers, but batch 2 is not complete until the consumers and large-history checks are verified. Operations UI mounting follows the dashboard extraction so no intermediate commit references missing modules. Root integration owns the final completion audit; test counts alone do not substitute for the requirements above.
+
+## Completion Evidence
+
+All four batches passed the independent clean-checkout gate. The local requirement audit is `artifacts/four-batch-20261002/completion-audit.json`.
+
+| Requirement | Verified result |
+| --- | --- |
+| Reproducible environment | Fresh checkout without `.env`; locked install, direct package import, project Chromium, PostgreSQL digest, and Alembic `20261002_0018` passed strict preflight. Python 3.12.1, Node 24.15.0, uv 0.12.22, Playwright 1.63.0, Chromium 153.0.8010.12, PostgreSQL 16.14. |
+| Complete lifecycle reads | Old active proposals beyond 150 records, related runs beyond 520, and unresolved submits among 620 intents remain discoverable. Account and paper/live boundaries are tested through real repositories. |
+| Bounded history pages | 10,000/100,000 PostgreSQL rows per table; first and deep pages materialize 50 rows. A cursor after 80,001 account rows seeks through the composite index and examines 51 keys. |
+| Persisted-data integrity | Pre-migration dump restored into an isolated database; sorted full-row hashes match for all 24 business tables after additive migration `0018`. |
+| Module extraction | Existing pre-open facade/contracts preserved; pure-input research tests and deterministic open/close/review/journal flow pass. Account, Advisor and order views retain safety and paging behavior. |
+| Recovery and async UI | Real DOM verifies parent-only blockers, truncation, coverage/count/time evidence, quarantine, clear-to-error transitions, late account/page responses, language changes and mobile layout; zero broker mutations. |
+| Aggregate safety gate | Final clean checkout: 550 Python tests, 27 P0 children, 18 posture scenarios plus recovery DOM gate. No `.env` or external provider credentials were required. |
+
+The bounded-history claim applies to orders, executions and journals. Legacy complete-list routes, including the Bull Put history view, are preserved intentionally. Active-spread filtering reduces research inputs but is not a global dashboard payload cap. The CI workflow is saved and locally validated; a remote CI run and real-market refresh remain separate, unverified evidence. The user has deferred `.cn` access and mainland buying restrictions.
+
+## Recommended Follow-Up Slices
+
+1. Add an opt-in paged Bull Put history view using the proven keyset pattern, while retaining active positions and explicit old-spread detail access. Verify closed-result visibility and large-history plans before replacing the UI consumer.
+2. Extract Bull Put entry/close orchestration behind the existing facade in one independently verified slice at a time. Keep parent/child intent ownership, unknown outcomes, rollback, and lease gates unchanged.
+3. Run the committed CI workflow on the hosting platform and record its actual result. Consider further query or UI work only from measured latency and operator friction. External broker validation remains deferred; it is not a prerequisite for these local improvements.
+
+The sections below preserve the historical design baseline and should not be interpreted as an uncompleted implementation checklist.
 
 ## Purpose
 
@@ -8,7 +49,7 @@ This document is the project-wide optimization design for `stocks-tool`. It is b
 
 The goal is to keep the current modular monolith, make the safety-critical strategy loop easier to reason about, and reduce future feature work from large cross-file edits to smaller bounded changes.
 
-## Current Inventory
+## Historical Design Inventory
 
 The important current surfaces are:
 

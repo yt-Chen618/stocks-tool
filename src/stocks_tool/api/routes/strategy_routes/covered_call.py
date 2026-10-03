@@ -289,12 +289,14 @@ def close_covered_call_proposal(
 @router.get("/covered-call/activity", response_model=CoveredCallActivitySnapshot)
 def get_covered_call_activity(
     external_account_id: str | None = Query(default=None, description="Optional broker account id filter, e.g. LBPT10087357"),
+    mode: ExecutionMode | None = Query(default=None),
     limit: int = Query(default=12, ge=1, le=100),
     service: StrategyExperimentService = Depends(get_strategy_experiment_service),
 ) -> CoveredCallActivitySnapshot:
     try:
         return service.get_covered_call_activity(
             external_account_id=external_account_id,
+            mode=mode,
             limit=limit,
         )
     except LookupError as exc:
@@ -304,13 +306,21 @@ def get_covered_call_activity(
 @router.post("/covered-call/lifecycle/{external_account_id}/reconcile")
 def reconcile_covered_call_lifecycle(
     external_account_id: str,
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        deprecated=True,
+        description="Deprecated compatibility parameter; lifecycle evidence reads are complete and ignore this history cap.",
+    ),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
     service: CoveredCallStrategyService = Depends(get_covered_call_strategy_service),
 ) -> dict[str, int]:
+    _ = limit  # Kept only for backward-compatible clients; the old history cap is retired.
     try:
         return service.reconcile_pending_lifecycle(
             external_account_id=external_account_id,
-            limit=limit,
+            mode=mode,
         )
     except TradingIntentError as exc:
         _raise_strategy_intent_http_error(exc)

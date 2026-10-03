@@ -5,6 +5,9 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, call
 
+import pytest
+from sqlalchemy.exc import OperationalError
+
 import stocks_tool.application.services.reconciliation as reconciliation_module
 from stocks_tool.adapters.brokers.longbridge import LongbridgeIntegrationError
 from stocks_tool.application.services.longbridge_integration import (
@@ -136,6 +139,23 @@ class FakeSchedulerTaskStateRepository:
         return state
 
 
+class FakeSchedulerRepository(FakeSchedulerJobRunRepository, FakeSchedulerTaskStateRepository):
+    def __init__(self) -> None:
+        FakeSchedulerJobRunRepository.__init__(self)
+        FakeSchedulerTaskStateRepository.__init__(self)
+
+
+@pytest.fixture(autouse=True)
+def patch_scheduler_repository(monkeypatch):
+    repository = FakeSchedulerRepository()
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemySchedulerJobRunRepository",
+        lambda session: repository,
+    )
+    return repository
+
+
 def build_broker_account() -> BrokerAccount:
     now = datetime(2026, 5, 22, 9, 30, tzinfo=timezone.utc)
     return BrokerAccount(
@@ -240,7 +260,7 @@ def test_sync_blocked_spread_emits_risk_alert_without_monitoring_or_orders() -> 
     coordinator._strategy_audit_events = audit_events
     spreads = Mock()
     active = build_open_spread(last_synced_at=None)
-    spreads.list_spreads.side_effect = lambda *, external_account_id, status: (
+    spreads.list_spreads.side_effect = lambda *, external_account_id, status, **kwargs: (
         [active] if status == SpreadStatus.OPEN else []
     )
 
@@ -430,6 +450,245 @@ def test_reconciliation_coordinator_skips_when_scheduler_task_lease_is_active() 
     assert run.detail == "Skipped because scheduler task lease is active."
 
 
+def test_reconciliation_coordinator_fails_closed_when_lease_acquisition_fails() -> None:
+    class BrokenSchedulerTaskStateRepository:
+        def try_acquire_lease(self, **kwargs):
+            raise RuntimeError("scheduler state database unavailable")
+
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    task_states = BrokenSchedulerTaskStateRepository()
+    coordinator._scheduler_task_states = task_states
+    callback = Mock()
+
+    result = coordinator._run_account_task(
+        external_account_id="LBPT10087357",
+        task_key="orders-sync",
+        task_label="order reconciliation",
+        now=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+        callback=callback,
+    )
+
+    assert result is False
+    callback.assert_not_called()
+    assert len(scheduler_runs.runs) == 1
+    assert scheduler_runs.runs[0].status == SchedulerJobRunStatus.SKIPPED
+    assert scheduler_runs.runs[0].detail == (
+        "Skipped because scheduler task lease could not be acquired."
+    )
+    assert scheduler_runs.runs[0].raw_payload == {"lease_status": "unavailable"}
+
+
+def test_reconciliation_coordinator_records_spread_read_failure_and_releases_lease() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    task_states = FakeSchedulerTaskStateRepository()
+    spreads = Mock()
+    spreads.list_spreads.side_effect = RuntimeError("spread read unavailable")
+    strategy_service = Mock()
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    coordinator._scheduler_task_states = task_states
+
+    ready = coordinator._monitor_due_spreads(
+        external_account_id="LBPT10087357",
+        spreads=spreads,
+        strategy_service=strategy_service,
+        now=datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc),
+    )
+
+    assert ready is False
+    strategy_service.monitor_spread.assert_not_called()
+    state = task_states.states[("LBPT10087357", "bull-put-monitor")]
+    assert state.lease_owner is None
+    assert len(scheduler_runs.runs) == 1
+    assert scheduler_runs.runs[0].status == SchedulerJobRunStatus.FAILED
+    assert scheduler_runs.runs[0].detail == (
+        "Failed to load bull put spreads for status open."
+    )
+
+
+def test_reconciliation_coordinator_backs_off_transient_spread_read_failure() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    task_states = FakeSchedulerTaskStateRepository()
+    spreads = Mock()
+    spreads.list_spreads.side_effect = OperationalError(
+        "SELECT spreads",
+        {},
+        RuntimeError("database connection reset"),
+    )
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    coordinator._scheduler_task_states = task_states
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+
+    ready = coordinator._monitor_due_spreads(
+        external_account_id="LBPT10087357",
+        spreads=spreads,
+        strategy_service=Mock(),
+        now=now,
+    )
+
+    assert ready is False
+    assert scheduler_runs.runs[0].status == SchedulerJobRunStatus.BACKOFF
+    assert scheduler_runs.runs[0].backoff_seconds is not None
+    assert scheduler_runs.runs[0].next_attempt_at is not None
+    assert task_states.states[("LBPT10087357", "bull-put-monitor")].lease_owner is None
+
+
+def test_reconciliation_coordinator_active_monitor_lease_blocks_new_entry_readiness() -> None:
+    scheduler_runs = FakeSchedulerJobRunRepository()
+    task_states = FakeSchedulerTaskStateRepository()
+    now = datetime(2026, 6, 15, 14, 30, tzinfo=timezone.utc)
+    task_states.states[("LBPT10087357", "bull-put-monitor")] = SchedulerTaskState(
+        external_account_id="LBPT10087357",
+        job_key="bull-put-monitor",
+        job_label="bull put monitor",
+        lease_owner="other-worker",
+        lease_acquired_at=now,
+        lease_expires_at=datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=MagicMock(),
+        longbridge_adapter=Mock(),
+    )
+    coordinator._scheduler_job_runs = scheduler_runs
+    coordinator._scheduler_task_states = task_states
+    strategy_service = Mock()
+
+    ready = coordinator._monitor_due_spreads(
+        external_account_id="LBPT10087357",
+        spreads=Mock(),
+        strategy_service=strategy_service,
+        now=now,
+    )
+
+    assert ready is False
+    strategy_service.monitor_spread.assert_not_called()
+    assert scheduler_runs.runs[0].status == SchedulerJobRunStatus.SKIPPED
+    assert scheduler_runs.runs[0].detail == "Skipped because scheduler task lease is active."
+    assert task_states.states[("LBPT10087357", "bull-put-monitor")].lease_owner == "other-worker"
+
+
+def test_reconciliation_coordinator_blocks_new_entry_after_spread_read_failure(monkeypatch) -> None:
+    session_factory = MagicMock()
+    session_factory.return_value.__enter__.return_value = object()
+    session_factory.return_value.__exit__.return_value = False
+
+    broker_account = build_broker_account().model_copy(
+        update={
+            "account_last_sync_attempt_at": None,
+            "orders_last_sync_attempt_at": None,
+        }
+    )
+    broker_accounts = Mock()
+    broker_accounts.list_broker_accounts.return_value = [broker_account]
+    account_service = Mock()
+    account_service.sync_account.return_value = SimpleNamespace()
+    orders = Mock()
+    orders.has_working_orders.return_value = False
+    order_service = Mock()
+    order_service.reconcile_unresolved_intents.return_value = SimpleNamespace()
+    order_service.sync_today_orders.return_value = SimpleNamespace()
+    order_service.has_unresolved_intents.return_value = False
+    spreads = Mock()
+    spreads.list_spreads.side_effect = RuntimeError("spread read unavailable")
+    strategy_service = Mock()
+
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBrokerAccountRepository",
+        lambda session: broker_accounts,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyAccountSnapshotRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyOrderRepository",
+        lambda session: orders,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyExecutionRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyTradePlanRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyBullPutSpreadRepository",
+        lambda session: spreads,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyPreOpenAssessmentRunRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyMarketEventRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "SQLAlchemyStrategyExperimentRepository",
+        lambda session: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "BullPutStrategyService",
+        lambda **kwargs: strategy_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "CoveredCallStrategyService",
+        lambda **kwargs: Mock(),
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "LongbridgeIntegrationService",
+        lambda **kwargs: account_service,
+    )
+    monkeypatch.setattr(
+        reconciliation_module,
+        "OrderService",
+        lambda **kwargs: order_service,
+    )
+
+    coordinator = ReconciliationCoordinator(
+        settings=Settings(),
+        session_factory=session_factory,
+        longbridge_adapter=Mock(),
+    )
+
+    coordinator.run_once()
+
+    strategy_service.monitor_spread.assert_not_called()
+    strategy_service.run_entry_scan.assert_not_called()
+    runs = coordinator._scheduler_job_runs.runs
+    monitor_runs = [run for run in runs if run.job_key == "bull-put-monitor"]
+    assert monitor_runs[-1].status == SchedulerJobRunStatus.FAILED
+
+
 def patch_covered_call_reconciliation_dependencies(
     monkeypatch,
     *,
@@ -610,6 +869,42 @@ def test_sync_today_orders_marks_syncing_then_success() -> None:
     assert isinstance(execution_arg, Execution)
     assert execution_arg.quantity == 1
     assert execution_arg.price == Decimal("320.75")
+
+
+def test_sync_today_orders_imports_option_contract_metadata_from_symbol() -> None:
+    broker_accounts = Mock()
+    trade_plans = Mock()
+    orders = Mock()
+    executions = Mock()
+    adapter = Mock()
+    broker_account = build_broker_account()
+    remote_order = build_remote_order().model_copy(update={"symbol": "UNH260717C430000.US"})
+    broker_accounts.get_by_external_account_id.return_value = broker_account
+    adapter.list_today_orders.return_value = [remote_order]
+    orders.get_by_external_order_id.return_value = None
+    orders.create_order.side_effect = lambda order: order
+    executions.get_by_external_execution_id.return_value = None
+    service = OrderService(
+        settings=Settings(),
+        broker_accounts=broker_accounts,
+        trade_plans=trade_plans,
+        orders=orders,
+        executions=executions,
+        longbridge_adapter=adapter,
+    )
+
+    service.sync_today_orders(
+        external_account_id=broker_account.external_account_id,
+        mode=ExecutionMode.PAPER,
+    )
+
+    imported = orders.create_order.call_args.args[0]
+    assert imported.asset_type == AssetType.OPTION
+    assert imported.option_contract is not None
+    assert imported.option_contract.underlying_symbol == "UNH.US"
+    assert imported.option_contract.expiration_date.isoformat() == "2026-07-17"
+    assert imported.option_contract.strike == Decimal("430")
+    assert imported.option_contract.right.value == "call"
 
 
 def test_sync_today_orders_marks_error_on_failure() -> None:
@@ -1125,8 +1420,14 @@ def test_reconciliation_coordinator_runs_covered_call_proposal_scan_when_enabled
     experiments.list_proposals.assert_any_call(
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
-        status=StrategyProposalStatus.PENDING,
-        limit=100,
+        statuses=(
+            StrategyProposalStatus.PENDING,
+            StrategyProposalStatus.APPROVED,
+            StrategyProposalStatus.EXECUTED,
+        ),
+        mode=ExecutionMode.PAPER,
+        proposed_actions={"sell_covered_call", "roll_covered_call"},
+        limit=None,
     )
 
 
@@ -1227,7 +1528,9 @@ def test_reconciliation_coordinator_monitors_executed_covered_calls_when_enabled
         external_account_id="LBPT10087357",
         strategy_id="covered_call_v1",
         status=StrategyProposalStatus.EXECUTED,
-        limit=100,
+        mode=ExecutionMode.PAPER,
+        proposed_actions={"sell_covered_call", "roll_covered_call"},
+        limit=None,
     )
 
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 from fastapi.staticfiles import StaticFiles
 
 from mock_dashboard_fixtures import (
@@ -19,6 +19,9 @@ from mock_dashboard_fixtures import (
     build_mock_configuration,
     build_mock_paper_mandate,
     build_mock_quote,
+    build_mock_research_history,
+    build_mock_research_technicals,
+    build_mock_research_universe,
     build_mock_watchlists,
     format_price,
     iso_now,
@@ -64,6 +67,8 @@ class MockDashboardState:
         self._order_counter = 1000
         self._journal_counter = 2000
         self._spread_counter = 3000
+        self._watchlist_counter = 1
+        self._watchlist_item_counter = 2
         self._market_events_request_count = 0
         self._orders_request_count = 0
         self._broker_accounts_request_count = 0
@@ -682,6 +687,32 @@ class MockDashboardState:
                 "updated_at": "2026-05-21T02:14:54Z",
             }
         ]
+        self.closed_spreads = []
+        for index in range(1, 27):
+            closed_spread = deepcopy(self.spreads[0])
+            closed_spread.update(
+                {
+                    "id": f"mock-spread-closed-{index:04d}",
+                    "status": "closed",
+                    "exit_reason": "take_profit",
+                    "long_exit_order_id": f"mock-order-closed-long-{index:04d}",
+                    "short_exit_order_id": f"mock-order-closed-short-{index:04d}",
+                    "closed_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                    "last_synced_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                    "updated_at": f"2026-05-{19 - min(index - 1, 9):02d}T18:12:00Z",
+                }
+            )
+            closed_payload = dict(closed_spread.get("raw_payload") or {})
+            closed_payload["monitor"] = {
+                **dict(closed_payload.get("monitor") or {}),
+                "should_close": True,
+                "exit_reason": "take_profit",
+                "estimated_exit_debit": "0.4500",
+                "estimated_pnl": "85.0000",
+                "evaluated_at": closed_spread["closed_at"],
+            }
+            closed_spread["raw_payload"] = closed_payload
+            self.closed_spreads.append(closed_spread)
         self.runtime = {
             "id": "mock-runtime-0001",
             "strategy_id": "paper_bull_put_v1",
@@ -1040,6 +1071,108 @@ class MockDashboardState:
             "fail_count": fail_count,
             "repair_available_count": len([check for check in filtered if check.get("repair_available")]),
             "checks": deepcopy(filtered),
+        }
+
+    def recovery_status_snapshot(self, *, external_account_id: str, mode: str = "paper") -> dict[str, Any]:
+        if external_account_id != self.account_id or mode != "paper":
+            raise KeyError(external_account_id)
+        generated_at = iso_now()
+        if self.scenario != "unknown-intent" or not self._unknown_intent_created:
+            return {
+                "generated_at": generated_at,
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "status": "clear",
+                "recovery_blocked": False,
+                "unresolved_count": 0,
+                "displayed_unresolved_count": 0,
+                "unknown_count": 0,
+                "displayed_unknown_count": 0,
+                "unresolved_parent_count": 0,
+                "displayed_parent_count": 0,
+                "unknown_parent_count": 0,
+                "displayed_unknown_parent_count": 0,
+                "truncated": False,
+                "primary_blocker": None,
+                "next_action": "No recovery action is required.",
+                "parents": [],
+                "intents": [],
+                "sdk_quarantine": {
+                    "available": True,
+                    "pending_count": 0,
+                    "oldest_started_at": None,
+                    "oldest_duration_seconds": None,
+                    "next_action": None,
+                },
+            }
+        return {
+            "generated_at": generated_at,
+            "external_account_id": external_account_id,
+            "mode": "paper",
+            "status": "blocked",
+            "recovery_blocked": True,
+            "unresolved_count": 1,
+            "displayed_unresolved_count": 1,
+            "unknown_count": 1,
+            "displayed_unknown_count": 1,
+            "unresolved_parent_count": 1,
+            "displayed_parent_count": 1,
+            "unknown_parent_count": 1,
+            "displayed_unknown_parent_count": 1,
+            "truncated": False,
+            "primary_blocker": "order_outcome_unknown",
+            "next_action": "Review the parent trade action and wait for reconciliation.",
+            "parents": [{
+                "id": "mock-unknown-action-1",
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "action": "order_submit",
+                "strategy_id": "paper_bull_put_v1",
+                "entity_id": "mock-unknown-intent-1",
+                "state": "unknown",
+                "child_count": 1,
+                "unresolved_child_count": 1,
+                "evidence_ready_child_count": 0,
+                "children_truncated": False,
+                "reason_code": "order_outcome_unknown",
+                "next_action": "Review the parent trade action and wait for reconciliation.",
+            }],
+            "intents": [{
+                "id": "mock-unknown-intent-1",
+                "trade_action_intent_id": "mock-unknown-action-1",
+                "external_account_id": external_account_id,
+                "mode": "paper",
+                "operation": "submit",
+                "action": "order_submit",
+                "strategy_id": "paper_bull_put_v1",
+                "entity_id": "mock-unknown-intent-1",
+                "leg": "entry",
+                "state": "unknown",
+                "external_order_id": None,
+                "target_order_id": None,
+                "parent_action": "order_submit",
+                "parent_state": "unknown",
+                "created_at": generated_at,
+                "updated_at": generated_at,
+                "reconciliation_attempts": 0,
+                "first_reconciled_at": None,
+                "last_reconciled_at": None,
+                "coverage_start_at": None,
+                "coverage_end_at": None,
+                "coverage_covers_intent": False,
+                "checks_satisfied": False,
+                "check_span_seconds": None,
+                "reason_code": "order_outcome_unknown",
+                "reason_detail": "Mock broker response timed out.",
+                "next_action": "Review the parent trade action and wait for reconciliation.",
+            }],
+            "sdk_quarantine": {
+                "available": True,
+                "pending_count": 0,
+                "oldest_started_at": None,
+                "oldest_duration_seconds": None,
+                "next_action": None,
+            },
         }
 
     def operator_status_snapshot(self) -> dict[str, Any]:
@@ -1439,6 +1572,20 @@ class MockDashboardState:
             rows = [row for row in rows if row["order_id"] == order_id]
         return deepcopy(rows)
 
+    def list_executions_page(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_executions(external_account_id=external_account_id, order_id=order_id),
+            limit=limit,
+            cursor=cursor,
+        )
+
     def list_journals(
         self,
         external_account_id: str | None = None,
@@ -1456,6 +1603,27 @@ class MockDashboardState:
         if entry_type is not None:
             rows = [row for row in rows if row["entry_type"] == entry_type]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def list_journals_page(
+        self,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_journals(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                trade_plan_id=trade_plan_id,
+                entry_type=entry_type,
+            ),
+            limit=limit,
+            cursor=cursor,
+        )
 
     def create_journal(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._journal_counter += 1
@@ -1500,10 +1668,20 @@ class MockDashboardState:
         runs = self.list_strategy_runs(external_account_id, "covered_call_v1", limit=limit)
         signals = self.list_strategy_signals(external_account_id, "covered_call_v1", limit=limit)
         reviews = self.list_strategy_reviews(external_account_id, "covered_call_v1", limit=limit)
+        all_proposals = [
+            row for row in self.strategy_proposals
+            if (external_account_id is None or row.get("external_account_id") == external_account_id)
+            and row.get("strategy_id") == "covered_call_v1"
+        ]
+        all_runs = [
+            row for row in self.strategy_runs
+            if (external_account_id is None or row.get("external_account_id") == external_account_id)
+            and row.get("strategy_id") == "covered_call_v1"
+        ]
         active_statuses = {"pending", "approved"}
         activity_times = [
-            *(row["updated_at"] for row in proposals if row.get("updated_at")),
-            *(row["created_at"] for row in runs if row.get("created_at")),
+            *(row["updated_at"] for row in all_proposals if row.get("updated_at")),
+            *(row["created_at"] for row in all_runs if row.get("created_at")),
             *(row["emitted_at"] for row in signals if row.get("emitted_at")),
             *(row["reviewed_at"] for row in reviews if row.get("reviewed_at")),
         ]
@@ -1511,19 +1689,19 @@ class MockDashboardState:
             "external_account_id": external_account_id,
             "summary": {
                 "external_account_id": external_account_id,
-                "total_proposals": len(proposals),
-                "active_proposals": sum(1 for row in proposals if row["status"] in active_statuses),
+                "total_proposals": len(all_proposals),
+                "active_proposals": sum(1 for row in all_proposals if row["status"] in active_statuses),
                 "executed_positions": sum(
                     1
-                    for row in proposals
+                    for row in all_proposals
                     if row["proposed_action"] == "sell_covered_call" and row["status"] == "executed"
                 ),
                 "pending_rolls": sum(
                     1
-                    for row in proposals
+                    for row in all_proposals
                     if row["proposed_action"] == "roll_covered_call" and row["status"] in active_statuses
                 ),
-                "close_runs": sum(1 for row in runs if row["run_type"] == "proposal_close"),
+                "close_runs": sum(1 for row in all_runs if row["run_type"] == "proposal_close"),
                 "latest_activity_at": max(activity_times) if activity_times else None,
             },
             "proposals": proposals,
@@ -1599,13 +1777,79 @@ class MockDashboardState:
         self,
         external_account_id: str | None = None,
         status: str | None = None,
+        mode: str | None = None,
+        symbol: str | None = None,
+        statuses: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         rows = self.spreads
         if external_account_id is not None:
             rows = [row for row in rows if row["external_account_id"] == external_account_id]
         if status is not None:
             rows = [row for row in rows if row["status"] == status]
+        if mode is not None:
+            rows = [row for row in rows if row.get("mode", "paper") == mode]
+        if symbol is not None:
+            rows = [row for row in rows if row.get("underlying_symbol") == symbol.upper()]
+        if statuses is not None:
+            rows = [row for row in rows if row["status"] in statuses]
         return deepcopy(sorted(rows, key=lambda item: item["updated_at"], reverse=True))
+
+    def list_spreads_page(
+        self,
+        external_account_id: str,
+        *,
+        mode: str = "paper",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        rows = self.list_spreads(external_account_id=external_account_id, mode=mode)
+        rows.extend(
+            deepcopy(
+                [
+                    spread
+                    for spread in self.closed_spreads
+                    if spread.get("external_account_id") == external_account_id
+                    and spread.get("mode", "paper") == mode
+                ]
+            )
+        )
+        rows.sort(key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
+        return self._page_rows(rows, limit=limit, cursor=cursor)
+
+    @staticmethod
+    def _page_rows(
+        rows: list[dict[str, Any]],
+        *,
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        offset = 0
+        if cursor:
+            try:
+                offset = int(cursor)
+            except ValueError as exc:
+                raise ValueError("Invalid pagination cursor.") from exc
+        page = rows[offset : offset + limit]
+        next_offset = offset + len(page)
+        return {
+            "items": deepcopy(page),
+            "next_cursor": str(next_offset) if next_offset < len(rows) else None,
+            "has_more": next_offset < len(rows),
+            "limit": limit,
+        }
+
+    def list_orders_page(
+        self,
+        external_account_id: str | None = None,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        return self._page_rows(
+            self.list_orders(external_account_id),
+            limit=limit,
+            cursor=cursor,
+        )
 
     def recover_close_eligibility(
         self,
@@ -2148,7 +2392,7 @@ class MockDashboardState:
         }
 
     def get_spread(self, spread_id: str) -> dict[str, Any]:
-        for spread in self.spreads:
+        for spread in [*self.spreads, *self.closed_spreads]:
             if spread["id"] == spread_id:
                 return spread
         raise KeyError(spread_id)
@@ -2216,6 +2460,20 @@ class MockDashboardState:
         }
 
 
+def _find_mock_watchlist(state: MockDashboardState, watchlist_id: str) -> dict[str, Any]:
+    watchlist = next((item for item in state.watchlists if item["id"] == watchlist_id), None)
+    if watchlist is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock watchlist not found.")
+    return watchlist
+
+
+def _find_mock_watchlist_item(watchlist: dict[str, Any], item_id: str) -> dict[str, Any]:
+    item = next((candidate for candidate in watchlist["items"] if candidate["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock watchlist item not found.")
+    return item
+
+
 def create_app(*, scenario: str = "normal") -> FastAPI:
     state = MockDashboardState(scenario=scenario)
     app = FastAPI(title="Mock Stocks Tool Dashboard", docs_url="/docs", redoc_url=None)
@@ -2252,6 +2510,96 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     def watchlists() -> list[dict[str, Any]]:
         return deepcopy(state.watchlists)
 
+    @app.post("/watchlists")
+    def create_watchlist(payload: dict[str, Any]) -> dict[str, Any]:
+        state._watchlist_counter += 1
+        if payload.get("is_default"):
+            for existing in state.watchlists:
+                existing["is_default"] = False
+        watchlist = {
+            "id": f"mock-watchlist-{state._watchlist_counter}",
+            "name": payload.get("name") or f"mock-list-{state._watchlist_counter}",
+            "description": payload.get("description"),
+            "is_default": bool(payload.get("is_default")),
+            "items": [],
+        }
+        state.watchlists.insert(0, watchlist)
+        return deepcopy(watchlist)
+
+    @app.patch("/watchlists/{watchlist_id}")
+    def update_watchlist(watchlist_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        if payload.get("is_default"):
+            for existing in state.watchlists:
+                existing["is_default"] = existing["id"] == watchlist_id
+        for field in ("name", "description", "is_default"):
+            if field in payload:
+                watchlist[field] = payload[field]
+        return deepcopy(watchlist)
+
+    @app.post("/watchlists/{watchlist_id}/items")
+    def add_watchlist_item(watchlist_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        symbol = str(payload.get("symbol") or "").upper()
+        if any(item["symbol"] == symbol for item in watchlist["items"]):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Mock symbol already exists.")
+        state._watchlist_item_counter += 1
+        watchlist["items"].append(
+            {
+                "id": f"mock-watchlist-item-{state._watchlist_item_counter}",
+                "symbol": symbol,
+                "asset_type": payload.get("asset_type") or "stock",
+                "notes": payload.get("notes"),
+            }
+        )
+        return deepcopy(watchlist)
+
+    @app.patch("/watchlists/{watchlist_id}/items/{item_id}")
+    def update_watchlist_item(watchlist_id: str, item_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        item = _find_mock_watchlist_item(watchlist, item_id)
+        if "notes" in payload:
+            item["notes"] = payload["notes"]
+        return deepcopy(watchlist)
+
+    @app.delete("/watchlists/{watchlist_id}/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_watchlist_item(watchlist_id: str, item_id: str) -> Response:
+        watchlist = _find_mock_watchlist(state, watchlist_id)
+        item = _find_mock_watchlist_item(watchlist, item_id)
+        watchlist["items"].remove(item)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/research/universe")
+    def research_universe(
+        external_account_id: str | None = Query(default=None),
+        watchlist_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+    ) -> dict[str, Any]:
+        if mode != "paper":
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Mock research is paper-only.")
+        return build_mock_research_universe(
+            external_account_id or state.account_id,
+            watchlist_id or state.watchlists[0]["id"],
+        )
+
+    @app.get("/research/technicals")
+    def research_technicals(symbols: list[str] = Query(...)) -> dict[str, Any]:
+        if not symbols or len(symbols) > 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Mock technical batches require between 1 and 10 symbols.",
+            )
+        return build_mock_research_technicals(symbols)
+
+    @app.get("/research/symbols/{symbol}/history")
+    def research_history(
+        symbol: str,
+        range: str = Query(default="3m"),
+    ) -> dict[str, Any]:
+        if range not in {"3m", "6m", "1y"}:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Unsupported mock range.")
+        return build_mock_research_history(symbol, range)
+
     @app.get("/brokers/longbridge/configuration")
     def longbridge_configuration() -> dict[str, Any]:
         return deepcopy(state.configuration)
@@ -2271,6 +2619,18 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
         if external_account_id != state.account_id or mode != "paper":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock operator status not found.")
         return state.operator_status_snapshot()
+
+    @app.get("/ops/recovery-status")
+    def recovery_status(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict[str, Any]:
+        _ = limit
+        try:
+            return state.recovery_status_snapshot(external_account_id=external_account_id, mode=mode)
+        except KeyError as error:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock recovery status not found.") from error
 
     @app.get("/ops/trading-intents")
     def trading_intents(
@@ -2424,8 +2784,11 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     @app.get("/strategies/covered-call/activity")
     def covered_call_activity(
         external_account_id: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
         limit: int = Query(default=12, ge=1, le=100),
     ) -> dict[str, Any]:
+        if mode not in {None, "paper"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Mock covered-call activity is paper-only.")
         state._covered_call_activity_request_count += 1
         if state.scenario == "covered-call-data-failure" and state._covered_call_activity_request_count > 1:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock covered-call activity failure.")
@@ -2620,12 +2983,78 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock required orders failure.")
         return state.list_orders(external_account_id)
 
+    @app.get("/orders/paged")
+    def orders_paged(
+        external_account_id: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        state._orders_request_count += 1
+        if state.scenario == "core-data-failure" and state._orders_request_count > 1:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mock required orders failure.")
+        try:
+            return state.list_orders_page(
+                external_account_id=external_account_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
     @app.get("/strategies/bull-put/spreads")
     def spreads(
         external_account_id: str | None = Query(default=None),
         status: str | None = Query(default=None),
+        mode: str | None = Query(default=None),
     ) -> list[dict[str, Any]]:
-        return state.list_spreads(external_account_id=external_account_id, status=status)
+        return state.list_spreads(external_account_id=external_account_id, status=status, mode=mode)
+
+    @app.get("/strategies/bull-put/spreads/paged")
+    def spreads_paged(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_spreads_page(
+                external_account_id=external_account_id,
+                mode=mode,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+    @app.get("/strategies/bull-put/working-spreads")
+    def working_spreads(
+        external_account_id: str = Query(...),
+        mode: str = Query(default="paper"),
+    ) -> list[dict[str, Any]]:
+        rows = state.list_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
+        active_statuses = {"entry_pending_long", "entry_pending_short", "open", "exit_pending_short", "exit_pending_long", "rollback_failed"}
+        return [
+            row
+            for row in rows
+            if row.get("status") in active_statuses
+            or bool((row.get("raw_payload") or {}).get("lifecycle", {}).get("manual_action_required"))
+        ]
+
+    @app.get("/strategies/bull-put/active-spreads")
+    def active_spreads(
+        external_account_id: str | None = Query(default=None),
+        mode: str = Query(default="paper"),
+        symbol: str | None = Query(default=None),
+    ) -> list[dict[str, Any]]:
+        return state.list_spreads(
+            external_account_id=external_account_id,
+            mode=mode,
+            symbol=symbol,
+            statuses={"entry_pending_long", "entry_pending_short", "open", "exit_pending_short", "exit_pending_long", "rollback_failed"},
+        )
 
     @app.get("/strategies/bull-put/readiness")
     def bull_put_readiness(
@@ -2723,6 +3152,23 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
     ) -> list[dict[str, Any]]:
         return state.list_executions(external_account_id=external_account_id, order_id=order_id)
 
+    @app.get("/executions/paged")
+    def executions_paged(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_executions_page(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
     @app.get("/journals")
     def journals(
         external_account_id: str | None = Query(default=None),
@@ -2736,6 +3182,27 @@ def create_app(*, scenario: str = "normal") -> FastAPI:
             trade_plan_id=trade_plan_id,
             entry_type=entry_type,
         )
+
+    @app.get("/journals/paged")
+    def journals_paged(
+        external_account_id: str | None = Query(default=None),
+        order_id: str | None = Query(default=None),
+        trade_plan_id: str | None = Query(default=None),
+        entry_type: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        try:
+            return state.list_journals_page(
+                external_account_id=external_account_id,
+                order_id=order_id,
+                trade_plan_id=trade_plan_id,
+                entry_type=entry_type,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
 
     @app.get("/orders/{order_id}")
     def get_order(order_id: str) -> dict[str, Any]:

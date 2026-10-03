@@ -1,5 +1,7 @@
 # Opening Readiness - 2026-05-29
 
+Historical operator reference. Current procedures and release gates are in `runtime-operations.md`, `regression-matrix.md`, and `project-wide-optimization-campaign.md`.
+
 ## Code Baseline
 
 - Latest commit: `1fb4d17`

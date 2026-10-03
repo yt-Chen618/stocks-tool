@@ -76,6 +76,20 @@ OPERATOR_REASON_CODE_DETAILS = {
     "order_sync_backoff": "Broker order synchronization is in backoff.",
     "quote_cache_fallback": "A read-only quote cache fallback was used for degraded rendering.",
     "broker_rate_limited": "Broker market-data or order-detail requests are rate limited.",
+    "order_outcome_unknown": "A broker order outcome is unknown and requires reconciliation before another mutation.",
+    "order_reconciliation_pending": "A broker order intent is still unresolved and requires reconciliation.",
+    "reconciliation_coverage_incomplete": "Broker-history evidence does not cover the intent creation time.",
+    "reconciliation_checks_pending": "Fewer than three complete zero-match reconciliation checks are recorded.",
+    "reconciliation_wait_window": "Complete zero-match checks have not yet spanned the required 60 seconds.",
+    "reconciliation_evidence_ready": "Read-only no-order evidence meets the count, coverage, and time checks.",
+    "reconciliation_timestamps_incomplete": "The first and latest reconciliation timestamps are incomplete.",
+    "external_order_id_present": "An external order id is already recorded; inspect that broker order instead of treating it as no order.",
+    "intent_state_not_resolvable": "The intent state is not eligible for a no-order review.",
+    "parent_action_persisted": "The parent trade action is already persisted and cannot accept a child no-order resolution.",
+    "parent_intent_missing": "The parent trade action cannot be read for this child intent.",
+    "paper_resolution_not_allowed": "Only paper-mode intents can be reviewed for no-order resolution.",
+    "sdk_timeout_quarantine": "A timed-out SDK call is still running; broker writes remain paused until it finishes.",
+    "sdk_runtime_unavailable": "Local SDK quarantine state cannot be read; broker writes remain paused.",
 }
 
 
@@ -567,9 +581,14 @@ class OperatorStatusService:
                     limit=50,
                 )
                 consistency_status = consistency_summary.status
+                consistency_repair_count = (
+                    consistency_summary.total_repair_available_count
+                    if consistency_summary.total_check_count
+                    else consistency_summary.repair_available_count
+                )
                 consistency_reason_code = self._consistency_reason_code(
                     status=consistency_status,
-                    repair_available_count=consistency_summary.repair_available_count,
+                    repair_available_count=consistency_repair_count,
                 )
                 self._add_check(
                     checks,
@@ -630,7 +649,15 @@ class OperatorStatusService:
             consistency_summary=consistency_summary,
             primary_blocker=self._primary_blocker(checks),
             local_repair_available=(
-                consistency_summary.repair_available_count > 0 if consistency_summary is not None else None
+                (
+                    (
+                        consistency_summary.total_repair_available_count
+                        if consistency_summary.total_check_count
+                        else consistency_summary.repair_available_count
+                    ) > 0
+                    if consistency_summary is not None
+                    else None
+                )
             ),
             latest_evidence_at=self._latest_evidence_at(
                 generated_at=generated_at,
@@ -1125,15 +1152,18 @@ class OperatorStatusService:
 
     @staticmethod
     def _consistency_check_detail(summary: OperatorConsistencySummary) -> str:
-        if summary.repair_available_count:
+        repair_count = summary.total_repair_available_count if summary.total_check_count else summary.repair_available_count
+        fail_count = summary.total_fail_count if summary.total_check_count else summary.fail_count
+        warn_count = summary.total_warn_count if summary.total_check_count else summary.warn_count
+        if repair_count:
             return (
-                f"{summary.repair_available_count} guarded local ledger repair(s) available; "
+                f"{repair_count} guarded local ledger repair(s) available; "
                 "explicit operator confirmation is required."
             )
-        if summary.fail_count:
-            return f"{summary.fail_count} local ledger consistency check(s) failed."
-        if summary.warn_count:
-            return f"{summary.warn_count} local ledger consistency check(s) returned warnings."
+        if fail_count:
+            return f"{fail_count} local ledger consistency check(s) failed."
+        if warn_count:
+            return f"{warn_count} local ledger consistency check(s) returned warnings."
         return "Local strategy/order ledger consistency checks passed."
 
     @staticmethod

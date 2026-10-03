@@ -1,0 +1,9 @@
+TradingView Lightweight Charts 5.2.0
+
+This distribution includes the standalone production build of TradingView
+Lightweight Charts. It is licensed under the Apache License, Version 2.0; see
+LIGHTWEIGHT_CHARTS_LICENSE.txt in this directory.
+
+The application serves this fixed asset locally, enables the official
+TradingView attribution logo, and does not load the chart library from a CDN.
+Source and integrity details are recorded in THIRD_PARTY.md.

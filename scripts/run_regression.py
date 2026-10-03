@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_BY_WORKFLOW = {
+    "environment": ROOT / "scripts" / "check_environment.py",
+    "history-query": ROOT / "scripts" / "run_history_query_regression.py",
+    "strategy-query": ROOT / "scripts" / "run_strategy_query_regression.py",
     "60h-completion-audit": ROOT / "scripts" / "run_60h_completion_audit.py",
     "audit-export": ROOT / "scripts" / "run_audit_export_regression.py",
     "bull-put-recovery-drill": ROOT / "scripts" / "run_bull_put_recovery_drill.py",
@@ -16,6 +19,7 @@ SCRIPT_BY_WORKFLOW = {
     "consistency-report": ROOT / "scripts" / "run_consistency_report.py",
     "market-data-runtime": ROOT / "scripts" / "run_market_data_runtime_report.py",
     "mock-ui": ROOT / "scripts" / "run_mock_ui_order_regression.py",
+    "recovery-ui": ROOT / "scripts" / "run_recovery_ui_regression.py",
     "operator-platform-v8": ROOT / "scripts" / "run_operator_platform_v8_gate.py",
     "p0-safety": ROOT / "scripts" / "run_p0_safety_gate.py",
     "data-hygiene-audit": ROOT / "scripts" / "run_data_hygiene_audit.py",

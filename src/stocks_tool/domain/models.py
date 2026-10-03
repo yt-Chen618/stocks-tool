@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from stocks_tool.domain.enums import (
     AssetType,
@@ -497,6 +497,8 @@ class BrokerOrderIntent(BaseModel):
     reconciliation_attempts: int = 0
     first_reconciled_at: datetime | None = None
     last_reconciled_at: datetime | None = None
+    reconciliation_coverage_start_at: datetime | None = None
+    reconciliation_coverage_end_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -792,6 +794,7 @@ class StrategyAdvisorReviewDraft(BaseModel):
 
 
 class CreateStrategyAdvisorRunRequest(BaseModel):
+    id: str | None = Field(default=None, max_length=36)
     external_account_id: str = Field(min_length=1, max_length=64)
     source: str = Field(default="deepseek", min_length=1, max_length=64)
     mode: ExecutionMode = ExecutionMode.PAPER
@@ -996,6 +999,16 @@ class MarketDataOperationRuntime(BaseModel):
     max_latency_ms: float | None = None
 
 
+class SdkTimeoutQuarantineStatus(BaseModel):
+    """Read-only state for SDK calls that outlived their local deadline."""
+
+    available: bool = True
+    pending_count: int = 0
+    oldest_started_at: datetime | None = None
+    oldest_duration_seconds: int | None = None
+    next_action: str | None = None
+
+
 class MarketDataModeRuntime(BaseModel):
     mode: ExecutionMode
     context_initialized: bool
@@ -1009,6 +1022,7 @@ class MarketDataRuntimeSnapshot(BaseModel):
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     closed: bool
     sessions: list[MarketDataModeRuntime] = Field(default_factory=list)
+    sdk_quarantine: SdkTimeoutQuarantineStatus = Field(default_factory=SdkTimeoutQuarantineStatus)
 
 
 class WatchlistItem(BaseModel):
@@ -1030,15 +1044,32 @@ class Watchlist(BaseModel):
 
 
 class CreateWatchlistRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=120)
     description: str | None = None
     is_default: bool = False
 
 
+class UpdateWatchlistRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = None
+    is_default: bool | None = None
+
+
 class AddWatchlistItemRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=1, max_length=32)
     asset_type: AssetType
     notes: str | None = None
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
+
+class UpdateWatchlistItemRequest(BaseModel):
+    notes: str | None
 
 
 class BrokerAccount(BaseModel):
@@ -1112,6 +1143,72 @@ class HistoricalPriceBar(BaseModel):
     volume: int
     turnover: Decimal
     raw_payload: dict | None = None
+
+
+class ResearchUniverseRow(BaseModel):
+    symbol: str
+    asset_type: AssetType | None = None
+    sources: list[str] = Field(default_factory=list)
+    notes: str | None = None
+    position_quantity: Decimal | None = None
+    position_market_value: Decimal | None = None
+    quote: SecurityQuoteSnapshot | None = None
+    next_event: MarketEvent | None = None
+    strategy_states: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchUniverseResponse(BaseModel):
+    mode: ExecutionMode
+    external_account_id: str | None = None
+    watchlist_id: str | None = None
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    data_quality: Literal["live", "degraded", "partial", "unavailable", "empty"]
+    rows: list[ResearchUniverseRow] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ResearchTechnicalSnapshot(BaseModel):
+    symbol: str
+    status: Literal["ok", "partial", "unavailable"]
+    warning: str | None = None
+    latest_bar_at: datetime | None = None
+    return_20d_pct: float | None = None
+    return_60d_pct: float | None = None
+    sma20: Decimal | None = None
+    sma50: Decimal | None = None
+    close_above_sma20: bool | None = None
+    sma20_above_sma50: bool | None = None
+    realized_volatility_20d_pct: float | None = None
+    average_volume_20d: float | None = None
+    average_turnover_20d: Decimal | None = None
+
+
+class ResearchTechnicalsResponse(BaseModel):
+    mode: ExecutionMode
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    results: list[ResearchTechnicalSnapshot] = Field(default_factory=list)
+
+
+class ResearchHistoryPoint(BaseModel):
+    timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+    turnover: Decimal
+    sma20: Decimal | None = None
+    sma50: Decimal | None = None
+
+
+class ResearchHistoryResponse(BaseModel):
+    symbol: str
+    range: str
+    mode: ExecutionMode
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    bars: list[ResearchHistoryPoint] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class OptionChainEntry(BaseModel):
@@ -1910,6 +2007,12 @@ class OperatorConsistencySummary(BaseModel):
     warn_count: int = 0
     fail_count: int = 0
     repair_available_count: int = 0
+    total_check_count: int = 0
+    total_fail_count: int = 0
+    total_warn_count: int = 0
+    total_repair_available_count: int = 0
+    truncated: bool = False
+    coverage_complete: bool = True
     checks: list[OperatorConsistencyCheck] = Field(default_factory=list)
 
 
@@ -1931,6 +2034,80 @@ class OperatorConsistencyRepairResult(BaseModel):
     created_signal: StrategySignal | None = None
     broker_order_submitted: bool = False
     local_repair_executed: bool = False
+
+
+class OperatorRecoveryIntent(BaseModel):
+    """Operator-facing, read-only reconciliation evidence for one child intent."""
+
+    id: str
+    trade_action_intent_id: str
+    external_account_id: str
+    mode: ExecutionMode
+    operation: TradingOperation
+    action: str
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    leg: str | None = None
+    state: TradingIntentState
+    external_order_id: str | None = None
+    target_order_id: str | None = None
+    parent_action: str | None = None
+    parent_state: TradingIntentState | None = None
+    created_at: datetime
+    updated_at: datetime
+    reconciliation_attempts: int = 0
+    first_reconciled_at: datetime | None = None
+    last_reconciled_at: datetime | None = None
+    coverage_start_at: datetime | None = None
+    coverage_end_at: datetime | None = None
+    coverage_covers_intent: bool = False
+    checks_satisfied: bool = False
+    check_span_seconds: int | None = None
+    reason_code: str
+    reason_detail: str
+    next_action: str
+
+
+class OperatorRecoveryParent(BaseModel):
+    """Aggregated parent trade-action state for child intent recovery."""
+
+    id: str
+    external_account_id: str
+    mode: ExecutionMode
+    action: str | None = None
+    strategy_id: str | None = None
+    entity_id: str | None = None
+    state: TradingIntentState | None = None
+    child_count: int = 0
+    unresolved_child_count: int = 0
+    evidence_ready_child_count: int = 0
+    children_truncated: bool = False
+    reason_code: str | None = None
+    next_action: str | None = None
+
+
+class OperatorRecoveryStatusSnapshot(BaseModel):
+    """Read-only explanation of trading-intent and SDK recovery blockers."""
+
+    generated_at: datetime
+    external_account_id: str
+    mode: ExecutionMode
+    status: str
+    recovery_blocked: bool
+    unresolved_count: int = 0
+    displayed_unresolved_count: int = 0
+    unknown_count: int = 0
+    displayed_unknown_count: int = 0
+    unresolved_parent_count: int = 0
+    displayed_parent_count: int = 0
+    unknown_parent_count: int = 0
+    displayed_unknown_parent_count: int = 0
+    truncated: bool = False
+    primary_blocker: str | None = None
+    next_action: str
+    parents: list[OperatorRecoveryParent] = Field(default_factory=list)
+    intents: list[OperatorRecoveryIntent] = Field(default_factory=list)
+    sdk_quarantine: SdkTimeoutQuarantineStatus = Field(default_factory=SdkTimeoutQuarantineStatus)
 
 
 class CreateStrategyAuditEventRequest(BaseModel):

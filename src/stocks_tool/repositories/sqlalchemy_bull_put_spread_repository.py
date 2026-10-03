@@ -1,12 +1,20 @@
+from collections.abc import Collection
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from stocks_tool.application.services.strategy_lifecycle import bull_put_lifecycle_summary
 from stocks_tool.db.models import BrokerAccountRecord, BullPutSpreadRecord
 from stocks_tool.domain.enums import BrokerName, ExecutionMode, SpreadStatus
 from stocks_tool.domain.models import BullPutSpread
+from stocks_tool.domain.pagination import (
+    CursorPage,
+    decode_cursor,
+    encode_cursor,
+    normalize_page_limit,
+)
 from stocks_tool.ports.repository import BullPutSpreadRepository, ConcurrentSpreadUpdateError
 
 
@@ -33,14 +41,139 @@ class SQLAlchemyBullPutSpreadRepository(BullPutSpreadRepository):
         self,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        *,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
     ) -> list[BullPutSpread]:
-        query = select(BullPutSpreadRecord).order_by(BullPutSpreadRecord.created_at.desc())
+        query = select(BullPutSpreadRecord).order_by(
+            BullPutSpreadRecord.created_at.desc(),
+            BullPutSpreadRecord.id.desc(),
+        )
         if external_account_id is not None:
             query = query.where(BullPutSpreadRecord.external_account_id == external_account_id)
         if status is not None:
             query = query.where(BullPutSpreadRecord.status == status.value)
-        records = self.session.execute(query).scalars().all()
-        return [self._to_domain(record) for record in records]
+        if statuses is not None:
+            normalized_statuses = [item.value for item in statuses]
+            if not normalized_statuses:
+                return []
+            query = query.where(BullPutSpreadRecord.status.in_(normalized_statuses))
+        if mode is not None:
+            query = query.where(BullPutSpreadRecord.execution_mode == mode.value)
+        if underlying_symbol is not None:
+            query = query.where(
+                BullPutSpreadRecord.underlying_symbol == underlying_symbol.strip().upper()
+            )
+        try:
+            records = self.session.execute(query).scalars().all()
+            return [self._to_domain(record) for record in records]
+        except Exception:
+            self.session.rollback()
+            raise
+
+    def list_spreads_page(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[BullPutSpread]:
+        page_limit = normalize_page_limit(limit)
+        scope = {
+            "external_account_id": external_account_id,
+            "mode": mode.value,
+        }
+        cursor_position: dict[str, object] | None = None
+        if cursor is not None:
+            cursor_position = decode_cursor(
+                cursor,
+                resource="bull_put_spreads",
+                scope=scope,
+            )
+
+        query = (
+            select(BullPutSpreadRecord.id)
+            .where(
+                BullPutSpreadRecord.external_account_id == external_account_id,
+                BullPutSpreadRecord.execution_mode == mode.value,
+            )
+            .order_by(BullPutSpreadRecord.created_at.desc(), BullPutSpreadRecord.id.desc())
+        )
+        if cursor_position is not None:
+            try:
+                created_at = datetime.fromisoformat(str(cursor_position["created_at"]))
+                spread_id = str(cursor_position["id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Invalid pagination cursor position.") from exc
+            query = query.where(
+                tuple_(BullPutSpreadRecord.created_at, BullPutSpreadRecord.id)
+                < (created_at, spread_id)
+            )
+
+        try:
+            record_ids = self.session.execute(query.limit(page_limit + 1)).scalars().all()
+            has_more = len(record_ids) > page_limit
+            record_ids = record_ids[:page_limit]
+            if not record_ids:
+                return CursorPage(items=[], next_cursor=None, has_more=False, limit=page_limit)
+            records_by_id = {
+                record.id: record
+                for record in self.session.execute(
+                    select(BullPutSpreadRecord).where(BullPutSpreadRecord.id.in_(record_ids))
+                ).scalars().all()
+            }
+            records = [records_by_id[record_id] for record_id in record_ids]
+            items = [self._to_domain(record) for record in records]
+            next_cursor = None
+            if has_more and records:
+                last = records[-1]
+                next_cursor = encode_cursor(
+                    resource="bull_put_spreads",
+                    scope=scope,
+                    position={
+                        "created_at": last.created_at.isoformat(),
+                        "id": last.id,
+                    },
+                )
+            return CursorPage(
+                items=items,
+                next_cursor=next_cursor,
+                has_more=has_more,
+                limit=page_limit,
+            )
+        except Exception:
+            self.session.rollback()
+            raise
+
+    def list_working_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        active_statuses: Collection[SpreadStatus],
+    ) -> list[BullPutSpread]:
+        normalized_statuses = [status.value for status in active_statuses]
+        if not normalized_statuses:
+            status_predicate = False
+        else:
+            status_predicate = BullPutSpreadRecord.status.in_(normalized_statuses)
+        query = (
+            select(BullPutSpreadRecord)
+            .where(
+                BullPutSpreadRecord.external_account_id == external_account_id,
+                BullPutSpreadRecord.execution_mode == mode.value,
+                or_(status_predicate, BullPutSpreadRecord.manual_action_required.is_(True)),
+            )
+            .order_by(BullPutSpreadRecord.created_at.desc(), BullPutSpreadRecord.id.desc())
+        )
+        try:
+            records = self.session.execute(query).scalars().all()
+            return [self._to_domain(record) for record in records]
+        except Exception:
+            self.session.rollback()
+            raise
 
     def update_spread(
         self,

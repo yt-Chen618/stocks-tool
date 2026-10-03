@@ -6,8 +6,6 @@ const PRE_OPEN_OVERLAY_TIMEOUT_MS = 70000;
 const COVERED_CALL_LIFECYCLE_TIMEOUT_MS = 60000;
 const ADVISOR_REQUEST_TIMEOUT_MS = 180000;
 const COLLAPSED_MODULES_STORAGE_KEY = "stocks-tool-collapsed-modules";
-const VIEW_MODE_STORAGE_KEY = "stocks-tool-view-mode";
-const DEFAULT_VIEW_MODE = "focus";
 const IDEMPOTENCY_STORAGE_PREFIX = "stocks-tool-idempotency:";
 const MOBILE_TRADING_QUERY = "(max-width: 780px)";
 const {
@@ -48,27 +46,129 @@ const TRANSLATIONS = window.StocksToolI18n.TRANSLATIONS;
 const state = window.StocksToolState.createInitialState();
 
 const els = {};
+let accountLoader = null;
+let bullPutView = null;
+let strategyView = null;
+let advisorView = null;
+let ordersView = null;
+let operationsRecoveryView = null;
 let isApplyingLanguage = false;
 let languageObserver = null;
 let languageFrame = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindElements();
-  initializeViewMode();
+  initializeViewModules();
+  window.StocksToolExecution?.init();
+  window.StocksToolWorkspace?.init();
   enhanceCollapsibleModules();
   wireEvents();
   bindTradingViewportGuard();
   startLanguageObserver();
   updateLanguageControls();
   applyLanguage();
-  syncTicketOrderFields();
-  renderSelectedOrder();
+  ordersView?.syncTicketOrderFields();
+  ordersView?.renderSelectedOrder();
+  window.StocksToolResearch?.init();
+  await window.StocksToolWatchlists?.init();
   await loadDashboard();
 });
 
+function initializeViewModules() {
+  const fetchJson = window.StocksToolApiClient.fetchJson;
+  const decodeCursorPage = window.StocksToolApiClient.decodeCursorPage;
+  const createOverlayStatus = window.StocksToolState.createOverlayStatus;
+  operationsRecoveryView = window.StocksToolOperationsRecovery;
+  operationsRecoveryView?.init({
+    root: "#operations-recovery-panel",
+  });
+  accountLoader = window.StocksToolAccountLoader?.createAccountLoader({
+    state,
+    fetchJson,
+    decodeCursorPage,
+    createOverlayStatus,
+    formatPanelLoadLabel,
+    renderAccountOptions: () => renderAccountOptions(),
+    renderEmptyState: () => renderEmptyAccountState(),
+    renderAccountState: (payload) => renderAccountDataState(payload),
+    renderRecoveryLoading: () => operationsRecoveryView?.renderLoading(),
+    renderRecoveryStatus: (snapshot) => operationsRecoveryView?.render(snapshot),
+    renderRecoveryError: (error) => operationsRecoveryView?.renderError(error),
+    applyTradingSafetyState,
+    updateSyncButtons,
+    updateOrderTicketAvailability: () => ordersView?.updateOrderTicketAvailability(),
+    updatePreOpenButtons,
+  });
+  bullPutView = window.StocksToolBullPutView?.createBullPutView({
+    state,
+    els,
+    accountLoader,
+    runConfirmedBrokerMutation,
+    setStatus,
+    setActionStatus,
+    loadAccountData: () => accountLoader?.loadAccountData(),
+    applyTradingSafetyState,
+    escapeHtml,
+    formatters: window.StocksToolFormatters,
+  });
+  strategyView = window.StocksToolStrategyView?.createStrategyView({
+    state,
+    els,
+    escapeHtml,
+    formatters: window.StocksToolFormatters,
+    helpers: {
+      describeStrategyStatus,
+      formatRuntimeNextAction,
+      pnlTone,
+      updateStrategyButtons,
+      updateZeroDteLotteryButtons,
+      renderStrategyProposalDetails,
+      renderStrategyProposalActions,
+      renderStrategyProposalDetail,
+      displayValue,
+    },
+  });
+  advisorView = window.StocksToolAdvisorView?.createAdvisorView({
+    state,
+    els,
+    fetchJson,
+    decodeCursorPage,
+    createOverlayStatus,
+    setStatus,
+    reloadAccountData: () => accountLoader?.loadAccountData(),
+    escapeHtml,
+    formatters: window.StocksToolFormatters,
+  });
+  ordersView = window.StocksToolOrdersView?.createOrdersView({
+    state,
+    els,
+    fetchJson,
+    decodeCursorPage,
+    reloadAccountData: () => accountLoader?.loadAccountData(),
+    loadActivityPage: (...args) => accountLoader?.loadActivityPage(...args),
+    loadSelectedOrderDetails: (...args) => accountLoader?.loadSelectedOrderDetails(...args),
+    ensureSelectedOrderDetail: (...args) => accountLoader?.ensureSelectedOrderDetail(...args),
+    runConfirmedBrokerMutation,
+    setStatus,
+    setActionStatus,
+    applyTradingSafetyState,
+    setBusinessDisabled,
+    matchingQuoteTime,
+    escapeHtml,
+    formatMultilineText,
+    formatters: window.StocksToolFormatters,
+    parsePositiveInteger,
+    parsePositiveNumber,
+    normalizeOptionalText,
+    parseTags,
+    workspace: window.StocksToolWorkspace,
+  });
+  advisorView?.wireEvents();
+  ordersView?.wireEvents();
+}
+
 function bindElements() {
   els.languageOptions = Array.from(document.querySelectorAll("[data-lang-option]"));
-  els.viewModeOptions = Array.from(document.querySelectorAll("[data-view-mode-option]"));
   els.accountSelect = document.getElementById("account-select");
   els.statusBanner = document.getElementById("status-banner");
   els.desktopTradingNotice = document.getElementById("desktop-trading-notice");
@@ -112,13 +212,16 @@ function bindElements() {
   els.marketEventsCard = document.getElementById("market-events-card");
   els.spreadSummaryStrip = document.getElementById("spread-summary-strip");
   els.spreadsBody = document.getElementById("spreads-body");
+  els.bullPutHistoryPanel = document.getElementById("bull-put-history-panel");
+  els.bullPutHistoryStatus = document.getElementById("bull-put-history-status");
+  els.bullPutHistoryBody = document.getElementById("bull-put-history-body");
+  els.bullPutHistoryLoadMore = document.getElementById("bull-put-history-load-more");
   els.ordersBody = document.getElementById("orders-body");
+  els.ordersLoadMore = document.getElementById("orders-load-more");
+  els.executionsLoadMore = document.getElementById("executions-load-more");
+  els.journalsLoadMore = document.getElementById("journals-load-more");
   els.positionsBody = document.getElementById("positions-body");
   els.brokerStatus = document.getElementById("broker-status");
-  els.quoteForm = document.getElementById("quote-form");
-  els.quoteSymbol = document.getElementById("quote-symbol");
-  els.loadQuote = document.getElementById("load-quote");
-  els.quoteCard = document.getElementById("quote-card");
   els.loadPreOpenBoard = document.getElementById("load-preopen-board");
   els.loadPreOpenOverlays = document.getElementById("load-preopen-overlays");
   els.savePreOpenBoard = document.getElementById("save-preopen-board");
@@ -170,13 +273,58 @@ function bindElements() {
   els.tradeConfirmDetails = document.getElementById("trade-confirm-details");
 }
 
-function wireEvents() {
-  for (const button of els.viewModeOptions) {
-    button.addEventListener("click", () => {
-      setViewMode(button.dataset.viewModeOption || DEFAULT_VIEW_MODE);
-    });
-  }
+function renderEmptyAccountState() {
+  renderReconciliationStatus();
+  renderMetrics();
+  renderHoldings();
+  renderPreOpenAssessment();
+  renderLatestPreOpenRun();
+  strategyView?.renderStrategyRuntime();
+  strategyView?.renderZeroDteLottery();
+  strategyView?.renderCoveredCallActivity();
+  strategyView?.renderStrategyExperiment();
+  advisorView?.renderAdvisorPanel();
+  strategyView?.renderMarketEvents();
+  bullPutView?.render();
+  ordersView?.render();
+  renderPositions();
+  updateSyncButtons();
+  ordersView?.updateOrderTicketAvailability();
+  updatePreOpenButtons();
+  applyTradingSafetyState();
+}
 
+function renderAccountDataState({ errors, requiredFailures, optionalFailures }) {
+  if (state.preOpenRuns) {
+    seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
+  }
+  renderReconciliationStatus();
+  renderMetrics();
+  renderHoldings();
+  renderPreOpenAssessment();
+  renderLatestPreOpenRun();
+  strategyView?.renderStrategyRuntime();
+  strategyView?.renderZeroDteLottery();
+  strategyView?.renderCoveredCallActivity();
+  strategyView?.renderStrategyExperiment();
+  advisorView?.renderAdvisorPanel();
+  strategyView?.renderMarketEvents();
+  bullPutView?.render();
+  ordersView?.render();
+  renderPositions();
+  renderPanelLoadStates(errors || {});
+  updateSyncButtons();
+  ordersView?.updateOrderTicketAvailability();
+  updatePreOpenButtons();
+  applyTradingSafetyState();
+  if (state.selectedOrderId && state.selectedOrderDetailOrderId !== state.selectedOrderId) {
+    void ordersView?.loadSelectedDetails(state.selectedOrderId);
+  }
+  void requiredFailures;
+  void optionalFailures;
+}
+
+function wireEvents() {
   for (const button of els.languageOptions) {
     button.addEventListener("click", () => {
       setLanguage(button.dataset.langOption || DEFAULT_LANGUAGE);
@@ -185,7 +333,9 @@ function wireEvents() {
 
   els.accountSelect.addEventListener("change", async (event) => {
     state.selectedAccountId = event.target.value;
-    resetAdvisorState();
+    window.StocksToolWorkspace?.updateAccountContext(state.selectedAccountId || "--");
+    void refreshResearchContext();
+    advisorView?.resetAdvisorState();
     setStatus(`Loading account ${state.selectedAccountId}...`, "warning");
     const loadResult = await loadAccountData();
     if (loadResult.discarded) {
@@ -224,30 +374,6 @@ function wireEvents() {
     }
     await syncOrders();
   });
-
-  if (els.quoteForm && els.loadQuote && els.quoteSymbol) {
-    els.quoteForm.addEventListener("submit", (event) => {
-      event.preventDefault();
-    });
-
-    els.loadQuote.addEventListener("click", async (event) => {
-      if (!event.isTrusted) {
-        return;
-      }
-      await loadQuote();
-    });
-
-    els.quoteSymbol.addEventListener("keydown", async (event) => {
-      if (event.key !== "Enter") {
-        return;
-      }
-      if (!event.isTrusted) {
-        return;
-      }
-      event.preventDefault();
-      await loadQuote();
-    });
-  }
 
   els.loadPreOpenBoard.addEventListener("click", async () => {
     await loadPreOpenAssessment({
@@ -292,88 +418,7 @@ function wireEvents() {
     });
   }
 
-  if (els.loadAdvisorContext) {
-    els.loadAdvisorContext.addEventListener("click", async () => {
-      await loadAdvisorContext();
-    });
-  }
-
-  if (els.runDeepSeekAdvisor) {
-    els.runDeepSeekAdvisor.addEventListener("click", async () => {
-      await runDeepSeekAdvisorDryRun();
-    });
-  }
-
-  if (els.recordAdvisorResponse) {
-    els.recordAdvisorResponse.addEventListener("click", async () => {
-      await recordAdvisorResponse();
-    });
-  }
-
-  els.orderType.addEventListener("change", () => {
-    syncTicketOrderFields();
-  });
-
-  els.orderTicketForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await submitOrder(els.submitOrder);
-  });
-
-  els.ordersBody.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-order-action]");
-    if (!button) {
-      return;
-    }
-
-    const { orderAction, orderId } = button.dataset;
-    if (!orderAction || !orderId) {
-      return;
-    }
-
-    if (orderAction === "manage") {
-      setSelectedOrder(orderId, true);
-      return;
-    }
-
-    if (orderAction === "refresh") {
-      await refreshOrder(orderId);
-      return;
-    }
-
-    if (orderAction === "cancel") {
-      await cancelOrder(orderId, button);
-    }
-  });
-
-  els.spreadsBody.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-spread-action]");
-    if (!button) {
-      return;
-    }
-
-    const { spreadAction, spreadId } = button.dataset;
-    if (!spreadAction || !spreadId) {
-      return;
-    }
-
-    if (spreadAction === "refresh") {
-      await refreshSpread(spreadId);
-      return;
-    }
-
-    if (spreadAction === "monitor") {
-      await monitorSpread(spreadId, button);
-    }
-  });
-
-  els.spreadsBody.addEventListener("submit", async (event) => {
-    const form = event.target.closest("form[data-recover-close-form]");
-    if (!form) {
-      return;
-    }
-    event.preventDefault();
-    await recoverCloseSpread(form.dataset.recoverCloseForm, new FormData(form), event.submitter);
-  });
+  bullPutView?.wireEvents();
 
   if (els.strategyProposalsCard) {
     els.strategyProposalsCard.addEventListener("click", async (event) => {
@@ -406,69 +451,12 @@ function wireEvents() {
     });
   }
 
-  els.selectedOrderCard.addEventListener("click", async (event) => {
-    const button = event.target.closest("button[data-selected-action]");
-    if (!button) {
-      return;
-    }
-
-    const action = button.dataset.selectedAction;
-    const order = getSelectedOrder();
-    if (!action || !order) {
-      return;
-    }
-
-    if (action === "refresh") {
-      await refreshOrder(order.id);
-      return;
-    }
-
-    if (action === "cancel") {
-      await cancelOrder(order.id, button);
-    }
-  });
-
-  els.replaceOrderForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await replaceSelectedOrder(event.submitter);
-  });
-
-  els.journalEntryForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    await submitJournalEntry();
-  });
-}
-
-function initializeViewMode() {
-  let stored = DEFAULT_VIEW_MODE;
-  try {
-    stored = window.localStorage.getItem(VIEW_MODE_STORAGE_KEY) || DEFAULT_VIEW_MODE;
-  } catch {
-    stored = DEFAULT_VIEW_MODE;
-  }
-  setViewMode(stored, { persist: false });
-}
-
-function setViewMode(viewMode, { persist = true } = {}) {
-  const normalized = viewMode === "all" ? "all" : DEFAULT_VIEW_MODE;
-  document.body.dataset.viewMode = normalized;
-  for (const button of els.viewModeOptions || []) {
-    const active = button.dataset.viewModeOption === normalized;
-    button.classList.toggle("is-active", active);
-    button.setAttribute("aria-pressed", active ? "true" : "false");
-  }
-  if (!persist) {
-    return;
-  }
-  try {
-    window.localStorage.setItem(VIEW_MODE_STORAGE_KEY, normalized);
-  } catch {
-    // View mode still applies for this page load when storage is unavailable.
-  }
 }
 
 function enhanceCollapsibleModules() {
-  const modules = Array.from(document.querySelectorAll(".band, .panel"));
+  const modules = Array.from(document.querySelectorAll(".band, .panel")).filter(
+    (module) => !module.closest("#execution-drawer") && !module.matches("[data-workspace-panel]")
+  );
   const collapsedModules = readCollapsedModules();
 
   modules.forEach((module, index) => {
@@ -591,16 +579,15 @@ function renderAllForLanguage() {
   renderHoldings();
   renderPreOpenAssessment();
   renderLatestPreOpenRun();
-  renderStrategyRuntime();
-  renderSpreads();
-  renderOrders();
+  strategyView?.renderStrategyRuntime();
+  bullPutView?.render();
+  ordersView?.renderOrders();
   renderPositions();
-  renderSelectedOrder();
-  renderQuote();
-  syncTicketOrderFields();
-  const selectedOrder = getSelectedOrder();
+  ordersView?.renderSelectedOrder();
+  ordersView?.syncTicketOrderFields();
+  const selectedOrder = ordersView?.getSelectedOrder();
   if (selectedOrder && !els.replaceOrderForm.classList.contains("hidden")) {
-    syncReplaceOrderFields(selectedOrder.order_type);
+    ordersView?.syncReplaceOrderFields(selectedOrder.order_type);
   }
 }
 
@@ -709,9 +696,6 @@ function translateText(text, dictionary) {
   const dynamicRules = [
     [/^Refreshing covered-call lifecycle for (.+)\.\.\.$/, "正在刷新 $1 的备兑看涨生命周期..."],
     [/^Covered-call lifecycle refreshed: (.+)\.$/, "备兑看涨生命周期已刷新：$1。"],
-    [/^Refreshing ([A-Z0-9.]+) quote\.\.\.$/, "正在刷新 $1 行情..."],
-    [/^Quote refreshed successfully\.$/, "行情刷新成功。"],
-    [/^Quote refreshed (.+)\.$/, "行情已于 $1 刷新。"],
     [/^Live macro board refreshed (.+)\.$/, "实时宏观板已于 $1 刷新。"],
     [/^Showing the latest stored macro board captured (.+)\.$/, "正在显示 $1 捕获的最新存档宏观板。"],
     [/^Latest stored run for (.+)\.$/, "最新存储运行对应 $1。"],
@@ -811,25 +795,102 @@ function isMobileTradingViewport() {
   return window.matchMedia?.(MOBILE_TRADING_QUERY).matches ?? window.innerWidth <= 780;
 }
 
+function mutationScopeKey(accountId, actionKey) {
+  return `${String(accountId || "")}::${String(actionKey || "")}`;
+}
+
+function pendingActionKeysForAccount(accountId = state.selectedAccountId) {
+  const prefix = `${String(accountId || "")}::`;
+  return new Set(
+    Array.from(state.pendingActionKeys || [])
+      .filter((key) => String(key).startsWith(prefix))
+      .map((key) => String(key).slice(prefix.length)),
+  );
+}
+
+function mutationContextIsCurrent(accountId, accountLoadGeneration) {
+  return accountId === state.selectedAccountId && accountLoadGeneration === state.accountLoadGeneration;
+}
+
+function recordUnknownMutationLock(accountId, intent) {
+  state.unknownMutationLocks ||= {};
+  state.terminalUnknownMutationIds ||= {};
+  state.terminalUnknownMutationIds[accountId] = (state.terminalUnknownMutationIds[accountId] || []).filter((id) => id !== intent.id);
+  const current = Array.isArray(state.unknownMutationLocks[accountId])
+    ? state.unknownMutationLocks[accountId]
+    : [];
+  state.unknownMutationLocks[accountId] = [
+    intent,
+    ...current.filter((candidate) => candidate.id !== intent.id),
+  ];
+  if (state.selectedAccountId === accountId) {
+    state.unresolvedTradingIntents = [
+      ...state.unknownMutationLocks[accountId],
+      ...(state.unresolvedTradingIntents || []).filter((candidate) => candidate.id !== intent.id),
+    ];
+  }
+}
+
+function clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey) {
+  if (!idempotencyKey) return;
+  const locks = state.unknownMutationLocks?.[accountId];
+  if (!Array.isArray(locks)) return;
+  state.unknownMutationLocks[accountId] = locks.filter(
+    (lock) => !(lock.idempotency_key === idempotencyKey && (!lock.action_key || lock.action_key === actionKey)),
+  );
+}
+
+function evaluateCurrentTradingSafety(options = {}) {
+  const evaluator = window.StocksToolTradingSafety?.evaluateTradingSafety;
+  if (typeof evaluator !== "function") {
+    return { blocked: true, reasons: ["safety_module_unavailable"] };
+  }
+  return evaluator({
+    accountId: options.accountId ?? state.selectedAccountId,
+    selectedAccountId: state.selectedAccountId,
+    mode: options.mode ?? "paper",
+    expectedContext: options.expectedContext ?? null,
+    requestSignature: options.requestSignature,
+    accountLoadGeneration: state.accountLoadGeneration,
+    coreDataHealthy: state.coreDataHealthy,
+    recoveryStatusState: state.recoveryStatusState,
+    recoveryStatus: state.recoveryStatus,
+    unresolvedTradingIntents: state.unresolvedTradingIntents,
+    mobileBlocked: options.mobileBlocked ?? isMobileTradingViewport(),
+    pendingActionKeys: pendingActionKeysForAccount(state.selectedAccountId),
+    actionKey: options.actionKey,
+    ignorePendingAction: options.ignorePendingAction === true,
+    businessDisabled: options.businessDisabled === true,
+  });
+}
+
 function applyTradingSafetyState() {
   const mobileBlocked = isMobileTradingViewport();
-  const coreBlocked = !state.coreDataHealthy;
-  const intentBlocked = (state.unresolvedTradingIntents || []).length > 0;
+  window.StocksToolExecution?.setMobileReadonly(mobileBlocked);
   document.querySelectorAll("button[data-broker-mutation='true']").forEach((button) => {
-    const pending = state.pendingActionKeys.has(button.dataset.actionKey || "");
+    const pending = state.pendingActionKeys.has(mutationScopeKey(state.selectedAccountId, button.dataset.actionKey || ""));
     const businessDisabled = button.dataset.businessDisabled === "true";
-    const blocked = mobileBlocked || coreBlocked || intentBlocked || pending || businessDisabled;
+    const safety = evaluateCurrentTradingSafety({
+      actionKey: button.dataset.actionKey || "",
+      mobileBlocked,
+      businessDisabled,
+    });
+    const blocked = safety.blocked;
     button.disabled = blocked;
     button.setAttribute("aria-disabled", String(blocked));
     button.setAttribute("aria-busy", String(pending));
-    if ((mobileBlocked || coreBlocked || intentBlocked) && !button.dataset.safetyOriginalTitle) {
+    if (safety.blocked && !button.dataset.safetyOriginalTitle) {
       button.dataset.safetyOriginalTitle = button.title || "";
     }
     if (mobileBlocked) {
       button.title = "Use the desktop workbench for broker-writing actions.";
-    } else if (coreBlocked) {
+    } else if (safety.reasons.includes("core_data_unhealthy")) {
       button.title = "Required account data is stale. Refresh the dashboard before trading.";
-    } else if (intentBlocked) {
+    } else if (safety.reasons.includes("recovery_status_unavailable")) {
+      button.title = "Recovery status is loading or unavailable. Broker-writing actions remain locked.";
+    } else if (safety.reasons.includes("recovery_blocked")) {
+      button.title = "Recovery evidence blocks broker-writing actions until reconciliation is complete.";
+    } else if (safety.reasons.includes("unresolved_trading_intent")) {
       button.title = "An unresolved trading intent blocks all broker-writing actions.";
     } else if (button.dataset.safetyOriginalTitle !== undefined) {
       button.title = button.dataset.safetyOriginalTitle;
@@ -857,35 +918,43 @@ function setActionStatus(element, message, tone = "") {
   }
 }
 
-function tradingBlockedMessage() {
-  if (isMobileTradingViewport()) {
-    return "Broker-writing actions are desktop-only. No request was sent.";
-  }
-  if (!state.coreDataHealthy) {
-    return "Required account data is stale. Refresh the dashboard before trading.";
-  }
-  if ((state.unresolvedTradingIntents || []).length > 0) {
-    return "An unresolved trading intent blocks broker-writing actions until reconciliation completes.";
-  }
-  return "";
+function tradingBlockedMessage(options = {}) {
+  const safety = evaluateCurrentTradingSafety(options);
+  if (!safety.blocked) return "";
+  if (safety.reasons.includes("mobile_viewport")) return "Broker-writing actions are desktop-only. No request was sent.";
+  if (safety.reasons.includes("core_data_unhealthy")) return "Required account data is stale. Refresh the dashboard before trading.";
+  if (safety.reasons.includes("recovery_status_unavailable")) return "Recovery status is loading or unavailable. No request was sent.";
+  if (safety.reasons.includes("recovery_blocked")) return "Recovery evidence blocks broker-writing actions until reconciliation completes.";
+  if (safety.reasons.includes("unresolved_trading_intent")) return "An unresolved trading intent blocks all broker-writing actions until reconciliation completes.";
+  if (safety.reasons.includes("account_context_changed") || safety.reasons.includes("mode_context_changed")) return "The selected account or execution mode changed. Review the action again before sending.";
+  if (safety.reasons.includes("request_signature_changed")) return "The action details changed while confirmation was open. Review the action again before sending.";
+  if (safety.reasons.includes("business_disabled")) return "This action is no longer eligible. No request was sent.";
+  if (safety.reasons.includes("safety_module_unavailable")) return "Trading safety checks are unavailable. No request was sent.";
+  return "Trading safety checks blocked this action. No request was sent.";
 }
-
 async function runConfirmedBrokerMutation(
-  { actionKey, button, confirmation, requestSignature, statusElement },
+  { actionKey, button, confirmation, requestSignature, getRequestSignature, statusElement, accountId = state.selectedAccountId, mode = "paper", businessPredicate, businessBlockedMessage },
   operation
 ) {
-  const blockedMessage = tradingBlockedMessage();
+  const accountLoadGeneration = state.accountLoadGeneration;
+  const expectedContext = { accountId, mode, requestSignature, accountLoadGeneration };
+  const scopedActionKey = mutationScopeKey(accountId, actionKey);
+  const businessDisabled = button?.dataset.businessDisabled === "true" || (typeof businessPredicate === "function" && !businessPredicate());
+  const blockedMessage = businessDisabled && businessBlockedMessage
+    ? businessBlockedMessage
+    : tradingBlockedMessage({ actionKey, accountId, mode, expectedContext, requestSignature, businessDisabled });
   if (blockedMessage) {
     setActionStatus(statusElement, blockedMessage, "error");
     setStatus(blockedMessage, "error");
     return { executed: false, blocked: true };
   }
-  if (state.pendingActionKeys.has(actionKey)) {
+  if (state.pendingActionKeys.has(scopedActionKey)) {
     return { executed: false, duplicate: true };
   }
 
-  state.pendingActionKeys.add(actionKey);
+  state.pendingActionKeys.add(scopedActionKey);
   applyTradingSafetyState();
+  let idempotencyKey = null;
   try {
     setActionStatus(statusElement, "Review the paper action confirmation.", "warning");
     const confirmed = await showTradeConfirmation(confirmation);
@@ -896,17 +965,58 @@ async function runConfirmedBrokerMutation(
       return { executed: false, canceled: true };
     }
 
-    const idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature);
+    const currentRequestSignature = typeof getRequestSignature === "function"
+      ? getRequestSignature()
+      : requestSignature;
+    const postConfirmationBlocked = tradingBlockedMessage({
+      actionKey,
+      accountId,
+      mode,
+      expectedContext,
+      requestSignature: currentRequestSignature,
+      ignorePendingAction: true,
+      businessDisabled: button?.dataset.businessDisabled === "true" || (typeof businessPredicate === "function" && !businessPredicate()),
+    });
+    if (postConfirmationBlocked) {
+      const message = (typeof businessPredicate === "function" && !businessPredicate() && businessBlockedMessage)
+        ? businessBlockedMessage
+        : postConfirmationBlocked;
+      setActionStatus(statusElement, message, "error");
+      setStatus(message, "error");
+      return { executed: false, blocked: true, contextChanged: true };
+    }
+
+    idempotencyKey = getOrCreateIdempotencyKey(actionKey, requestSignature, accountId, mode);
     const result = await operation(idempotencyKey);
-    clearIdempotencyKey(actionKey);
+    clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
+    clearIdempotencyKey(actionKey, accountId);
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
+      return { executed: false, discarded: true, result };
+    }
     return { executed: true, result };
   } catch (error) {
     if (error?.code === "order_outcome_unknown") {
+      const intentId = error.intentId || `${actionKey}:${idempotencyKey || "unknown"}`;
+      recordUnknownMutationLock(accountId, {
+        id: intentId,
+        state: "unknown",
+        source: "broker-mutation-response",
+        external_account_id: accountId,
+        mode,
+        action_key: actionKey,
+        idempotency_key: idempotencyKey,
+      });
+      persistUnknownMutationIntent({ accountId, mode, actionKey, requestSignature, idempotencyKey, intentId });
+    }
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
+      if (isTerminalMutationError(error)) {
+        clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
+        clearIdempotencyKey(actionKey, accountId);
+      }
+      return { executed: false, discarded: true, error };
+    }
+    if (error?.code === "order_outcome_unknown") {
       const intentId = error.intentId || "unknown";
-      state.unresolvedTradingIntents = [
-        { id: intentId, state: "unknown", source: "broker-mutation-response" },
-        ...(state.unresolvedTradingIntents || []).filter((intent) => intent.id !== intentId),
-      ];
       setActionStatus(
         statusElement,
         "Order outcome is unknown. Trading is locked pending reconciliation.",
@@ -914,15 +1024,18 @@ async function runConfirmedBrokerMutation(
       );
     }
     if (isTerminalMutationError(error)) {
-      clearIdempotencyKey(actionKey);
+      clearOwnedUnknownMutationLock(accountId, actionKey, idempotencyKey);
+      clearIdempotencyKey(actionKey, accountId);
     }
     throw error;
   } finally {
-    state.pendingActionKeys.delete(actionKey);
+    state.pendingActionKeys.delete(scopedActionKey);
     if (button) {
       button.setAttribute("aria-busy", "false");
     }
-    applyTradingSafetyState();
+    if (mutationContextIsCurrent(accountId, accountLoadGeneration)) {
+      applyTradingSafetyState();
+    }
   }
 }
 
@@ -950,17 +1063,88 @@ function showTradeConfirmation({ title, summary, details }) {
   });
 }
 
-function getOrCreateIdempotencyKey(actionKey, requestSignature) {
-  const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`;
+function idempotencySignatureAccount(requestSignature) {
+  if (typeof requestSignature !== "string") return null;
+  try {
+    const payload = JSON.parse(requestSignature);
+    return payload?.external_account_id || payload?.account || payload?.accountId || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function readIdempotencyRecord(storageKey) {
+  const raw = window.sessionStorage.getItem(storageKey);
+  if (!raw) return null;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Stored idempotency record is invalid; reconcile before retrying: ${error.message}`);
+  }
+  if (!record || typeof record !== "object" || typeof record.key !== "string" || typeof record.requestSignature !== "string") {
+    throw new Error("Stored idempotency record is incomplete; reconcile before retrying.");
+  }
+  return record;
+}
+
+function persistUnknownMutationIntent({ accountId, mode, actionKey, requestSignature, idempotencyKey, intentId }) {
+  if (!intentId || !idempotencyKey) return;
+  const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${accountId}:${actionKey}`;
+  try {
+    const existing = readIdempotencyRecord(storageKey) || {};
+    window.sessionStorage.setItem(storageKey, JSON.stringify({
+      ...existing,
+      key: idempotencyKey,
+      requestSignature,
+      accountId,
+      mode,
+      actionKey,
+      intentId,
+    }));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function getOrCreateIdempotencyKey(actionKey, requestSignature, accountId = state.selectedAccountId, mode = "paper") {
+  const storageKey = `${IDEMPOTENCY_STORAGE_PREFIX}${accountId}:${actionKey}`;
   let existing = null;
   try {
-    existing = JSON.parse(window.sessionStorage.getItem(storageKey) || "null");
+    existing = readIdempotencyRecord(storageKey);
+    if (!existing) {
+      const legacyKey = `${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`;
+      const legacy = window.sessionStorage.getItem(legacyKey) ? readIdempotencyRecord(legacyKey) : null;
+      if (legacy) {
+        const legacyAccount = legacy.accountId || idempotencySignatureAccount(legacy.requestSignature);
+        if (legacyAccount !== accountId || (legacy.mode && legacy.mode !== mode)) {
+          throw new Error("An unscoped idempotency record belongs to an unknown account. Reconcile it before retrying.");
+        }
+        if (legacy.requestSignature !== requestSignature) {
+          throw new Error("A previous request for this action is unresolved. Retry with the same inputs after reconciliation.");
+        }
+        existing = { ...legacy, accountId, mode, actionKey };
+        window.sessionStorage.setItem(storageKey, JSON.stringify(existing));
+        window.sessionStorage.removeItem(legacyKey);
+      }
+    }
   } catch (error) {
     throw new Error(`Session storage is unavailable; broker action blocked: ${error.message}`);
   }
   if (existing?.key) {
+    const signatureAccount = idempotencySignatureAccount(existing.requestSignature);
+    if ((existing.accountId && existing.accountId !== accountId) || (signatureAccount && signatureAccount !== accountId) || (existing.mode && existing.mode !== mode)) {
+      throw new Error("A stored idempotency record belongs to a different account or mode. Reconcile it before retrying.");
+    }
     if (existing.requestSignature !== requestSignature) {
       throw new Error("A previous request for this action is unresolved. Retry with the same inputs after reconciliation.");
+    }
+    if (existing.accountId !== accountId || existing.mode !== mode || existing.actionKey !== actionKey) {
+      try {
+        window.sessionStorage.setItem(storageKey, JSON.stringify({ ...existing, accountId, mode, actionKey }));
+      } catch (error) {
+        throw new Error(`Could not update the idempotency record; broker action blocked: ${error.message}`);
+      }
     }
     return existing.key;
   }
@@ -971,16 +1155,16 @@ function getOrCreateIdempotencyKey(actionKey, requestSignature) {
   const safeAction = String(actionKey).toLowerCase().replace(/[^a-z0-9._:-]/g, "-").slice(0, 32);
   const key = `ui:${safeAction}:${randomId}`;
   try {
-    window.sessionStorage.setItem(storageKey, JSON.stringify({ key, requestSignature }));
+    window.sessionStorage.setItem(storageKey, JSON.stringify({ key, requestSignature, accountId, mode, actionKey }));
   } catch (error) {
     throw new Error(`Could not persist the idempotency key; broker action blocked: ${error.message}`);
   }
   return key;
 }
 
-function clearIdempotencyKey(actionKey) {
+function clearIdempotencyKey(actionKey, accountId = state.selectedAccountId) {
   try {
-    window.sessionStorage.removeItem(`${IDEMPOTENCY_STORAGE_PREFIX}${actionKey}`);
+    window.sessionStorage.removeItem(`${IDEMPOTENCY_STORAGE_PREFIX}${accountId}:${actionKey}`);
   } catch (error) {
     console.error(error);
   }
@@ -994,7 +1178,8 @@ function renderPanelLoadStates(errors) {
   const targets = {
     latestSnapshot: els.metricsStrip,
     orders: els.ordersBody,
-    spreads: els.spreadsBody,
+    workingSpreads: els.spreadsBody,
+    spreadHistory: els.bullPutHistoryStatus,
     runtime: els.strategyRuntimeStrip,
     operatorStatus: els.reconciliationStrip,
     zeroDteLotteryRuntime: els.zeroDteLotteryStrip,
@@ -1041,9 +1226,11 @@ function formatPanelLoadLabel(key) {
   const labels = {
     latestSnapshot: "Account snapshot",
     orders: "Orders",
-    spreads: "Bull Put spreads",
+    workingSpreads: "Bull Put working spreads",
+    spreadHistory: "Bull Put history",
     runtime: "Bull Put runtime",
     operatorStatus: "Operator status",
+    recoveryStatus: "Recovery status",
     tradingIntents: "Trading intents",
     tradeActions: "Trade actions",
     zeroDteLotteryRuntime: "Zero-DTE runtime",
@@ -1062,6 +1249,8 @@ async function loadDashboard() {
   setStatus("Loading dashboard...", "warning");
   try {
     await refreshAccounts();
+    window.StocksToolWorkspace?.updateAccountContext(state.selectedAccountId || "--");
+    void refreshResearchContext();
     const loadResult = await loadAccountData();
     if (loadResult.discarded) {
       return;
@@ -1085,281 +1274,40 @@ async function loadDashboard() {
     } else {
       setStatus("Dashboard updated. Option strategy panels loaded first. Macro overlays are available on demand.", "success");
     }
+    window.StocksToolWorkspace?.updateDataTime(state.latestSnapshot?.captured_at || new Date());
   } catch (error) {
     console.error(error);
     setStatus(error.message || "Failed to load dashboard.", "error");
   }
 }
 
-async function loadAccountData() {
-  const loadGeneration = ++state.accountLoadGeneration;
-  const selectedAccountId = state.selectedAccountId;
-  if (!selectedAccountId) {
-    state.orders = [];
-    state.spreads = [];
-    state.runtime = null;
-    state.zeroDteLotteryRuntime = null;
-    state.zeroDteLotteryPreview = null;
-    state.zeroDteLotteryScanResult = null;
-    state.strategyExperiment = { proposals: [], runs: [], signals: [], reviews: [] };
-    state.coveredCallActivity = { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
-    state.advisorContext = null;
-    state.advisorDraft = null;
-    state.advisorRuns = [];
-    state.operatorStatus = null;
-    state.unresolvedTradingIntents = [];
-    state.coreDataHealthy = false;
-    state.coreLoadFailures = ["account selection"];
-    state.panelLoadErrors = {};
-    state.advisorStatus = buildOverlayStatus(
-      "idle",
-      "Select a broker account before loading advisor context."
-    );
-    state.marketEvents = [];
-    state.executions = [];
-    state.journals = [];
-    state.preOpenRuns = [];
-    state.recoverCloseEligibility = {};
-    state.latestSnapshot = null;
-    state.selectedOrderId = "";
-    state.preOpenAssessment = null;
-    state.preOpenStatus = buildOverlayStatus("idle", "Select a broker account to load the macro board on demand.");
-    renderReconciliationStatus();
-    renderMetrics();
-    renderHoldings();
-    renderPreOpenAssessment();
-    renderLatestPreOpenRun();
-    renderStrategyRuntime();
-    renderZeroDteLottery();
-    renderCoveredCallActivity();
-    renderStrategyExperiment();
-    renderAdvisorPanel();
-    renderMarketEvents();
-    renderSpreads();
-    renderOrders();
-    renderPositions();
-    renderSelectedOrder();
-    updateSyncButtons();
-    updateOrderTicketAvailability();
-    updatePreOpenButtons();
-    applyTradingSafetyState();
-    return { coreHealthy: false, requiredFailures: ["account selection"], optionalFailures: [], discarded: false };
+async function refreshResearchContext() {
+  if (typeof window.StocksToolResearch?.refresh !== "function") {
+    return false;
   }
-
-  state.coreDataHealthy = false;
-  state.coreLoadFailures = ["Account data loading"];
-  applyTradingSafetyState();
-
-  const accountId = encodeURIComponent(selectedAccountId);
-  const requestSpecs = [
-    ["latestSnapshot", true, `/account-snapshots/latest?external_account_id=${accountId}`],
-    ["orders", true, `/orders?external_account_id=${accountId}`],
-    ["spreads", true, `/strategies/bull-put/spreads?external_account_id=${accountId}`],
-    ["runtime", true, `/strategies/bull-put/runtime?external_account_id=${accountId}`],
-    ["operatorStatus", true, `/ops/unattended-status?external_account_id=${accountId}&mode=paper`],
-    ["tradingIntents", true, `/ops/trading-intents?external_account_id=${accountId}&mode=paper&limit=100`],
-    ["tradeActions", true, `/ops/trade-actions?external_account_id=${accountId}&mode=paper&limit=100`],
-    ["zeroDteLotteryRuntime", false, `/strategies/zero-dte-lottery/runtime?external_account_id=${accountId}&mode=paper`],
-    ["strategyExperiment", true, `/strategies/experiment?external_account_id=${accountId}&limit=6`],
-    ["coveredCallActivity", true, `/strategies/covered-call/activity?external_account_id=${accountId}&limit=8`],
-    ["advisorRuns", false, `/strategies/advisor/run-cards?external_account_id=${accountId}&source=deepseek&limit=5`],
-    ["marketEvents", false, "/market-events?limit=8"],
-    ["executions", false, `/executions?external_account_id=${accountId}`],
-    ["journals", false, `/journals?external_account_id=${accountId}`],
-    ["preOpenRuns", false, `/strategies/pre-open-runs?external_account_id=${accountId}&limit=1`],
-  ];
-  const settled = await Promise.allSettled(requestSpecs.map(([, , url]) => fetchJson(url)));
-  const values = {};
-  const errors = {};
-  settled.forEach((result, index) => {
-    const [key] = requestSpecs[index];
-    if (result.status === "fulfilled") {
-      values[key] = result.value;
-    } else {
-      console.error(result.reason);
-      errors[key] = result.reason?.message || "Request failed.";
+  try {
+    const refreshed = await window.StocksToolResearch.refresh({
+      externalAccountId: state.selectedAccountId || "",
+      watchlistId: window.StocksToolWatchlists?.getSelectedId?.() || "",
+    });
+    const generatedAt = window.StocksToolResearch.getState?.().generatedAt;
+    if (refreshed && generatedAt) {
+      window.StocksToolWorkspace?.updateDataTime(generatedAt);
     }
-  });
-  if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
-    return {
-      coreHealthy: state.coreDataHealthy,
-      requiredFailures: [],
-      optionalFailures: [],
-      discarded: true,
-    };
+    return refreshed;
+  } catch (error) {
+    console.error(error);
+    return false;
   }
-  if (values.latestSnapshot === null || values.operatorStatus === null) {
-    for (const key of ["latestSnapshot", "operatorStatus"]) {
-      if (values[key] === null) {
-        delete values[key];
-        errors[key] = "Required account data was empty.";
-      }
-    }
-  }
-
-  const nextSpreads = "spreads" in values ? (Array.isArray(values.spreads) ? values.spreads : []) : null;
-  const nextRecoverCloseEligibility = nextSpreads
-    ? await loadRecoverCloseEligibility(nextSpreads)
-    : null;
-  if (loadGeneration !== state.accountLoadGeneration || selectedAccountId !== state.selectedAccountId) {
-    return {
-      coreHealthy: state.coreDataHealthy,
-      requiredFailures: [],
-      optionalFailures: [],
-      discarded: true,
-    };
-  }
-
-  if ("orders" in values) state.orders = Array.isArray(values.orders) ? values.orders : [];
-  if (nextSpreads !== null) {
-    state.spreads = nextSpreads;
-    state.recoverCloseEligibility = nextRecoverCloseEligibility || {};
-  }
-  if ("runtime" in values) state.runtime = values.runtime;
-  if ("operatorStatus" in values) state.operatorStatus = values.operatorStatus;
-  if ("tradingIntents" in values && "tradeActions" in values) {
-    const unresolvedStates = new Set(["prepared", "submitting", "broker_acknowledged", "unknown"]);
-    state.unresolvedTradingIntents = [
-      ...(Array.isArray(values.tradingIntents) ? values.tradingIntents : []),
-      ...(Array.isArray(values.tradeActions) ? values.tradeActions : []),
-    ].filter((intent) => unresolvedStates.has(intent?.state));
-  }
-  if ("latestSnapshot" in values) state.latestSnapshot = values.latestSnapshot;
-  if ("zeroDteLotteryRuntime" in values) state.zeroDteLotteryRuntime = values.zeroDteLotteryRuntime;
-  if ("strategyExperiment" in values) {
-    state.strategyExperiment = values.strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
-  }
-  if ("coveredCallActivity" in values) {
-    state.coveredCallActivity = values.coveredCallActivity || { summary: {}, proposals: [], runs: [], signals: [], reviews: [] };
-  }
-  if ("advisorRuns" in values) state.advisorRuns = Array.isArray(values.advisorRuns) ? values.advisorRuns : [];
-  if ("marketEvents" in values) state.marketEvents = Array.isArray(values.marketEvents) ? values.marketEvents : [];
-  if ("executions" in values) state.executions = Array.isArray(values.executions) ? values.executions : [];
-  if ("journals" in values) state.journals = Array.isArray(values.journals) ? values.journals : [];
-  if ("preOpenRuns" in values) state.preOpenRuns = Array.isArray(values.preOpenRuns) ? values.preOpenRuns : [];
-
-  const requiredFailures = requestSpecs
-    .filter(([key, required]) => required && errors[key])
-    .map(([key]) => formatPanelLoadLabel(key));
-  const optionalFailures = requestSpecs
-    .filter(([key, required]) => !required && errors[key])
-    .map(([key]) => formatPanelLoadLabel(key));
-  state.coreDataHealthy = state.accountListHealthy && requiredFailures.length === 0;
-  state.coreLoadFailures = requiredFailures;
-  state.panelLoadErrors = errors;
-
-  if ("preOpenRuns" in values) seedPreOpenAssessmentFromLatestRun({ clearWhenMissing: true });
-  if ("orders" in values && !state.orders.some((order) => order.id === state.selectedOrderId)) {
-    state.selectedOrderId = state.orders[0]?.id || "";
-  }
-
-  renderReconciliationStatus();
-  renderMetrics();
-  renderHoldings();
-  renderPreOpenAssessment();
-  renderLatestPreOpenRun();
-  renderStrategyRuntime();
-  renderZeroDteLottery();
-  renderCoveredCallActivity();
-  renderStrategyExperiment();
-  renderAdvisorPanel();
-  renderMarketEvents();
-  renderSpreads();
-  renderOrders();
-  renderPositions();
-  renderSelectedOrder();
-  renderPanelLoadStates(errors);
-  updateSyncButtons();
-  updateOrderTicketAvailability();
-  updatePreOpenButtons();
-  applyTradingSafetyState();
-  return { coreHealthy: state.coreDataHealthy, requiredFailures, optionalFailures, discarded: false };
-}
-
-async function loadRecoverCloseEligibility(spreads) {
-  const entries = await Promise.all(
-    (Array.isArray(spreads) ? spreads : []).map(async (spread) => {
-      try {
-        const eligibility = await fetchJson(
-          `/strategies/bull-put/spreads/${encodeURIComponent(spread.id)}/recover-close/eligibility?external_account_id=${encodeURIComponent(state.selectedAccountId)}&mode=paper`
-        );
-        return [spread.id, eligibility];
-      } catch (error) {
-        console.error(error);
-        return [
-          spread.id,
-          {
-            spread_id: spread.id,
-            eligible: false,
-            reasons: ["eligibility_unavailable"],
-            external_account_id: spread.external_account_id,
-            mode: spread.mode || "paper",
-            latest_should_close: Boolean(spread.latest_monitor_should_close),
-            old_short_close_order_id: spread.short_exit_order_id,
-            old_short_close_order_status: spread.latest_close_order_status,
-            working_replacement_order_id: null,
-            max_debit_required_hint: null,
-          },
-        ];
-      }
-    })
-  );
-  return Object.fromEntries(entries);
 }
 
 function prepareMarketOverlayPanels() {
-  if (els.quoteCard && !state.quote) {
-    state.quoteStatus = buildOverlayStatus("idle", "Load a quote manually to keep the dashboard fast.");
-    renderQuote();
-  }
   if (!state.preOpenAssessment) {
     state.preOpenStatus = buildOverlayStatus(
       "idle",
       "Macro board is available on demand so option strategy requests stay first."
     );
     renderPreOpenAssessment();
-  }
-}
-
-async function loadQuote(options = {}) {
-  if (!els.quoteSymbol || !els.quoteCard) {
-    return;
-  }
-  const { timeoutMs = BROKER_REQUEST_TIMEOUT_MS } = options;
-  const symbol = els.quoteSymbol.value.trim().toUpperCase();
-  if (!symbol) {
-    state.quote = null;
-    state.quoteStatus = buildOverlayStatus("idle", "Enter a symbol.");
-    renderQuote();
-    return;
-  }
-
-  const hasMatchingQuote = state.quote && state.quote.symbol === symbol;
-  if (!hasMatchingQuote) {
-    state.quote = null;
-  }
-  state.quoteStatus = buildOverlayStatus("loading", `Refreshing ${symbol} quote...`);
-  renderQuote();
-
-  try {
-    state.quote = await fetchJson(
-      `/brokers/longbridge/quote?symbol=${encodeURIComponent(symbol)}&mode=paper`,
-      { timeoutMs }
-    );
-    state.quoteStatus = buildOverlayStatus("live", overlayLiveDetail("Quote", state.quote.timestamp));
-    renderQuote();
-  } catch (error) {
-    console.error(error);
-    const hasStaleQuote = state.quote && state.quote.symbol === symbol;
-    if (!hasStaleQuote) {
-      state.quote = null;
-    }
-    state.quoteStatus = classifyOverlayFailure(error, {
-      label: "quote",
-      stale: hasStaleQuote,
-      staleAt: state.quote?.timestamp,
-    });
-    renderQuote();
   }
 }
 
@@ -1370,6 +1318,8 @@ async function loadPreOpenAssessment(options = {}) {
     renderPreOpenAssessment();
     return;
   }
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   state.preOpenStatus = buildOverlayStatus(
     "loading",
     includeOptionOverlays
@@ -1380,14 +1330,17 @@ async function loadPreOpenAssessment(options = {}) {
 
   try {
     const params = new URLSearchParams();
-    params.set("external_account_id", state.selectedAccountId);
+    params.set("external_account_id", accountId);
     params.set("include_option_overlays", includeOptionOverlays ? "true" : "false");
     const assessment = await fetchJson(
       `/strategies/pre-open-risk?${params.toString()}`,
       { timeoutMs }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     applyPreOpenAssessmentResponse(assessment);
+    return { discarded: false };
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     state.preOpenStatus = classifyOverlayFailure(error, {
       label: "live macro board",
@@ -1395,6 +1348,7 @@ async function loadPreOpenAssessment(options = {}) {
       staleAt: state.preOpenAssessment?.analyzed_at,
     });
     renderPreOpenAssessment();
+    return { discarded: false, error };
   }
 }
 
@@ -1412,16 +1366,20 @@ async function saveCurrentPreOpenBoard() {
     return;
   }
 
-  setStatus(`Saving live macro board for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+
+  setStatus(`Saving live macro board for ${accountId}...`, "warning");
   updatePreOpenButtons(true);
   try {
     const result = await fetchJson(
-      `/strategies/pre-open-runs/${encodeURIComponent(state.selectedAccountId)}/capture?force=true&include_option_overlays=false`,
+      `/strategies/pre-open-runs/${encodeURIComponent(accountId)}/capture?force=true&include_option_overlays=false`,
       {
         method: "POST",
         timeoutMs: PRE_OPEN_BOARD_TIMEOUT_MS,
       }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     if (result.run) {
       state.preOpenRuns = [
         result.run,
@@ -1432,11 +1390,14 @@ async function saveCurrentPreOpenBoard() {
       renderLatestPreOpenRun();
     }
     setStatus(`Stored macro board for ${formatSessionDate(result.run?.target_session_date)}.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Saving macro board failed.", "error");
+    return { discarded: false, error };
   } finally {
-    updatePreOpenButtons(false);
+    if (mutationContextIsCurrent(accountId, accountLoadGeneration)) updatePreOpenButtons(false);
   }
 }
 
@@ -1497,34 +1458,48 @@ function applyPreOpenAssessmentResponse(assessment) {
 }
 
 async function syncAccount() {
-  setStatus(`Syncing account ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Syncing account ${accountId}...`, "warning");
   try {
-    await fetchJson(`/brokers/longbridge/account-sync/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+    await fetchJson(`/brokers/longbridge/account-sync/${encodeURIComponent(accountId)}?mode=paper`, {
       method: "POST",
     });
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await refreshAccounts();
     await loadAccountData();
-    setStatus(`Account ${state.selectedAccountId} synced.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setStatus(`Account ${accountId} synced.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     await refreshAccountsSilently();
     setStatus(error.message || "Account sync failed.", "error");
+    return { discarded: false, error };
   }
 }
 
 async function syncOrders() {
-  setStatus(`Syncing orders for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Syncing orders for ${accountId}...`, "warning");
   try {
-    await fetchJson(`/orders/sync/longbridge/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+    await fetchJson(`/orders/sync/longbridge/${encodeURIComponent(accountId)}?mode=paper`, {
       method: "POST",
     });
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await refreshAccounts();
     await loadAccountData();
-    setStatus(`Orders for ${state.selectedAccountId} synced.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setStatus(`Orders for ${accountId} synced.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     await refreshAccountsSilently();
     setStatus(error.message || "Order sync failed.", "error");
+    return { discarded: false, error };
   }
 }
 
@@ -1533,6 +1508,7 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
     setStatus("Select a broker account before updating strategy controls.", "warning");
     return;
   }
+  const accountId = state.selectedAccountId;
 
   const payload = {
     auto_entry_enabled: els.strategyAutoEntry.value === "true",
@@ -1547,12 +1523,13 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
         actionKey: "bull-put-controls",
         button,
         requestSignature: JSON.stringify(payload),
+        getRequestSignature: () => JSON.stringify(payload),
         statusElement: els.strategyControlsHint,
         confirmation: {
           title: "Confirm Bull Put controls",
           summary: payload.auto_entry_enabled ? "Enable paper Bull Put entry automation" : "Update Bull Put entry controls",
           details: {
-            Account: state.selectedAccountId,
+            Account: accountId,
             Mode: "Paper",
             Symbol: payload.paused_symbols.length ? payload.paused_symbols.join(", ") : "Configured universe",
             "Side / Legs": "Protective put first / short put second",
@@ -1564,8 +1541,8 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
         },
       },
       async (idempotencyKey) => {
-        setStatus(`Saving bull put controls for ${state.selectedAccountId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}?mode=paper`, {
+        setStatus(`Saving bull put controls for ${accountId}...`, "warning");
+        return fetchJson(`/strategies/bull-put/runtime/${encodeURIComponent(accountId)}?mode=paper`, {
           method: "POST",
           headers: { "Idempotency-Key": idempotencyKey },
           body: JSON.stringify(payload),
@@ -1576,9 +1553,11 @@ async function saveStrategyControls(button = els.saveStrategyControls) {
       return;
     }
     await loadAccountData();
-    setActionStatus(els.strategyControlsHint, `Bull put controls updated for ${state.selectedAccountId}.`, "success");
-    setStatus(`Bull put controls updated for ${state.selectedAccountId}.`, "success");
+    if (state.selectedAccountId !== accountId) return { discarded: true };
+    setActionStatus(els.strategyControlsHint, `Bull put controls updated for ${accountId}.`, "success");
+    setStatus(`Bull put controls updated for ${accountId}.`, "success");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setActionStatus(els.strategyControlsHint, error.message || "Bull put controls update failed.", "error");
     setStatus(error.message || "Bull put controls update failed.", "error");
@@ -1591,14 +1570,15 @@ async function runStrategyScan(button = els.runStrategyScan) {
     return;
   }
 
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
-    const accountId = state.selectedAccountId;
     setActionStatus(els.strategyControlsHint, "Loading a fresh Bull Put candidate for confirmation...", "warning");
     const readiness = await fetchJson(
       `/strategies/bull-put/readiness?external_account_id=${encodeURIComponent(accountId)}&mode=paper`,
       { timeoutMs: BROKER_REQUEST_TIMEOUT_MS }
     );
-    if (state.selectedAccountId !== accountId) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) {
       setActionStatus(els.strategyControlsHint, "Account changed while loading the Bull Put candidate; reload before trading.", "warning");
       return;
     }
@@ -1631,6 +1611,14 @@ async function runStrategyScan(button = els.runStrategyScan) {
         button,
         requestSignature: JSON.stringify({
           account: accountId,
+          mode: "paper",
+          force: true,
+          symbol: preview.symbol,
+          candidateToken: preview.candidate_token,
+          minimumNetCredit: candidate.conservative_credit,
+        }),
+        getRequestSignature: () => JSON.stringify({
+          account: state.selectedAccountId,
           mode: "paper",
           force: true,
           symbol: preview.symbol,
@@ -1682,11 +1670,13 @@ async function runStrategyScan(button = els.runStrategyScan) {
     }
     const result = mutation.result;
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = `Bull put paper order opened ${result?.underlying_symbol || preview.symbol}.`;
     const tone = "success";
     setActionStatus(els.strategyControlsHint, message, tone);
     setStatus(message, tone);
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setActionStatus(els.strategyControlsHint, error.message || "Bull put scan failed.", "error");
     setStatus(error.message || "Bull put scan failed.", "error");
@@ -1699,18 +1689,23 @@ async function runStrategyReview() {
     return;
   }
 
-  setStatus(`Running bull put review for ${state.selectedAccountId}...`, "warning");
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
+  setStatus(`Running bull put review for ${accountId}...`, "warning");
   try {
     const result = await fetchJson(
-      `/strategies/bull-put/runtime/${encodeURIComponent(state.selectedAccountId)}/review?mode=paper&force=true`,
+      `/strategies/bull-put/runtime/${encodeURIComponent(accountId)}/review?mode=paper&force=true`,
       {
         method: "POST",
       }
     );
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = result.recommendation || result.reason || result.strategy_state?.last_review_summary || "Bull put review completed.";
     setStatus(message, result.review_status === "suggested" ? "success" : "warning");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Bull put review failed.", "error");
   }
@@ -1730,162 +1725,39 @@ async function previewZeroDteLottery() {
     return;
   }
   const direction = els.zeroDteLotteryDirection.value || "auto";
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   setStatus(`Previewing zero-DTE lottery for ${symbol}...`, "warning");
   try {
     const params = new URLSearchParams();
-    params.set("external_account_id", state.selectedAccountId);
+    params.set("external_account_id", accountId);
     params.set("symbol", symbol);
     params.set("direction", direction);
     params.set("mode", "paper");
-    state.zeroDteLotteryPreview = await fetchJson(`/strategies/zero-dte-lottery/preview?${params.toString()}`);
+    const preview = await fetchJson(`/strategies/zero-dte-lottery/preview?${params.toString()}`);
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
+    state.zeroDteLotteryPreview = preview;
     state.zeroDteLotteryScanResult = null;
-    renderZeroDteLottery();
+    strategyView?.renderZeroDteLottery();
     const message = state.zeroDteLotteryPreview.eligible
       ? `Zero-DTE lottery candidate ready: ${state.zeroDteLotteryPreview.candidate?.option_symbol || symbol}.`
       : state.zeroDteLotteryPreview.reasons?.[0] || "Zero-DTE lottery preview completed without a candidate.";
     setStatus(message, state.zeroDteLotteryPreview.eligible ? "success" : "warning");
   } catch (error) {
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Zero-DTE lottery preview failed.", "error");
   }
 }
-
-function resetAdvisorState(
-  detail = "Advisor context is available on demand. DeepSeek dry-run sends selected account context outside the local app."
-) {
-  state.advisorContext = null;
-  state.advisorDraft = null;
-  state.advisorStatus = buildOverlayStatus("idle", detail);
-  renderAdvisorPanel();
-}
-
-async function loadAdvisorContext() {
-  if (!state.selectedAccountId) {
-    setStatus("Select a broker account before loading advisor context.", "warning");
-    resetAdvisorState("Select a broker account before loading advisor context.");
-    return;
-  }
-
-  state.advisorStatus = buildOverlayStatus("loading", `Loading advisor context for ${state.selectedAccountId}...`);
-  renderAdvisorPanel();
-  try {
-    state.advisorContext = await fetchJson(
-      `/strategies/advisor-context?external_account_id=${encodeURIComponent(state.selectedAccountId)}&limit=10`
-    );
-    state.advisorDraft = null;
-    const summary = objectPayload(state.advisorContext.covered_call_activity?.summary);
-    state.advisorStatus = buildOverlayStatus(
-      "live",
-      `Advisor context loaded for ${state.selectedAccountId}.`,
-      `${formatActivityCount(summary.active_proposals)} active covered-call proposal(s), ${formatActivityCount(summary.executed_positions)} open covered-call position(s).`
-    );
-    renderAdvisorPanel();
-    setStatus(`Advisor context loaded for ${state.selectedAccountId}.`, "success");
-  } catch (error) {
-    console.error(error);
-    state.advisorStatus = buildOverlayStatus("error", error.message || "Advisor context load failed.");
-    renderAdvisorPanel();
-    setStatus(error.message || "Advisor context load failed.", "error");
-  }
-}
-
-async function runDeepSeekAdvisorDryRun() {
-  if (!state.selectedAccountId) {
-    setStatus("Select a broker account before running DeepSeek advisor.", "warning");
-    return;
-  }
-
-  state.advisorStatus = buildOverlayStatus(
-    "loading",
-    `Running DeepSeek advisor dry-run for ${state.selectedAccountId}...`,
-    "This sends the selected account advisor context to DeepSeek."
-  );
-  renderAdvisorPanel();
-  try {
-    const result = await fetchJson("/strategies/advisor/deepseek/dry-run", {
-      method: "POST",
-      body: JSON.stringify({
-        external_account_id: state.selectedAccountId,
-        context_limit: 10,
-      }),
-      timeoutMs: ADVISOR_REQUEST_TIMEOUT_MS,
-    });
-    state.advisorContext = result.context || null;
-    state.advisorDraft = result;
-    if (result.advisor_run) {
-      upsertAdvisorRun(result.advisor_run);
-    }
-    const payload = objectPayload(result.response_payload);
-    const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
-    const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
-    state.advisorStatus = buildOverlayStatus(
-      "live",
-      `DeepSeek generated ${proposalCount} proposal(s) and ${reviewCount} review(s).`,
-      "Dry-run only; use Record Output to write local ledger entries."
-    );
-    renderAdvisorPanel();
-    setStatus(`DeepSeek dry-run generated ${proposalCount} proposal(s) and ${reviewCount} review(s).`, "success");
-  } catch (error) {
-    console.error(error);
-    state.advisorStatus = buildOverlayStatus("error", error.message || "DeepSeek advisor dry-run failed.");
-    renderAdvisorPanel();
-    setStatus(error.message || "DeepSeek advisor dry-run failed.", "error");
-  }
-}
-
-async function recordAdvisorResponse() {
-  const payload = objectPayload(state.advisorDraft?.response_payload);
-  const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
-  const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
-  if (!proposalCount && !reviewCount) {
-    setStatus("No DeepSeek advisor output is ready to record.", "warning");
-    return;
-  }
-
-  state.advisorStatus = buildOverlayStatus("loading", "Recording advisor output to the local strategy ledger...");
-  renderAdvisorPanel();
-  try {
-    const result = await fetchJson("/strategies/advisor/responses", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    if (result.advisor_run) {
-      upsertAdvisorRun(result.advisor_run);
-    }
-    state.advisorDraft = null;
-    state.advisorStatus = buildOverlayStatus(
-      "live",
-      `Recorded ${proposalCount} advisor proposal(s) and ${reviewCount} review(s).`,
-      "Broker orders were not submitted."
-    );
-    await loadAccountData();
-    setStatus(`Recorded advisor output: ${proposalCount} proposal(s), ${reviewCount} review(s).`, "success");
-  } catch (error) {
-    console.error(error);
-    state.advisorStatus = buildOverlayStatus("error", error.message || "Advisor output recording failed.");
-    renderAdvisorPanel();
-    setStatus(error.message || "Advisor output recording failed.", "error");
-  }
-}
-
-function upsertAdvisorRun(run) {
-  if (!run?.id) {
-    return;
-  }
-  state.advisorRuns = [
-    run,
-    ...state.advisorRuns.filter((candidate) => candidate.id !== run.id),
-  ].slice(0, 5);
-}
-
 async function reconcileCoveredCallLifecycle(button = null) {
   if (!state.selectedAccountId) {
     setStatus("Select a broker account first.", "warning");
     return;
   }
 
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
-    const accountId = state.selectedAccountId;
     if (button) {
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
@@ -1898,20 +1770,21 @@ async function reconcileCoveredCallLifecycle(button = null) {
         timeoutMs: COVERED_CALL_LIFECYCLE_TIMEOUT_MS,
       }
     );
-    if (state.selectedAccountId !== accountId) {
-      return;
-    }
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     setStatus(`Covered-call lifecycle refreshed read-only: ${formatCoveredCallLifecycleResult(result)}.`, "success");
+    return { discarded: false };
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     setStatus(error.message || "Covered-call lifecycle refresh failed.", "error");
   } finally {
-    if (button) {
+    if (button && state.selectedAccountId === accountId) {
       button.removeAttribute("aria-busy");
       button.disabled = false;
     }
-    applyBrokerMutationSafetyLocks();
+    if (state.selectedAccountId === accountId) applyTradingSafetyState();
   }
 }
 
@@ -1926,6 +1799,8 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
     roll_execute: "Executing covered call roll proposal",
     roll_continue: "Continuing covered call roll proposal",
   };
+  const accountId = state.selectedAccountId;
+  const accountLoadGeneration = state.accountLoadGeneration;
   try {
     const requestPayload = buildStrategyProposalActionPayload(action);
     if (requestPayload.canceled) {
@@ -1941,6 +1816,7 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
           actionKey,
           button,
           requestSignature: JSON.stringify({ proposal_id: proposalId, action, ...requestPayload.body }),
+          getRequestSignature: () => JSON.stringify({ proposal_id: proposalId, action, ...requestPayload.body }),
           statusElement: els.coveredCallActionStatus,
           confirmation: buildCoveredCallConfirmation(action, proposal, requestPayload.body),
         },
@@ -1957,13 +1833,16 @@ async function handleStrategyProposalAction(action, proposalId, button = null) {
       setStatus(`${actionLabels[action] || "Updating strategy proposal"} ${proposalId}...`, "warning");
       result = await sendStrategyProposalActionRequest(action, proposalId, requestPayload.body, null);
     }
+    if (!mutationContextIsCurrent(accountId, accountLoadGeneration)) return { discarded: true };
     await loadAccountData();
+    if (state.selectedAccountId !== accountId) return { discarded: true };
     const message = formatStrategyProposalActionResult(action, result);
     if (isCoveredCallBrokerMutation(action)) {
       setActionStatus(els.coveredCallActionStatus, message, "success");
     }
     setStatus(message, "success");
   } catch (error) {
+    if (state.selectedAccountId !== accountId) return { discarded: true, error };
     console.error(error);
     if (isCoveredCallBrokerMutation(action)) {
       setActionStatus(els.coveredCallActionStatus, error.message || "Covered Call action failed.", "error");
@@ -2155,429 +2034,21 @@ function addOptionalNumberField(payload, field, value) {
   return payload;
 }
 
-async function refreshAccounts() {
-  try {
-    const accounts = await fetchJson("/broker-accounts");
-    state.accountListHealthy = true;
-    applyAccounts(accounts);
-  } catch (error) {
-    state.accountListHealthy = false;
-    state.coreDataHealthy = false;
-    state.coreLoadFailures = ["Broker accounts"];
-    applyTradingSafetyState();
-    throw error;
-  }
+async function loadAccountData(...args) {
+  return accountLoader.loadAccountData(...args);
 }
 
-async function refreshAccountsSilently() {
-  try {
-    await refreshAccounts();
-  } catch (error) {
-    console.error(error);
-  }
+async function refreshAccounts(...args) {
+  return accountLoader.refreshAccounts(...args);
 }
 
-function applyAccounts(accounts) {
-  state.accounts = accounts;
-
-  if (!state.selectedAccountId && accounts.length > 0) {
-    state.selectedAccountId = accounts[0].external_account_id;
-  } else if (accounts.every((account) => account.external_account_id !== state.selectedAccountId)) {
-    state.selectedAccountId = accounts[0]?.external_account_id || "";
-  }
-
-  renderAccountOptions();
-  renderReconciliationStatus();
-  updateSyncButtons();
-  updateOrderTicketAvailability();
+async function refreshAccountsSilently(...args) {
+  return accountLoader.refreshAccountsSilently(...args);
 }
 
-async function submitOrder(button = els.submitOrder) {
-  if (!state.selectedAccountId) {
-    setStatus("Select a broker account before submitting an order.", "warning");
-    return;
-  }
-
-  try {
-    const payload = buildCreateOrderPayload();
-    const price = payload.limit_price
-      ? `Limit ${formatCurrency(payload.limit_price, "USD")}`
-      : payload.stop_price
-        ? `Stop ${formatCurrency(payload.stop_price, "USD")}`
-        : "Market / unbounded";
-    const boundedNotional = payload.side === "buy" && payload.limit_price
-      ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD")
-      : "Not bounded in ticket";
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey: "order-submit",
-        button,
-        requestSignature: JSON.stringify(payload),
-        statusElement: els.orderActionStatus,
-        confirmation: {
-          title: "Confirm paper order",
-          summary: `${payload.side.toUpperCase()} ${payload.quantity} ${payload.symbol}`,
-          details: {
-            Account: state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: payload.symbol,
-            Side: payload.side.toUpperCase(),
-            Quantity: String(payload.quantity),
-            Price: price,
-            "Max Risk": boundedNotional,
-            "Quote Time": matchingQuoteTime(payload.symbol),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Submitting ${payload.side.toUpperCase()} ${payload.symbol}...`, "warning");
-        return fetchJson("/orders/submit", {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify(payload),
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const created = mutation.result;
-    state.selectedOrderId = created.id;
-    els.orderRemark.value = "";
-    await loadAccountData();
-    setSelectedOrder(created.id);
-    setActionStatus(els.orderActionStatus, `Order submitted for ${created.symbol}.`, "success");
-    setStatus(`Order submitted for ${created.symbol}.`, "success");
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.orderActionStatus, error.message || "Order submission failed.", "error");
-    setStatus(error.message || "Order submission failed.", "error");
-  }
+function applyAccounts(...args) {
+  return accountLoader.applyAccounts(...args);
 }
-
-async function refreshOrder(orderId) {
-  const order = state.orders.find((item) => item.id === orderId);
-  setStatus(`Refreshing order ${order?.symbol || orderId}...`, "warning");
-  try {
-    const refreshed = await fetchJson(`/orders/${encodeURIComponent(orderId)}/refresh`, {
-      method: "POST",
-    });
-    state.selectedOrderId = refreshed.id;
-    await loadAccountData();
-    setSelectedOrder(refreshed.id);
-    setStatus(`Order ${refreshed.symbol} refreshed.`, "success");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Order refresh failed.", "error");
-  }
-}
-
-async function refreshSpread(spreadId) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  setStatus(`Refreshing spread ${spread?.underlying_symbol || spreadId}...`, "warning");
-  try {
-    const refreshed = await fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/refresh`, {
-      method: "POST",
-    });
-    await loadAccountData();
-    setStatus(`Spread ${refreshed.underlying_symbol} refreshed.`, "success");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Spread refresh failed.", "error");
-  }
-}
-
-async function monitorSpread(spreadId, button = null) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  try {
-    const actionKey = `bull-put-monitor:${spreadId}`;
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ spread_id: spreadId, action: "monitor" }),
-        statusElement: els.strategyControlsHint,
-        confirmation: {
-          title: "Confirm Bull Put monitor",
-          summary: `Monitor ${spread?.underlying_symbol || spreadId}; exit rules may submit closing orders`,
-          details: {
-            Account: spread?.external_account_id || state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: spread?.underlying_symbol || spreadId,
-            "Side / Legs": `${spread?.long_symbol || "Long put"} / ${spread?.short_symbol || "Short put"}`,
-            Quantity: `${spread?.contracts || 1} spread`,
-            Price: spread?.raw_payload?.monitor?.estimated_exit_debit
-              ? `Estimated debit ${formatCurrency(spread.raw_payload.monitor.estimated_exit_debit, "USD")}`
-              : "Fresh exit limits",
-            "Max Risk": formatCurrency(spread?.max_loss, "USD"),
-            "Quote Time": formatDateTime(spread?.raw_payload?.monitor?.evaluated_at || spread?.last_synced_at),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Monitoring spread ${spread?.underlying_symbol || spreadId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/monitor`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const result = mutation.result;
-    await loadAccountData();
-    const action = result.should_close
-      ? `Exit action ${formatSpreadExitReason(result.exit_reason)} evaluated for ${result.spread.underlying_symbol}.`
-      : `Spread ${result.spread.underlying_symbol} remains within thresholds.`;
-    const tone = result.should_close ? "success" : "warning";
-    setActionStatus(els.strategyControlsHint, action, tone);
-    setStatus(action, tone);
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.strategyControlsHint, error.message || "Spread monitor failed.", "error");
-    setStatus(error.message || "Spread monitor failed.", "error");
-  }
-}
-
-async function recoverCloseSpread(spreadId, formData, button = null) {
-  const spread = state.spreads.find((item) => item.id === spreadId);
-  const actor = String(formData.get("actor") || "").trim();
-  const note = String(formData.get("note") || "").trim();
-  const maxDebit = String(formData.get("max_debit") || "").trim();
-  const confirmed = formData.get("confirm_paper_order") === "on";
-  if (!actor || !note || !maxDebit || !confirmed) {
-    setStatus("Recover close requires actor, note, max debit, and paper-order confirmation.", "error");
-    return;
-  }
-  try {
-    const payload = {
-      external_account_id: state.selectedAccountId,
-      mode: "paper",
-      confirm_paper_order: true,
-      max_debit: maxDebit,
-      actor,
-      note,
-    };
-    const actionKey = `bull-put-recover:${spreadId}`;
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ spread_id: spreadId, ...payload }),
-        statusElement: els.strategyControlsHint,
-        confirmation: {
-          title: "Confirm Bull Put recovery close",
-          summary: `Buy to close the short put for ${spread?.underlying_symbol || spreadId}`,
-          details: {
-            Account: state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: spread?.short_symbol || spread?.underlying_symbol || spreadId,
-            "Side / Legs": "Buy short put to close",
-            Quantity: `${spread?.contracts || 1} contract`,
-            Price: `Max debit ${formatCurrency(maxDebit, "USD")}`,
-            "Max Risk": formatCurrency(Number(maxDebit) * Number(spread?.contracts || 1) * 100, "USD"),
-            "Quote Time": formatDateTime(spread?.last_synced_at),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Submitting recovery close for ${spread?.underlying_symbol || spreadId}...`, "warning");
-        return fetchJson(`/strategies/bull-put/spreads/${encodeURIComponent(spreadId)}/recover-close`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify(payload),
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const recovered = mutation.result;
-    await loadAccountData();
-    setActionStatus(els.strategyControlsHint, `Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
-    setStatus(`Recovery close submitted for ${recovered.underlying_symbol}.`, "success");
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.strategyControlsHint, error.message || "Recover close failed.", "error");
-    setStatus(error.message || "Recover close failed.", "error");
-  }
-}
-
-async function cancelOrder(orderId, button = null) {
-  const order = state.orders.find((item) => item.id === orderId);
-  if (!order) {
-    setStatus("Order not found in the current table.", "error");
-    return;
-  }
-  if (!isCancelableOrder(order)) {
-    setStatus("This order can no longer be canceled.", "warning");
-    return;
-  }
-  try {
-    const actionKey = `order-cancel:${orderId}`;
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ order_id: orderId, action: "cancel" }),
-        statusElement: els.orderActionStatus,
-        confirmation: {
-          title: "Confirm paper order cancellation",
-          summary: `Cancel ${order.side.toUpperCase()} ${order.quantity} ${order.symbol}`,
-          details: {
-            Account: order.external_account_id || state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: order.symbol,
-            Side: order.side.toUpperCase(),
-            Quantity: String(order.quantity),
-            Price: formatOrderPrice(order),
-            "Max Risk": "Cancel only",
-            "Quote Time": matchingQuoteTime(order.symbol),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Canceling order ${order.symbol}...`, "warning");
-        return fetchJson(`/orders/${encodeURIComponent(orderId)}/cancel`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const canceled = mutation.result;
-    state.selectedOrderId = canceled.id;
-    await loadAccountData();
-    setSelectedOrder(canceled.id);
-    setActionStatus(els.orderActionStatus, `Order ${canceled.symbol} canceled.`, "success");
-    setStatus(`Order ${canceled.symbol} canceled.`, "success");
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.orderActionStatus, error.message || "Order cancel failed.", "error");
-    setStatus(error.message || "Order cancel failed.", "error");
-  }
-}
-
-async function replaceSelectedOrder(button = null) {
-  const order = getSelectedOrder();
-  if (!order) {
-    setStatus("Select an order before replacing it.", "warning");
-    return;
-  }
-  if (!isReplaceableOrder(order)) {
-    setStatus("Only working orders can be replaced.", "warning");
-    return;
-  }
-
-  try {
-    const payload = buildReplaceOrderPayload(order);
-    const actionKey = `order-replace:${order.id}`;
-    if (button) {
-      button.dataset.actionKey = actionKey;
-    }
-    const mutation = await runConfirmedBrokerMutation(
-      {
-        actionKey,
-        button,
-        requestSignature: JSON.stringify({ order_id: order.id, ...payload }),
-        statusElement: els.orderActionStatus,
-        confirmation: {
-          title: "Confirm paper order replacement",
-          summary: `Replace ${order.side.toUpperCase()} ${payload.quantity} ${order.symbol}`,
-          details: {
-            Account: order.external_account_id || state.selectedAccountId,
-            Mode: "Paper",
-            Symbol: order.symbol,
-            Side: order.side.toUpperCase(),
-            Quantity: String(payload.quantity),
-            Price: payload.limit_price ? `Limit ${formatCurrency(payload.limit_price, "USD")}` : formatOrderPrice(order),
-            "Max Risk": payload.limit_price && order.side === "buy"
-              ? formatCurrency(Number(payload.quantity) * Number(payload.limit_price), "USD")
-              : "Not bounded in ticket",
-            "Quote Time": matchingQuoteTime(order.symbol),
-          },
-        },
-      },
-      async (idempotencyKey) => {
-        setStatus(`Replacing order ${order.symbol}...`, "warning");
-        return fetchJson(`/orders/${encodeURIComponent(order.id)}/replace`, {
-          method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify(payload),
-          timeoutMs: BROKER_REQUEST_TIMEOUT_MS,
-        });
-      }
-    );
-    if (!mutation.executed) {
-      return;
-    }
-    const updated = mutation.result;
-    state.selectedOrderId = updated.id;
-    els.replaceRemark.value = "";
-    await loadAccountData();
-    setSelectedOrder(updated.id);
-    setActionStatus(els.orderActionStatus, `Order ${updated.symbol} updated.`, "success");
-    setStatus(`Order ${updated.symbol} updated.`, "success");
-  } catch (error) {
-    console.error(error);
-    setActionStatus(els.orderActionStatus, error.message || "Order replace failed.", "error");
-    setStatus(error.message || "Order replace failed.", "error");
-  }
-}
-
-async function submitJournalEntry() {
-  const order = getSelectedOrder();
-  if (!order) {
-    setStatus("Select an order before saving a journal entry.", "warning");
-    return;
-  }
-
-  try {
-    const title = els.journalTitle.value.trim();
-    const notes = els.journalNotes.value.trim();
-    if (!title) {
-      throw new Error("Journal title is required.");
-    }
-    if (!notes) {
-      throw new Error("Journal notes are required.");
-    }
-
-    const execution = getSelectedExecution();
-    const payload = {
-      external_account_id: order.external_account_id,
-      symbol: order.symbol,
-      entry_type: els.journalEntryType.value,
-      title,
-      notes,
-      order_id: order.id,
-      trade_plan_id: order.trade_plan_id,
-      execution_id: execution?.id || null,
-      tags: parseTags(els.journalTags.value),
-    };
-    setStatus(`Saving ${payload.entry_type} entry for ${order.symbol}...`, "warning");
-    const created = await fetchJson("/journals", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    state.journals = [created, ...state.journals.filter((entry) => entry.id !== created.id)];
-    els.journalTitle.value = "";
-    els.journalTags.value = "";
-    els.journalNotes.value = "";
-    renderSelectedJournal();
-    setStatus(`Journal entry saved for ${created.symbol}.`, "success");
-  } catch (error) {
-    console.error(error);
-    setStatus(error.message || "Journal entry save failed.", "error");
-  }
-}
-
 function renderAccountOptions() {
   els.accountSelect.innerHTML = "";
   if (state.accounts.length === 0) {
@@ -2739,7 +2210,7 @@ function renderReconciliationStatus() {
   els.reconciliationStrip.innerHTML = cards
     .map(
       (card) => `
-        <article class="reconciliation-card" data-view-priority="${escapeHtml(card.priority || "primary")}">
+        <article class="reconciliation-card">
           <div class="reconciliation-head">
             <span class="metric-label">${escapeHtml(card.label)}</span>
             <span class="pill ${escapeHtml(card.tone)}">${escapeHtml(card.badge)}</span>
@@ -3015,782 +2486,10 @@ function renderWatchlists() {
     .join("");
 }
 
-function renderStrategyRuntime() {
-  const runtime = state.runtime;
-  if (!runtime) {
-    els.strategyRuntimeStrip.innerHTML = `
-      <article class="mini-metric-tile">
-        <span class="metric-label">Entry Status</span>
-        <strong class="mini-metric-value">--</strong>
-        <span class="mini-metric-detail">Select a broker account to load bull put controls.</span>
-      </article>
-    `;
-    els.strategySkipCard.className = "strategy-note-body empty";
-    els.strategySkipCard.textContent = "No bull put scan has been skipped yet.";
-    els.strategyJournalFeed.className = "strategy-note-body empty";
-    els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
-    els.strategyReviewCard.className = "strategy-note-body empty";
-    els.strategyReviewCard.textContent = "No bull put strategy review has been generated yet.";
-    els.strategyControlsHint.textContent = "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.";
-    els.strategyAutoEntry.value = "true";
-    els.strategyManualPause.value = "false";
-    els.strategyKillSwitch.value = "false";
-    els.strategyPausedSymbols.value = "";
-    updateStrategyButtons();
-    return;
-  }
-
-  const statusSummary = describeStrategyStatus(runtime);
-  const summaryValues = [
-    {
-      label: "Entry Status",
-      value: statusSummary.value,
-      tone: statusSummary.tone,
-      detail: statusSummary.detail,
-    },
-    {
-      label: "Daily Entries",
-      value: `${runtime.daily_entry_count}`,
-      tone: runtime.daily_entry_count > 0 ? "success" : "",
-      detail: runtime.daily_entry_cap_reached
-        ? "Daily cap reached"
-        : runtime.active_spread_count
-          ? `${runtime.active_spread_count} active spread${runtime.active_spread_count === 1 ? "" : "s"}`
-          : "ready for first spread",
-    },
-    {
-      label: "Daily Realized PnL",
-      value: formatSignedCurrency(runtime.daily_realized_pnl, "USD"),
-      tone: pnlTone(runtime.daily_realized_pnl),
-      detail: runtime.current_session_date ? `Session ${runtime.current_session_date}` : "No tracked session date",
-    },
-    {
-      label: "Next Action",
-      value: runtime.next_action ? formatRuntimeNextAction(runtime.next_action) : "--",
-      tone: runtime.last_scan_result === "executed" ? "success" : runtime.last_scan_result === "skipped" ? "warning" : "",
-      detail: runtime.next_monitor_after
-        ? `Next monitor ${formatDateTime(runtime.next_monitor_after)}`
-        : runtime.last_scan_at
-          ? `Last scan ${runtime.last_scan_symbol || "Account"} / ${formatDateTime(runtime.last_scan_at)}`
-          : "Waiting for first bull put scan",
-    },
-  ];
-
-  els.strategyRuntimeStrip.innerHTML = summaryValues
-    .map(
-      (item) => `
-        <article class="mini-metric-tile">
-          <span class="metric-label">${escapeHtml(item.label)}</span>
-          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
-          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
-        </article>
-      `
-    )
-    .join("");
-
-  els.strategyAutoEntry.value = runtime.auto_entry_enabled ? "true" : "false";
-  els.strategyManualPause.value = runtime.manual_pause ? "true" : "false";
-  els.strategyKillSwitch.value = runtime.kill_switch_active ? "true" : "false";
-  els.strategyPausedSymbols.value = (runtime.paused_symbols || []).join(", ");
-  els.strategyControlsHint.textContent = runtime.last_action
-    ? `${runtime.last_action}${runtime.last_action_at ? ` (${formatDateTime(runtime.last_action_at)})` : ""}`
-    : "Strategy controls apply to new bull put entries only. Existing spreads remain monitored.";
-
-  const skipReason = runtime.last_skip_reason || "No bull put skip reason recorded.";
-  els.strategySkipCard.className = `strategy-note-body ${runtime.last_skip_reason ? "" : "empty"}`;
-  els.strategySkipCard.textContent = skipReason;
-
-  const strategyNotes = state.journals.filter((entry) =>
-    Array.isArray(entry.tags) && entry.tags.some((tag) => String(tag).toLowerCase() === "bull-put")
-  );
-  const reviewSummary = runtime.last_review_summary || "No bull put strategy review has been generated yet.";
-  els.strategyReviewCard.className = `strategy-note-body ${runtime.last_review_summary ? "" : "empty"}`;
-  els.strategyReviewCard.textContent = runtime.last_review_at
-    ? `${reviewSummary} (${formatDateTime(runtime.last_review_at)})`
-    : reviewSummary;
-  if (strategyNotes.length === 0) {
-    els.strategyJournalFeed.className = "strategy-note-body empty";
-    els.strategyJournalFeed.textContent = "No bull put strategy notes for this account yet.";
-  } else {
-    els.strategyJournalFeed.className = "strategy-note-body";
-    els.strategyJournalFeed.innerHTML = strategyNotes
-      .slice(0, 4)
-      .map(
-        (entry) => `
-          <article class="strategy-journal-entry">
-            <div class="strategy-journal-head">
-              <strong>${escapeHtml(entry.title)}</strong>
-              <span>${escapeHtml(formatDateTime(entry.updated_at))}</span>
-            </div>
-            <p>${escapeHtml(entry.notes)}</p>
-          </article>
-        `
-      )
-      .join("");
-  }
-
-  updateStrategyButtons();
-}
-
-function renderZeroDteLottery() {
-  if (!els.zeroDteLotteryStrip || !els.zeroDteLotteryResultCard) {
-    return;
-  }
-  const runtime = state.zeroDteLotteryRuntime;
-  if (!runtime) {
-    els.zeroDteLotteryStrip.innerHTML = `
-      <article class="mini-metric-tile">
-        <span class="metric-label">Execution</span>
-        <strong class="mini-metric-value">Preview Only</strong>
-        <span class="mini-metric-detail">Zero-DTE orders are disabled pending expiry lifecycle support.</span>
-      </article>
-    `;
-    els.zeroDteLotteryAutoOrder.value = "false";
-    els.zeroDteLotteryHint.textContent = "Preview only. Zero-DTE execution and automatic ordering are disabled.";
-    renderZeroDteLotteryResult();
-    updateZeroDteLotteryButtons();
-    return;
-  }
-
-  const summaryValues = [
-    {
-      label: "Execution",
-      value: "Preview Only",
-      tone: runtime.auto_execute_enabled ? "warning" : "neutral",
-      detail: runtime.auto_execute_enabled
-        ? "Legacy auto-order flag detected; execution remains blocked."
-        : "No manual, forced, or automatic orders.",
-    },
-    {
-      label: "Max Premium",
-      value: formatCurrency(runtime.max_premium_per_trade, "USD"),
-      tone: "success",
-      detail: `${runtime.contracts_per_trade || 1} contract(s) per order`,
-    },
-    {
-      label: "Scan Window",
-      value: `${runtime.scan_window_start || "--"}-${runtime.scan_window_end || "--"}`,
-      tone: runtime.enabled ? "success" : "neutral",
-      detail: `${runtime.scan_interval_seconds || "--"} second interval`,
-    },
-    {
-      label: "Daily Cap",
-      value: `${runtime.max_trades_per_day || 1}`,
-      tone: "warning",
-      detail: `${(runtime.symbols || []).join(", ") || "No symbols configured"}`,
-    },
-  ];
-  els.zeroDteLotteryStrip.innerHTML = summaryValues
-    .map(
-      (item) => `
-        <article class="mini-metric-tile">
-          <span class="metric-label">${escapeHtml(item.label)}</span>
-          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
-          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
-        </article>
-      `
-    )
-    .join("");
-
-  els.zeroDteLotteryAutoOrder.value = "false";
-  if (!els.zeroDteLotterySymbol.value.trim()) {
-    els.zeroDteLotterySymbol.value = (runtime.symbols || [])[0] || "QQQ.US";
-  }
-  els.zeroDteLotteryHint.textContent = "Preview only. Zero-DTE execution and automatic ordering stay disabled until the expiry lifecycle is implemented.";
-  renderZeroDteLotteryResult();
-  updateZeroDteLotteryButtons();
-}
-
-function renderZeroDteLotteryResult() {
-  const scan = state.zeroDteLotteryScanResult;
-  const preview = state.zeroDteLotteryPreview || scan?.preview;
-  if (!els.zeroDteLotteryResultCard) {
-    return;
-  }
-  if (scan) {
-    els.zeroDteLotteryResultCard.className = "strategy-note-body";
-    els.zeroDteLotteryResultCard.innerHTML = renderZeroDteLotteryScanResult(scan);
-    return;
-  }
-  if (preview) {
-    els.zeroDteLotteryResultCard.className = "strategy-note-body";
-    els.zeroDteLotteryResultCard.innerHTML = renderZeroDteLotteryPreview(preview);
-    return;
-  }
-  els.zeroDteLotteryResultCard.className = "strategy-note-body empty";
-  els.zeroDteLotteryResultCard.textContent = "No zero-DTE lottery preview loaded yet.";
-}
-
-function renderZeroDteLotteryPreview(preview) {
-  const candidate = objectPayload(preview.candidate);
-  const details = [
-    ["Symbol", preview.symbol || "--", preview.direction ? formatStrategyStatusLabel(preview.direction) : "Direction not selected"],
-    ["Underlying", formatCurrency(preview.underlying_price, "USD"), `${formatSignedDecimal(preview.underlying_change_pct)}% vs prior close`],
-    ["Expiry", preview.selected_expiration_date || "--", `DTE ${preview.days_to_expiration ?? "--"}`],
-    ["Max Premium", formatCurrency(preview.max_premium_per_trade, "USD"), preview.eligible ? "Candidate is inside cap" : "No eligible candidate"],
-  ];
-  if (candidate.option_symbol) {
-    details.push(
-      ["Option", candidate.option_symbol, `${formatStrategyStatusLabel(candidate.direction)} ${formatNumber(candidate.strike)}`],
-      ["Bid / Ask", `${formatCurrency(candidate.option_bid, "USD")} / ${formatCurrency(candidate.option_ask, "USD")}`, `Mid ${formatCurrency(candidate.option_mid, "USD")}`],
-      ["Premium", formatCurrency(candidate.premium_at_ask, "USD"), `Max loss ${formatCurrency(candidate.max_loss, "USD")}`],
-      ["Liquidity", `OI ${displayValue(candidate.open_interest)} / Vol ${displayValue(candidate.volume)}`, `Delta ${formatSignedDecimal(candidate.delta)}`]
-    );
-  }
-  const reasons = Array.isArray(preview.reasons) && preview.reasons.length
-    ? `<p>${escapeHtml(preview.reasons[0])}</p>`
-    : "";
-  return `
-    <article class="strategy-journal-entry">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(preview.eligible ? "Eligible Lottery Candidate" : "Preview Result")}</strong>
-        <span class="pill ${preview.eligible ? "success" : "warning"}">${escapeHtml(preview.eligible ? "Eligible" : "Skipped")}</span>
-      </div>
-      <div class="proposal-detail-grid">
-        ${details.map(renderStrategyProposalDetail).join("")}
-      </div>
-      ${reasons}
-      <span>${escapeHtml(`Evaluated ${formatDateTime(preview.evaluated_at)}`)}</span>
-    </article>
-  `;
-}
-
-function renderZeroDteLotteryScanResult(scan) {
-  const order = objectPayload(scan.execution?.order);
-  const previewMarkup = scan.preview ? renderZeroDteLotteryPreview(scan.preview) : "";
-  const orderMarkup = scan.executed
-    ? `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>Paper Order Submitted</strong>
-          <span class="pill success">${escapeHtml(formatStrategyStatusLabel(order.status || "submitted"))}</span>
-        </div>
-        <div class="proposal-detail-grid">
-          ${[
-            ["Order", order.id || "--", order.external_order_id || "Local paper order"],
-            ["Symbol", order.symbol || "--", `${formatStrategyStatusLabel(order.side)} ${displayValue(order.quantity)}`],
-            ["Limit", formatCurrency(order.limit_price, "USD"), formatDateTime(order.submitted_at)],
-            ["Mode", formatStrategyStatusLabel(order.mode || "paper"), "Zero-DTE lottery"],
-          ].map(renderStrategyProposalDetail).join("")}
-        </div>
-      </article>
-    `
-    : `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>Scan Skipped</strong>
-          <span class="pill warning">No Order</span>
-        </div>
-        <p>${escapeHtml(scan.reason || "Zero-DTE lottery scan completed without an eligible candidate.")}</p>
-        <span>${escapeHtml(formatDateTime(scan.scanned_at))}</span>
-      </article>
-    `;
-  return `${orderMarkup}${previewMarkup}`;
-}
-
-function renderCoveredCallActivity() {
-  if (!els.coveredCallActivityCard) {
-    return;
-  }
-  const activity = state.coveredCallActivity || { summary: {}, lifecycle_tasks: [], latest_monitor: null, proposals: [], runs: [], signals: [], reviews: [] };
-  const summary = objectPayload(activity.summary);
-  const lifecycleTasks = Array.isArray(activity.lifecycle_tasks) ? activity.lifecycle_tasks : [];
-  const latestMonitor = activity.latest_monitor ? objectPayload(activity.latest_monitor) : null;
-  const proposals = Array.isArray(activity.proposals) ? activity.proposals : [];
-  const runs = Array.isArray(activity.runs) ? activity.runs : [];
-  const signals = Array.isArray(activity.signals) ? activity.signals : [];
-  const reviews = Array.isArray(activity.reviews) ? activity.reviews : [];
-  if (!lifecycleTasks.length && !proposals.length && !runs.length && !signals.length && !reviews.length) {
-    els.coveredCallActivityCard.className = "strategy-note-body empty";
-    els.coveredCallActivityCard.textContent = "No covered-call activity yet.";
-    return;
-  }
-
-  const latestRun = runs[0] || null;
-  const latestSignal = signals[0] || null;
-  const summaryItems = [
-    ["Active", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s) tracked`],
-    ["Open CC", formatActivityCount(summary.executed_positions), "Open covered-call proposals"],
-    ["Rolls", formatActivityCount(summary.pending_rolls), "Pending or approved roll proposals"],
-    ["Lifecycle", formatActivityCount(lifecycleTasks.length), "Pending close / roll order tasks"],
-    ["Closes", formatActivityCount(summary.close_runs), `Latest ${formatDateTime(summary.latest_activity_at)}`],
-  ];
-  const lifecycleMarkup = `
-    <article class="strategy-journal-entry lifecycle-task-shell">
-      <div class="strategy-journal-head">
-        <strong>Pending Lifecycle</strong>
-        <span>${escapeHtml(`${lifecycleTasks.length} task${lifecycleTasks.length === 1 ? "" : "s"}`)}</span>
-      </div>
-      ${
-        lifecycleTasks.length
-          ? `<div class="lifecycle-task-list">
-              ${lifecycleTasks.slice(0, 4).map(renderCoveredCallLifecycleTask).join("")}
-            </div>`
-          : "<p>No pending close or roll lifecycle tasks.</p>"
-      }
-    </article>
-  `;
-  const proposalMarkup = proposals.length
-    ? proposals
-        .slice(0, 3)
-        .map(
-          (proposal) => `
-            <article class="strategy-journal-entry">
-              <div class="strategy-journal-head">
-                <strong>${escapeHtml(proposal.title)}</strong>
-                <span class="pill ${strategyStatusClass(proposal.status)}">${escapeHtml(formatStrategyStatusLabel(proposal.status))}</span>
-              </div>
-              <p>${escapeHtml([proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</p>
-              ${renderStrategyProposalDetails(proposal, proposals)}
-              ${renderStrategyProposalActions(proposal)}
-            </article>
-          `
-        )
-        .join("")
-    : '<article class="strategy-journal-entry"><p>No covered-call proposals recorded.</p></article>';
-  const latestActivityMarkup = `
-    <article class="strategy-journal-entry">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(latestRun ? `${latestRun.run_type} / ${formatStrategyStatusLabel(latestRun.status)}` : "Latest signal")}</strong>
-        <span>${escapeHtml(formatDateTime(latestRun?.created_at || latestSignal?.emitted_at))}</span>
-      </div>
-      <p>${escapeHtml(latestRun?.summary || latestRun?.reason || latestSignal?.summary || "No run or signal detail recorded.")}</p>
-    </article>
-  `;
-
-  els.coveredCallActivityCard.className = "strategy-note-body";
-  els.coveredCallActivityCard.innerHTML = `
-    <div class="covered-call-activity-toolbar">
-      <span>${escapeHtml(summary.latest_activity_at ? `Latest ${formatDateTime(summary.latest_activity_at)}` : "Lifecycle ready")}</span>
-      <button class="table-action primary" type="button" data-covered-call-action="reconcile-lifecycle">
-        Refresh Lifecycle
-      </button>
-    </div>
-    <div class="proposal-detail-grid">
-      ${summaryItems.map(renderStrategyProposalDetail).join("")}
-    </div>
-    ${latestMonitor ? renderCoveredCallLatestMonitor(latestMonitor) : ""}
-    ${lifecycleMarkup}
-    ${proposalMarkup}
-    ${latestActivityMarkup}
-  `;
-}
-
-function renderCoveredCallLatestMonitor(monitor) {
-  const detailItems = [
-    ["Underlying", formatNumber(monitor.underlying_price), monitor.symbol || "--"],
-    ["Call Mark", formatCurrency(monitor.call_mark, "USD"), `DTE ${monitor.days_to_expiration ?? "--"}`],
-    ["Open P/L", formatSignedCurrency(monitor.estimated_open_pnl, "USD"), "Against original premium"],
-    ["Premium Capture", formatSignedPercentValue(monitor.premium_capture_pct), `Updated ${formatDateTime(monitor.emitted_at)}`],
-  ];
-  return `
-    <article class="strategy-journal-entry covered-call-monitor-shell">
-      <div class="strategy-journal-head">
-        <strong>Latest Monitor</strong>
-        <span class="pill ${strategyStatusClass(monitor.action)}">${escapeHtml(formatStrategyStatusLabel(monitor.action || "--"))}</span>
-      </div>
-      <div class="proposal-detail-grid">
-        ${detailItems.map(renderStrategyProposalDetail).join("")}
-      </div>
-      <p>${escapeHtml(monitor.detail || "No covered-call monitor snapshot yet.")}</p>
-    </article>
-  `;
-}
-
-function renderCoveredCallLifecycleTask(task) {
-  const orderParts = [
-    task.open_order_id ? `Open ${task.open_order_id}` : "",
-    task.close_order_id ? `Close ${task.close_order_id}` : "",
-    task.roll_buyback_order_id ? `Buyback ${task.roll_buyback_order_id}` : "",
-    task.roll_sell_order_id ? `Sell ${task.roll_sell_order_id}` : "",
-  ].filter(Boolean);
-  const statusParts = [
-    task.sequence_status ? `Sequence ${formatStrategyStatusLabel(task.sequence_status)}` : "",
-    task.open_status ? `Open ${formatStrategyStatusLabel(task.open_status)}` : "",
-    task.close_status ? `Close ${formatStrategyStatusLabel(task.close_status)}` : "",
-    task.buyback_status ? `Buyback ${formatStrategyStatusLabel(task.buyback_status)}` : "",
-    task.sell_status ? `Sell ${formatStrategyStatusLabel(task.sell_status)}` : "",
-  ].filter(Boolean);
-  const ageText = formatOrderAge(task.order_age_seconds);
-  const diagnosticText = formatCoveredCallTaskDiagnostic(task);
-  const suggestedAction = formatCoveredCallSuggestedAction(task);
-  const pillClass = task.is_stale ? "warning" : strategyStatusClass(task.proposal_status);
-  return `
-    <div class="lifecycle-task-item ${task.is_stale ? "is-stale" : ""}">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml([formatStrategyStatusLabel(task.task_type), task.symbol].filter(Boolean).join(" / "))}</strong>
-        <span class="pill ${pillClass}">${escapeHtml(formatStrategyStatusLabel(task.last_refresh_status || task.proposal_status))}</span>
-      </div>
-      <p>${escapeHtml(task.proposal_title || task.proposal_id)}</p>
-      <div class="lifecycle-task-grid">
-        ${renderStrategyProposalDetail(["Proposal", task.proposal_id || "--", formatStrategyStatusLabel(task.proposal_status)])}
-        ${renderStrategyProposalDetail(["Orders", orderParts.join(" / ") || "--", task.last_run_type || "--"])}
-        ${renderStrategyProposalDetail(["Status", statusParts.join(" / ") || formatStrategyStatusLabel(task.last_refresh_status || "--"), `Last ${formatDateTime(task.last_refresh_at)}`])}
-        ${renderStrategyProposalDetail(["Age", ageText || "--", task.is_stale ? "Stale working order" : "Working order"])}
-        ${suggestedAction ? renderStrategyProposalDetail(["Suggested", suggestedAction, ""]) : ""}
-      </div>
-      ${diagnosticText ? `<p class="lifecycle-task-diagnostic">${escapeHtml(diagnosticText)}</p>` : ""}
-      ${task.reason ? `<p>${escapeHtml(task.reason)}</p>` : ""}
-    </div>
-  `;
-}
-
-function renderStrategyExperiment() {
-  const experiment = state.strategyExperiment || { proposals: [], runs: [], signals: [], reviews: [] };
-  const proposals = Array.isArray(experiment.proposals) ? experiment.proposals : [];
-  const runs = Array.isArray(experiment.runs) ? experiment.runs : [];
-  const signals = Array.isArray(experiment.signals) ? experiment.signals : [];
-  const reviews = Array.isArray(experiment.reviews) ? experiment.reviews : [];
-  const pendingProposals = proposals.filter((proposal) => proposal.status === "pending");
-  const latestRun = runs[0] || null;
-  const latestSignal = signals[0] || null;
-  const latestReview = reviews[0] || null;
-
-  if (els.strategyExperimentStrip) {
-    const summaryValues = [
-      {
-        label: "Active Proposals",
-        value: String(pendingProposals.length),
-        tone: pendingProposals.length ? "warning" : "",
-        detail: proposals.length ? `${proposals.length} tracked proposal${proposals.length === 1 ? "" : "s"}` : "No strategy proposals loaded.",
-      },
-      {
-        label: "Latest Run",
-        value: latestRun ? formatStrategyStatusLabel(latestRun.status) : "--",
-        tone: latestRun ? strategyStatusClass(latestRun.status) : "",
-        detail: latestRun ? `${latestRun.strategy_id} / ${formatDateTime(latestRun.created_at)}` : "No strategy runs recorded.",
-      },
-      {
-        label: "Signals",
-        value: String(signals.length),
-        tone: latestSignal ? strategyStatusClass(latestSignal.signal_type) : "",
-        detail: latestSignal ? `${latestSignal.signal_type} / ${formatDateTime(latestSignal.emitted_at)}` : "No strategy signals recorded.",
-      },
-      {
-        label: "Reviews",
-        value: String(reviews.length),
-        tone: latestReview ? strategyStatusClass(latestReview.status) : "",
-        detail: latestReview ? `${latestReview.review_type} / ${formatDateTime(latestReview.reviewed_at)}` : "No strategy reviews recorded.",
-      },
-    ];
-    els.strategyExperimentStrip.innerHTML = summaryValues
-      .map(
-        (item) => `
-          <article class="mini-metric-tile">
-            <span class="metric-label">${escapeHtml(item.label)}</span>
-            <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
-            <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
-          </article>
-        `
-      )
-      .join("");
-  }
-
-  renderStrategyExperimentList({
-    element: els.strategyProposalsCard,
-    items: proposals,
-    emptyText: "No strategy experiment proposals yet.",
-    renderItem: (proposal) => `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>${escapeHtml(proposal.title)}</strong>
-          <span class="pill ${strategyStatusClass(proposal.status)}">${escapeHtml(formatStrategyStatusLabel(proposal.status))}</span>
-        </div>
-        <p>${escapeHtml(proposal.rationale)}</p>
-        <span>${escapeHtml([proposal.strategy_id, proposal.symbol, proposal.proposed_action].filter(Boolean).join(" / "))}</span>
-        ${renderStrategyProposalDetails(proposal, proposals)}
-        ${renderStrategyProposalActions(proposal)}
-      </article>
-    `,
-  });
-  renderStrategyExperimentList({
-    element: els.strategyRunsCard,
-    items: runs,
-    emptyText: "No strategy runs recorded yet.",
-    renderItem: (run) => `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>${escapeHtml(`${run.strategy_id} / ${run.run_type}`)}</strong>
-          <span class="pill ${strategyStatusClass(run.status)}">${escapeHtml(formatStrategyStatusLabel(run.status))}</span>
-        </div>
-        <p>${escapeHtml(run.summary || run.reason || "Run recorded without a summary.")}</p>
-        <span>${escapeHtml(formatDateTime(run.completed_at || run.started_at || run.created_at))}</span>
-      </article>
-    `,
-  });
-  renderStrategyExperimentList({
-    element: els.strategySignalsCard,
-    items: signals,
-    emptyText: "No strategy signals recorded yet.",
-    renderItem: (signal) => `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>${escapeHtml(signal.summary)}</strong>
-          <span class="pill neutral">${escapeHtml(formatStrategyStatusLabel(signal.signal_type))}</span>
-        </div>
-        <p>${escapeHtml(signal.detail || [signal.strategy_id, signal.symbol].filter(Boolean).join(" / ") || "Signal recorded.")}</p>
-        <span>${escapeHtml(formatDateTime(signal.emitted_at))}</span>
-      </article>
-    `,
-  });
-  renderStrategyExperimentList({
-    element: els.strategyReviewsCard,
-    items: reviews,
-    emptyText: "No strategy reviews recorded yet.",
-    renderItem: (review) => `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>${escapeHtml(review.review_type)}</strong>
-          <span class="pill ${strategyStatusClass(review.status)}">${escapeHtml(formatStrategyStatusLabel(review.status))}</span>
-        </div>
-        <p>${escapeHtml(review.recommendation || review.summary)}</p>
-        <span>${escapeHtml(formatDateTime(review.reviewed_at))}</span>
-      </article>
-    `,
-  });
-}
-
-function renderStrategyExperimentList({ element, items, emptyText, renderItem }) {
-  if (!element) {
-    return;
-  }
-  if (!items.length) {
-    element.className = "strategy-note-body empty";
-    element.textContent = emptyText;
-    return;
-  }
-  element.className = "strategy-note-body";
-  element.innerHTML = items.slice(0, 4).map(renderItem).join("");
-}
-
-function renderAdvisorPanel() {
-  if (!els.advisorOutputCard) {
-    return;
-  }
-  updateAdvisorButtons();
-  const overlay = state.advisorStatus || buildOverlayStatus("idle", "Advisor context is available on demand.");
-  const context = state.advisorContext;
-  const result = state.advisorDraft || null;
-  const payload = objectPayload(result?.response_payload);
-  const proposals = Array.isArray(payload.proposals) ? payload.proposals : [];
-  const reviews = Array.isArray(payload.reviews) ? payload.reviews : [];
-  const advisorRuns = Array.isArray(state.advisorRuns) ? state.advisorRuns : [];
-
-  if (!context && !result && !advisorRuns.length) {
-    els.advisorOutputCard.className = "strategy-note-body empty";
-    els.advisorOutputCard.innerHTML = `
-      <div class="overlay-status-row">
-        <div class="overlay-status-copy">
-          <strong>DeepSeek Advisor</strong>
-          <span>${escapeHtml(overlay.detail)}</span>
-        </div>
-        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-      </div>
-      ${renderOverlayReason(overlay)}
-    `;
-    return;
-  }
-
-  els.advisorOutputCard.className = "strategy-note-body";
-  els.advisorOutputCard.innerHTML = `
-    <div class="overlay-status-row">
-      <div class="overlay-status-copy">
-        <strong>DeepSeek Advisor</strong>
-        <span>${escapeHtml(overlay.detail || "Advisor output ready.")}</span>
-      </div>
-      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-    </div>
-    ${renderOverlayReason(overlay)}
-    ${renderAdvisorContextSummary(context)}
-    ${renderAdvisorUsage(payload.raw_response)}
-    ${renderAdvisorDraftList("Proposals", proposals, renderAdvisorProposalDraft)}
-    ${renderAdvisorDraftList("Reviews", reviews, renderAdvisorReviewDraft)}
-    ${renderAdvisorRunHistory(advisorRuns)}
-  `;
-}
-
-function updateAdvisorButtons() {
-  const busy = state.advisorStatus?.kind === "loading";
-  const payload = objectPayload(state.advisorDraft?.response_payload);
-  const proposalCount = Array.isArray(payload.proposals) ? payload.proposals.length : 0;
-  const reviewCount = Array.isArray(payload.reviews) ? payload.reviews.length : 0;
-  if (els.loadAdvisorContext) {
-    els.loadAdvisorContext.disabled = busy || !state.selectedAccountId;
-  }
-  if (els.runDeepSeekAdvisor) {
-    els.runDeepSeekAdvisor.disabled = busy || !state.selectedAccountId;
-  }
-  if (els.recordAdvisorResponse) {
-    els.recordAdvisorResponse.disabled = busy || proposalCount + reviewCount === 0;
-  }
-}
-
-function renderAdvisorContextSummary(context) {
-  if (!context) {
-    return "";
-  }
-  const activity = context.covered_call_activity || {};
-  const summary = objectPayload(activity.summary);
-  const hardRules = Array.isArray(context.hard_rules) ? context.hard_rules : [];
-  const playbooks = Array.isArray(context.playbooks) ? context.playbooks : [];
-  const playbookIds = playbooks.map((playbook) => playbook.id).filter(Boolean).slice(0, 3);
-  const items = [
-    ["Account", context.external_account_id || "--", context.controls?.execution_mode || "paper"],
-    ["Active CC", formatActivityCount(summary.active_proposals), `${formatActivityCount(summary.total_proposals)} proposal(s)`],
-    ["Open CC", formatActivityCount(summary.executed_positions), `${formatActivityCount(summary.pending_rolls)} pending roll(s)`],
-    ["Rules", String(hardRules.length), hardRules[0]?.name || "advisor_context_is_read_only"],
-    ["Playbooks", String(playbooks.length), playbookIds.join(", ") || "--"],
-    ["Boundary", "Proposal / Review", "No broker orders"],
-  ];
-  return `
-    <div class="proposal-detail-grid">
-      ${items.map(renderStrategyProposalDetail).join("")}
-    </div>
-  `;
-}
-
-function renderAdvisorUsage(rawResponse) {
-  const raw = objectPayload(rawResponse);
-  const usage = objectPayload(raw.usage);
-  if (!Object.keys(usage).length) {
-    return "";
-  }
-  const details = objectPayload(usage.prompt_tokens_details);
-  const items = [
-    ["Prompt", displayValue(usage.prompt_tokens), `Model ${raw.model || "--"}`],
-    ["Completion", displayValue(usage.completion_tokens), `Reasoning ${displayValue(objectPayload(usage.completion_tokens_details).reasoning_tokens)}`],
-    ["Cache Hit", displayValue(pickProposalValue(usage.prompt_cache_hit_tokens, details.cached_tokens)), "Reused prompt tokens"],
-    ["Cache Miss", displayValue(usage.prompt_cache_miss_tokens), "New prompt tokens billed as input"],
-  ];
-  return `
-    <article class="strategy-journal-entry advisor-usage">
-      <div class="strategy-journal-head">
-        <strong>Usage</strong>
-        <span>${escapeHtml(raw.response_id || raw.finish_reason || "--")}</span>
-      </div>
-      <div class="proposal-detail-grid">
-        ${items.map(renderStrategyProposalDetail).join("")}
-      </div>
-    </article>
-  `;
-}
-
-function renderAdvisorDraftList(title, items, renderItem) {
-  if (!items.length) {
-    return `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>${escapeHtml(title)}</strong>
-          <span class="pill neutral">0</span>
-        </div>
-        <p>No ${title.toLowerCase()} generated.</p>
-      </article>
-    `;
-  }
-  return `
-    <article class="strategy-journal-entry">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(title)}</strong>
-        <span class="pill neutral">${escapeHtml(String(items.length))}</span>
-      </div>
-      <div class="advisor-draft-list">
-        ${items.slice(0, 4).map(renderItem).join("")}
-      </div>
-    </article>
-  `;
-}
-
-function renderAdvisorRunHistory(runs) {
-  if (!runs.length) {
-    return `
-      <article class="strategy-journal-entry">
-        <div class="strategy-journal-head">
-          <strong>Advisor Run History</strong>
-          <span class="pill neutral">0</span>
-        </div>
-        <p>No DeepSeek advisor runs recorded yet.</p>
-      </article>
-    `;
-  }
-  return `
-    <article class="strategy-journal-entry">
-      <div class="strategy-journal-head">
-        <strong>Advisor Run History</strong>
-        <span class="pill neutral">${escapeHtml(String(runs.length))}</span>
-      </div>
-      <div class="advisor-draft-list">
-        ${runs.slice(0, 5).map(renderAdvisorRunItem).join("")}
-      </div>
-    </article>
-  `;
-}
-
-function renderAdvisorRunItem(run) {
-  const usage = objectPayload(run.token_usage);
-  const tokenLine = [
-    `${displayValue(usage.prompt_tokens ?? run.prompt_tokens)} prompt`,
-    `${displayValue(usage.completion_tokens ?? run.completion_tokens)} completion`,
-    `${displayValue(usage.cache_hit_tokens ?? run.cache_hit_tokens)} cache hit`,
-    `${displayValue(usage.cache_miss_tokens ?? run.cache_miss_tokens)} cache miss`,
-  ].join(" / ");
-  const outputLine = `${displayValue(run.proposal_count)} proposal(s), ${displayValue(run.review_count)} review(s)`;
-  const warnings = Array.isArray(run.warnings) ? run.warnings : [];
-  const contextHash = run.context_hash ? `context ${String(run.context_hash).slice(0, 12)}` : "";
-  const guardLine = [
-    run.playbook_id ? `playbook ${run.playbook_id}` : "",
-    run.recordable_status ? `record ${formatStrategyStatusLabel(run.recordable_status)}` : "",
-    run.impact_summary || "",
-  ].filter(Boolean).join(" / ");
-  return `
-    <div class="advisor-draft-item">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(run.model || run.provider || "deepseek")}</strong>
-        <span class="pill ${advisorRunStatusClass(run.status)}">${escapeHtml(formatStrategyStatusLabel(run.status || "succeeded"))}</span>
-      </div>
-      <p>${escapeHtml(run.summary || [tokenLine, outputLine].filter(Boolean).join(" | "))}</p>
-      <span>${escapeHtml([run.context_format, contextHash, formatDateTime(run.completed_at || run.created_at), run.response_id].filter(Boolean).join(" / "))}</span>
-      ${guardLine ? `<span>${escapeHtml(guardLine)}</span>` : ""}
-      ${warnings.length ? `<span>${escapeHtml(warnings[0])}</span>` : ""}
-      ${run.error_message ? `<span>${escapeHtml(run.error_message)}</span>` : ""}
-    </div>
-  `;
-}
-
 function advisorRunStatusClass(status) {
-  if (status === "recorded" || status === "succeeded") {
-    return "success";
-  }
-  if (status === "failed") {
-    return "error";
-  }
+  if (status === "recorded" || status === "succeeded") return "success";
+  if (status === "failed") return "error";
   return "neutral";
-}
-
-function renderAdvisorProposalDraft(proposal) {
-  const checks = Array.isArray(proposal.checks) ? proposal.checks : [];
-  return `
-    <div class="advisor-draft-item">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(proposal.title || "Advisor proposal")}</strong>
-        <span class="pill warning">${escapeHtml(formatStrategyStatusLabel(proposal.proposed_action || "proposal"))}</span>
-      </div>
-      <p>${escapeHtml(proposal.rationale || proposal.thesis || "No rationale supplied.")}</p>
-      <span>${escapeHtml([proposal.strategy_id, proposal.symbol, checks.slice(0, 2).join(", ")].filter(Boolean).join(" / "))}</span>
-    </div>
-  `;
-}
-
-function renderAdvisorReviewDraft(review) {
-  return `
-    <div class="advisor-draft-item">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(review.review_type || "advisor")}</strong>
-        <span class="pill ${strategyStatusClass(review.status)}">${escapeHtml(formatStrategyStatusLabel(review.status || "observed"))}</span>
-      </div>
-      <p>${escapeHtml(review.recommendation || review.summary || "No recommendation supplied.")}</p>
-      <span>${escapeHtml([review.strategy_id, formatDateTime(review.reviewed_at)].filter(Boolean).join(" / "))}</span>
-    </div>
-  `;
 }
 
 function renderStrategyProposalDetails(proposal, proposals = []) {
@@ -3999,300 +2698,6 @@ function formatShortIdentifier(value) {
   return text.length > 12 ? text.slice(0, 8) : text || "--";
 }
 
-function renderMarketEvents() {
-  if (!els.marketEventsCard) {
-    return;
-  }
-  const events = Array.isArray(state.marketEvents) ? state.marketEvents : [];
-  if (!events.length) {
-    els.marketEventsCard.className = "strategy-note-body empty";
-    els.marketEventsCard.textContent = "No upcoming market events recorded.";
-    return;
-  }
-  els.marketEventsCard.className = "strategy-note-body";
-  els.marketEventsCard.innerHTML = events
-    .slice(0, 6)
-    .map(
-      (event) => `
-        <article class="strategy-journal-entry">
-          <div class="strategy-journal-head">
-            <strong>${escapeHtml(event.title)}</strong>
-            <span class="pill ${strategyStatusClass(event.severity)}">${escapeHtml(formatStrategyStatusLabel(event.severity))}</span>
-          </div>
-          <p>${escapeHtml([event.symbol || "Market", event.event_type, event.source].filter(Boolean).join(" / "))}</p>
-          <span>${escapeHtml(formatDateTime(event.scheduled_at))}</span>
-        </article>
-      `
-    )
-    .join("");
-}
-
-function getSpreadLifecycleWarning(spread) {
-  return window.StocksToolLifecycle?.bullPutSpreadLifecycleWarning(spread, state.orders) || null;
-}
-
-function renderSpreads() {
-  const spreads = [...state.spreads].sort(
-    (left, right) => new Date(right.updated_at || 0).getTime() - new Date(left.updated_at || 0).getTime()
-  );
-  const activeSpreads = spreads.filter(isActiveSpread);
-  const exitPendingSpreads = spreads.filter(isExitPendingSpread);
-  const monitorableSpreads = spreads.filter(isMonitorableSpread);
-  const monitoredOpenSpread = activeSpreads.find((spread) => spread.raw_payload?.monitor) || null;
-  const monitoredSnapshot = monitoredOpenSpread ? monitoredOpenSpread.raw_payload.monitor : null;
-  const lastMonitoredSpread = monitorableSpreads.find((spread) => spread.last_synced_at) || null;
-  const lifecycleWarnings = monitorableSpreads
-    .map((spread) => getSpreadLifecycleWarning(spread))
-    .filter(Boolean);
-  const primaryLifecycleWarning = lifecycleWarnings[0] || null;
-
-  const summaryValues = [
-    {
-      label: "Active Spreads",
-      value: String(activeSpreads.length),
-      tone: "",
-      detail: activeSpreads.length
-        ? `${activeSpreads.filter((spread) => spread.status === "open").length} open / ${exitPendingSpreads.length} exit pending`
-        : "No active spreads",
-    },
-    {
-      label: "Monitor Mark",
-      value: monitoredSnapshot?.estimated_exit_debit ? formatSpreadCredit(monitoredSnapshot.estimated_exit_debit) : "--",
-      tone: monitoredSnapshot?.exit_reason ? "warning" : "",
-      detail: monitoredOpenSpread
-        ? `${monitoredOpenSpread.underlying_symbol} / ${formatDateTime(monitoredSnapshot.evaluated_at)}`
-        : "No monitor snapshot",
-    },
-    {
-      label: "P/L",
-      value: monitoredSnapshot?.estimated_pnl ? formatSignedCurrency(monitoredSnapshot.estimated_pnl, "USD") : "--",
-      tone: monitoredSnapshot?.estimated_pnl ? pnlTone(monitoredSnapshot.estimated_pnl) : "",
-      detail: monitoredSnapshot
-        ? `TP Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_take_profit_debit)} / SL Gap ${formatSpreadCredit(monitoredSnapshot.distance_to_stop_loss_debit)}`
-        : "No monitor snapshot",
-    },
-    {
-      label: "Last Monitor",
-      value: lastMonitoredSpread ? formatDateTime(lastMonitoredSpread.last_synced_at) : "--",
-      tone: primaryLifecycleWarning ? "error" : "",
-      detail: primaryLifecycleWarning
-        ? primaryLifecycleWarning.message
-        : lastMonitoredSpread
-        ? `${lastMonitoredSpread.underlying_symbol} / ${formatSpreadStatusLabel(lastMonitoredSpread.status)}`
-        : monitorableSpreads.length
-          ? "Waiting for first monitor run"
-          : "No open or exit-pending spreads are being monitored.",
-    },
-  ];
-
-  els.spreadSummaryStrip.innerHTML = summaryValues
-    .map(
-      (item) => `
-        <article class="mini-metric-tile">
-          <span class="metric-label">${escapeHtml(item.label)}</span>
-          <strong class="mini-metric-value ${item.tone ? `is-${item.tone}` : ""}">${escapeHtml(item.value)}</strong>
-          <span class="mini-metric-detail">${escapeHtml(item.detail)}</span>
-        </article>
-      `
-    )
-    .join("");
-
-  if (spreads.length === 0) {
-    els.spreadsBody.innerHTML = '<tr><td colspan="8" class="empty-row">No bull put spreads for this account.</td></tr>';
-    return;
-  }
-
-  els.spreadsBody.innerHTML = spreads
-    .map((spread) => {
-      const monitorable = isMonitorableSpread(spread);
-      const lifecycleWarning = getSpreadLifecycleWarning(spread);
-      const statusTone = lifecycleWarning ? "error" : spreadStatusClass(spread.status);
-      const statusLabel = lifecycleWarning ? "Manual Action Needed" : formatSpreadStatusLabel(spread.status);
-      const monitor = spread.raw_payload?.monitor || null;
-      const legSummary = `${formatSpreadStrike(spread.long_strike)} / ${formatSpreadStrike(spread.short_strike)} puts`;
-      const lastUpdatedAt = spread.last_synced_at || spread.updated_at || spread.created_at;
-      const maxLoss = toNumber(spread.max_loss);
-      const entryRiskLines = [
-        `Credit ${formatSpreadCredit(spread.entry_net_credit)}`,
-        `Max Loss ${Number.isFinite(maxLoss) ? formatSignedCurrency(-Math.abs(maxLoss), "USD") : "--"}`,
-        `BE ${formatSpreadStrike(spread.break_even)}`,
-      ];
-      const monitorMark = monitor
-        ? [
-            `Mark ${formatSpreadCredit(monitor.estimated_exit_debit)}`,
-            `Spot ${formatSpreadStrike(monitor.underlying_price)}`,
-            `${monitor.days_to_expiration ?? "--"} DTE`,
-          ]
-        : ["No monitor snapshot"];
-      const distanceLines = monitor
-        ? [
-            `P/L ${formatSignedCurrency(monitor.estimated_pnl, "USD")}`,
-            `TP Gap ${formatSpreadCredit(monitor.distance_to_take_profit_debit)}`,
-            `SL Gap ${formatSpreadCredit(monitor.distance_to_stop_loss_debit)}`,
-          ]
-        : [spread.exit_reason ? formatSpreadExitReason(spread.exit_reason) : "--"];
-      const monitorLines = monitor
-        ? [
-            lifecycleWarning
-              ? lifecycleWarning.message
-              : monitor.exit_reason
-                ? formatSpreadExitReason(monitor.exit_reason)
-                : "Within thresholds",
-            ...(lifecycleWarning
-              ? [
-                  lifecycleWarning.detail,
-                  `Order ${lifecycleWarning.orderId} ${lifecycleWarning.orderStatus}`,
-                ]
-              : []),
-            `Next Check ${formatDateTime(monitor.next_monitor_after)}`,
-            `Updated ${formatDateTime(monitor.evaluated_at)}`,
-          ]
-        : [`Updated ${formatDateTime(lastUpdatedAt)}`];
-      const recoveryEligibility = objectPayload(state.recoverCloseEligibility?.[spread.id]);
-      const recoveryMarkup = renderRecoverClosePanel(spread, recoveryEligibility);
-      return `
-        <tr>
-          <td>
-            <div class="symbol-cell">
-              <strong>${escapeHtml(spread.underlying_symbol)}</strong>
-              <span>${escapeHtml(legSummary)}</span>
-            </div>
-          </td>
-          <td>${escapeHtml(formatSpreadDate(spread.expiration_date))}</td>
-          <td><span class="pill ${statusTone}">${escapeHtml(statusLabel)}</span></td>
-          <td>
-            ${renderSpreadDetailCell(entryRiskLines)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(monitorMark)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(distanceLines, monitor?.estimated_pnl)}
-          </td>
-          <td>
-            ${renderSpreadDetailCell(monitorLines, null, lifecycleWarning ? "error" : null)}
-          </td>
-          <td>
-            <div class="table-actions">
-              <button class="table-action" type="button" data-spread-action="refresh" data-spread-id="${escapeHtml(spread.id)}">
-                Refresh
-              </button>
-              ${
-                monitorable
-                  ? `<button class="table-action primary" type="button" data-spread-action="monitor" data-spread-id="${escapeHtml(spread.id)}" data-broker-mutation="true" data-action-key="bull-put-monitor:${escapeHtml(spread.id)}">Monitor</button>`
-                  : ""
-              }
-            </div>
-            ${recoveryMarkup}
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
-function renderRecoverClosePanel(spread, eligibility) {
-  if (!eligibility || !eligibility.spread_id) {
-    return `
-      <div class="recover-close-panel">
-        <strong>Recovery Check</strong>
-        <span>Eligibility unavailable.</span>
-      </div>
-    `;
-  }
-  const reasons = Array.isArray(eligibility.reasons) ? eligibility.reasons.filter(Boolean) : [];
-  const oldStatus = eligibility.old_short_close_order_status || "--";
-  const workingReplacement = eligibility.working_replacement_order_id || "--";
-  const hint = eligibility.max_debit_required_hint;
-  const maxDebitValue = hint !== null && hint !== undefined ? String(hint) : "";
-  const eligible = eligibility.eligible === true;
-  const toneClass = eligible ? "is-success" : reasons.includes("close_not_required") ? "is-neutral" : "is-warning";
-  const disabled = eligible ? "" : "disabled";
-  return `
-    <div class="recover-close-panel">
-      <div class="recover-close-head">
-        <strong class="${toneClass}">${eligible ? "Recovery Eligible" : "Recovery Blocked"}</strong>
-        <span>${escapeHtml(reasons.length ? reasons.join(", ") : "Ready for manual paper recovery.")}</span>
-      </div>
-      <div class="recover-close-meta">
-        <span>Old close ${escapeHtml(oldStatus)}</span>
-        <span>Working ${escapeHtml(workingReplacement)}</span>
-      </div>
-      <form class="recover-close-form" data-recover-close-form="${escapeHtml(spread.id)}">
-        <input name="actor" type="text" maxlength="80" value="local_operator" ${disabled} aria-label="Recovery actor" />
-        <input name="max_debit" type="number" min="0" step="0.01" value="${escapeHtml(maxDebitValue)}" placeholder="Max debit" ${disabled} aria-label="Recovery max debit" />
-        <input name="note" type="text" maxlength="500" value="manual recover close" ${disabled} aria-label="Recovery note" />
-        <label class="recover-confirm">
-          <input name="confirm_paper_order" type="checkbox" ${disabled} />
-          <span>Paper</span>
-        </label>
-        <button class="table-action primary" type="submit" ${disabled} data-business-disabled="${eligible ? "false" : "true"}" data-broker-mutation="true" data-action-key="bull-put-recover:${escapeHtml(spread.id)}">Recover</button>
-      </form>
-    </div>
-  `;
-}
-
-function renderSpreadDetailCell(lines, pnlValue = null, explicitTone = null) {
-  const [primary = "--", ...secondary] = lines;
-  const toneClass = explicitTone
-    ? ` is-${explicitTone}`
-    : pnlValue !== null && pnlValue !== undefined
-      ? ` is-${pnlTone(toNumber(pnlValue))}`
-      : "";
-  return `
-    <div class="spread-detail-cell">
-      <strong class="${toneClass.trim()}">${escapeHtml(primary)}</strong>
-      ${secondary.map((line) => `<span>${escapeHtml(line)}</span>`).join("")}
-    </div>
-  `;
-}
-
-function renderOrders() {
-  if (state.orders.length === 0) {
-    els.ordersBody.innerHTML = '<tr><td colspan="7" class="empty-row">No orders for this account.</td></tr>';
-    return;
-  }
-
-  els.ordersBody.innerHTML = state.orders
-    .slice(0, 10)
-    .map((order) => {
-      const pillClass = statusClass(order.status);
-      const canCancel = isCancelableOrder(order);
-      const selectedClass = order.id === state.selectedOrderId ? "is-selected" : "";
-      return `
-        <tr class="${selectedClass}">
-          <td>
-            <div class="symbol-cell">
-              <strong>${escapeHtml(order.symbol)}</strong>
-              <span>${escapeHtml(order.order_type.toUpperCase())} / ${escapeHtml(order.time_in_force.toUpperCase())}</span>
-            </div>
-          </td>
-          <td>${escapeHtml(order.side.toUpperCase())}</td>
-          <td>${escapeHtml(String(order.quantity))}</td>
-          <td><span class="pill ${pillClass}">${escapeHtml(order.status)}</span></td>
-          <td>${escapeHtml(formatOrderPrice(order))}</td>
-          <td>${escapeHtml(formatDateTime(order.updated_at))}</td>
-          <td>
-            <div class="table-actions">
-              <button class="table-action primary" type="button" data-order-action="manage" data-order-id="${escapeHtml(order.id)}">
-                Manage
-              </button>
-              <button class="table-action" type="button" data-order-action="refresh" data-order-id="${escapeHtml(order.id)}">
-                Refresh
-              </button>
-              ${
-                canCancel
-                  ? `<button class="table-action danger" type="button" data-order-action="cancel" data-order-id="${escapeHtml(order.id)}" data-broker-mutation="true" data-action-key="order-cancel:${escapeHtml(order.id)}">Cancel</button>`
-                  : ""
-              }
-            </div>
-          </td>
-        </tr>
-      `;
-    })
-    .join("");
-}
-
 function renderPositions() {
   const snapshot = state.latestSnapshot;
   const positions = buildSortedPositions(snapshot?.positions || []);
@@ -4318,67 +2723,6 @@ function renderPositions() {
       `
     )
     .join("");
-}
-
-function renderQuote() {
-  if (!els.quoteCard || !els.quoteSymbol) {
-    return;
-  }
-  const quote = state.quote;
-  const overlay = state.quoteStatus;
-  const symbol = quote?.symbol || els.quoteSymbol.value.trim().toUpperCase();
-  if (!quote) {
-    if (overlay.kind === "idle") {
-      els.quoteCard.className = "quote-card empty";
-      els.quoteCard.textContent = overlay.detail || "No quote loaded.";
-      return;
-    }
-
-    els.quoteCard.className = "quote-card";
-    els.quoteCard.innerHTML = `
-      <div class="overlay-status-row">
-        <div class="overlay-status-copy">
-          <span class="section-kicker">${escapeHtml(symbol || "Quick Quote")}</span>
-          <strong>${escapeHtml(overlayStatusLabel(overlay.kind))}</strong>
-        </div>
-        <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-      </div>
-      <p class="overlay-detail">${escapeHtml(overlay.detail || "Quote refresh is waiting for the next response.")}</p>
-      ${renderOverlayReason(overlay)}
-    `;
-    return;
-  }
-
-  const lastDone = Number(quote.last_done);
-  const prevClose = Number(quote.prev_close);
-  const diff = lastDone - prevClose;
-  const pct = prevClose === 0 ? 0 : (diff / prevClose) * 100;
-  const changeClass = diff >= 0 ? "positive" : "negative";
-  const changePrefix = diff >= 0 ? "+" : "";
-
-  els.quoteCard.className = "quote-card";
-  els.quoteCard.innerHTML = `
-    <div class="overlay-status-row">
-      <div class="overlay-status-copy">
-        <span class="section-kicker">${escapeHtml(quote.symbol)}</span>
-        <div class="quote-price">
-          <strong>${formatNumber(quote.last_done)}</strong>
-          <span class="quote-change ${changeClass}">${changePrefix}${formatNumber(diff.toFixed(2))} / ${changePrefix}${pct.toFixed(2)}%</span>
-        </div>
-      </div>
-      <span class="pill ${overlayStatusTone(overlay.kind)}">${escapeHtml(overlayStatusLabel(overlay.kind))}</span>
-    </div>
-    <p class="overlay-detail">${escapeHtml(overlay.detail || overlayLiveDetail("Quote", quote.timestamp))}</p>
-    ${renderOverlayReason(overlay)}
-    <div class="quote-meta">
-      <div><span>Open</span><strong>${formatNumber(quote.open)}</strong></div>
-      <div><span>Prev Close</span><strong>${formatNumber(quote.prev_close)}</strong></div>
-      <div><span>High</span><strong>${formatNumber(quote.high)}</strong></div>
-      <div><span>Low</span><strong>${formatNumber(quote.low)}</strong></div>
-      <div><span>Volume</span><strong>${Number(quote.volume).toLocaleString()}</strong></div>
-      <div><span>Timestamp</span><strong>${escapeHtml(formatDateTime(quote.timestamp))}</strong></div>
-    </div>
-  `;
 }
 
 function renderPreOpenAssessment() {
@@ -4857,322 +3201,34 @@ function renderOptionExpiryAnalysis(expiry, label) {
                 <span>${escapeHtml(strike.put_symbol)}</span>
               </div>
               <div class="holding-stats compact">
-                <div>
-                  <span>OI / Vol</span>
-                  <strong>${escapeHtml(`${formatPositionQuantity(strike.open_interest)} / ${formatPositionQuantity(strike.volume)}`)}</strong>
-                </div>
-                <div>
-                  <span>Bid / Ask</span>
-                  <strong>${escapeHtml(`${formatNumber(strike.bid)} / ${formatNumber(strike.ask)}`)}</strong>
-                </div>
-                <div>
-                  <span>Spread / Delta</span>
-                  <strong>${escapeHtml(`${formatPercentValue(strike.spread_pct)} / ${formatSignedDecimal(strike.delta, 2)}`)}</strong>
-                </div>
+                <div><span>OI / Vol</span><strong>${escapeHtml(`${formatPositionQuantity(strike.open_interest)} / ${formatPositionQuantity(strike.volume)}`)}</strong></div>
+                <div><span>Bid / Ask</span><strong>${escapeHtml(`${formatNumber(strike.bid)} / ${formatNumber(strike.ask)}`)}</strong></div>
+                <div><span>Spread / Delta</span><strong>${escapeHtml(`${formatPercentValue(strike.spread_pct)} / ${formatSignedDecimal(strike.delta, 2)}`)}</strong></div>
               </div>
             </article>
           `
         )
         .join("")
     : '<div class="strategy-note-body empty">No liquid strikes were sampled for this expiry.</div>';
-
   return `
     <article class="strategy-journal-entry">
-      <div class="strategy-journal-head">
-        <strong>${escapeHtml(label)}</strong>
-        <span>${escapeHtml(`${formatSpreadDate(expiry.expiration_date)} (${expiry.days_to_expiration} DTE)`)}</span>
-      </div>
+      <div class="strategy-journal-head"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(`${formatSpreadDate(expiry.expiration_date)} (${expiry.days_to_expiration} DTE)`)}</span></div>
       <div class="status-list">
-        <div>
-          <dt>ATM Put</dt>
-          <dd>${escapeHtml(`${formatSpreadStrike(expiry.atm_strike)} / ${formatNumber(expiry.atm_mid_price)}`)}</dd>
-        </div>
-        <div>
-          <dt>ATM Delta / IV</dt>
-          <dd>${escapeHtml(`${formatSignedDecimal(expiry.atm_delta, 2)} / ${formatImpliedVolatility(expiry.atm_implied_volatility)}`)}</dd>
-        </div>
-        <div>
-          <dt>Put Skew Leg</dt>
-          <dd>${escapeHtml(expiry.put_skew_strike ? `${formatSpreadStrike(expiry.put_skew_strike)} / ${formatSignedDecimal(expiry.put_skew_delta, 2)}` : "--")}</dd>
-        </div>
-        <div>
-          <dt>Skew IV Lift</dt>
-          <dd>${escapeHtml(formatSignedIvDifference(expiry.put_skew_diff))}</dd>
-        </div>
-        <div>
-          <dt>Spread Buckets</dt>
-          <dd>${escapeHtml(`${expiry.tight_count} tight / ${expiry.workable_count} workable / ${expiry.wide_count} wide`)}</dd>
-        </div>
-        <div>
-          <dt>Median Spread</dt>
-          <dd>${escapeHtml(formatPercentValue(expiry.median_spread_pct))}</dd>
-        </div>
+        <div><dt>ATM Put</dt><dd>${escapeHtml(`${formatSpreadStrike(expiry.atm_strike)} / ${formatNumber(expiry.atm_mid_price)}`)}</dd></div>
+        <div><dt>ATM Delta / IV</dt><dd>${escapeHtml(`${formatSignedDecimal(expiry.atm_delta, 2)} / ${formatImpliedVolatility(expiry.atm_implied_volatility)}`)}</dd></div>
+        <div><dt>Put Skew Leg</dt><dd>${escapeHtml(expiry.put_skew_strike ? `${formatSpreadStrike(expiry.put_skew_strike)} / ${formatSignedDecimal(expiry.put_skew_delta, 2)}` : "--")}</dd></div>
+        <div><dt>Skew IV Lift</dt><dd>${escapeHtml(formatSignedIvDifference(expiry.put_skew_diff))}</dd></div>
+        <div><dt>Spread Buckets</dt><dd>${escapeHtml(`${expiry.tight_count} tight / ${expiry.workable_count} workable / ${expiry.wide_count} wide`)}</dd></div>
+        <div><dt>Median Spread</dt><dd>${escapeHtml(formatPercentValue(expiry.median_spread_pct))}</dd></div>
       </div>
       ${liquidMarkup}
     </article>
   `;
 }
 
-function renderSelectedOrder() {
-  const order = getSelectedOrder();
-  if (!order) {
-    els.selectedOrderCard.className = "selected-order empty";
-    els.selectedOrderCard.textContent = "Select an order from the table to manage it.";
-    renderSelectedExecution();
-    renderSelectedJournal();
-    hideReplaceForm();
-    applyTradingSafetyState();
-    return;
-  }
-
-  const canReplace = isReplaceableOrder(order);
-  const canCancel = isCancelableOrder(order);
-  const statusTone = statusClass(order.status);
-
-  els.selectedOrderCard.className = "selected-order";
-  els.selectedOrderCard.innerHTML = `
-    <div class="selected-order-head">
-      <div>
-        <span class="section-kicker">Selected Order</span>
-        <h3 class="selected-order-title">${escapeHtml(order.symbol)} ${escapeHtml(order.side.toUpperCase())} x ${escapeHtml(String(order.quantity))}</h3>
-      </div>
-      <span class="pill ${statusTone}">${escapeHtml(order.status)}</span>
-    </div>
-    <div class="selected-order-meta">
-      <div>
-        <span>External ID</span>
-        <strong>${escapeHtml(order.external_order_id || "--")}</strong>
-      </div>
-      <div>
-        <span>Account</span>
-        <strong>${escapeHtml(order.external_account_id)}</strong>
-      </div>
-      <div>
-        <span>Order Type</span>
-        <strong>${escapeHtml(order.order_type.toUpperCase())}</strong>
-      </div>
-      <div>
-        <span>Time In Force</span>
-        <strong>${escapeHtml(order.time_in_force.toUpperCase())}</strong>
-      </div>
-      <div>
-        <span>Price Logic</span>
-        <strong>${escapeHtml(formatOrderPrice(order))}</strong>
-      </div>
-      <div>
-        <span>Updated</span>
-        <strong>${escapeHtml(formatDateTime(order.updated_at))}</strong>
-      </div>
-    </div>
-    <div class="selected-order-actions">
-      <button class="icon-button" type="button" data-selected-action="refresh">
-        <span class="icon" aria-hidden="true">
-          <svg viewBox="0 0 24 24" focusable="false">
-            <path d="M21 12a9 9 0 1 1-2.64-6.36"/>
-            <path d="M21 3v6h-6"/>
-          </svg>
-        </span>
-        <span>Refresh</span>
-      </button>
-      ${
-        canCancel
-          ? `
-            <button class="icon-button" type="button" data-selected-action="cancel" data-broker-mutation="true" data-action-key="order-cancel:${escapeHtml(order.id)}">
-              <span class="icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24" focusable="false">
-                  <path d="M18 6 6 18"/>
-                  <path d="m6 6 12 12"/>
-                </svg>
-              </span>
-              <span>Cancel</span>
-            </button>
-          `
-          : ""
-      }
-    </div>
-    ${
-      canReplace
-        ? ""
-        : '<p class="form-hint">Filled, canceled, and rejected orders can be refreshed but not replaced.</p>'
-    }
-  `;
-
-  if (canReplace) {
-    populateReplaceForm(order);
-  } else {
-    hideReplaceForm();
-  }
-
-  renderSelectedExecution();
-  renderSelectedJournal();
-  applyTradingSafetyState();
-}
-
-function setSelectedOrder(orderId, shouldScroll = false) {
-  state.selectedOrderId = orderId;
-  renderOrders();
-  renderSelectedOrder();
-
-  if (shouldScroll) {
-    els.selectedOrderCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }
-}
-
-function getSelectedOrder() {
-  return state.orders.find((order) => order.id === state.selectedOrderId) || null;
-}
-
 function getSelectedAccount() {
   return state.accounts.find((account) => account.external_account_id === state.selectedAccountId) || null;
 }
-
-function getSelectedExecution() {
-  return state.executions.find((execution) => execution.order_id === state.selectedOrderId) || null;
-}
-
-function getSelectedJournalEntries() {
-  const order = getSelectedOrder();
-  if (!order) {
-    return [];
-  }
-
-  return state.journals.filter(
-    (entry) =>
-      entry.order_id === order.id ||
-      (order.trade_plan_id && entry.trade_plan_id === order.trade_plan_id)
-  );
-}
-
-function renderSelectedExecution() {
-  const execution = getSelectedExecution();
-  if (!execution) {
-    els.selectedOrderExecution.className = "selected-order-execution empty";
-    els.selectedOrderExecution.textContent = "No fills recorded for this order yet.";
-    return;
-  }
-
-  els.selectedOrderExecution.className = "selected-order-execution";
-  els.selectedOrderExecution.innerHTML = `
-    <div class="execution-grid">
-      <div>
-        <span>Filled Qty</span>
-        <strong>${escapeHtml(formatPositionQuantity(execution.quantity))}</strong>
-      </div>
-      <div>
-        <span>Avg Fill</span>
-        <strong>${escapeHtml(formatCurrency(execution.price))}</strong>
-      </div>
-      <div>
-        <span>Last Fill</span>
-        <strong>${escapeHtml(formatDateTime(execution.executed_at))}</strong>
-      </div>
-    </div>
-    <p class="form-hint">Derived from the latest broker order detail snapshot for this order.</p>
-  `;
-}
-
-function renderSelectedJournal() {
-  const order = getSelectedOrder();
-  if (!order) {
-    updateJournalFormAvailability(false);
-    els.journalFormHint.textContent = "Select an order to save a plan note or post-trade review.";
-    els.selectedOrderJournal.className = "selected-order-journal empty";
-    els.selectedOrderJournal.textContent = "Select an order to load journal entries.";
-    return;
-  }
-
-  updateJournalFormAvailability(true);
-  const execution = getSelectedExecution();
-  const entries = getSelectedJournalEntries();
-  const context = [];
-  if (order.trade_plan_id) {
-    context.push("trade plan context");
-  }
-  if (execution) {
-    context.push("latest fill context");
-  }
-  els.journalFormHint.textContent = context.length
-    ? `New entries will attach ${context.join(" and ")} for ${order.symbol}.`
-    : `New entries will attach to ${order.symbol} on ${order.external_account_id}.`;
-
-  if (!entries.length) {
-    els.selectedOrderJournal.className = "selected-order-journal empty";
-    els.selectedOrderJournal.textContent = "No journal entries linked to this order yet.";
-    return;
-  }
-
-  els.selectedOrderJournal.className = "selected-order-journal";
-  els.selectedOrderJournal.innerHTML = entries
-    .map((entry) => {
-      const linkMeta = [];
-      if (entry.trade_plan_id) {
-        linkMeta.push("Plan linked");
-      }
-      if (entry.execution_id) {
-        linkMeta.push("Execution linked");
-      }
-      const tags = entry.tags.length
-        ? `<div class="journal-entry-tags">${entry.tags
-            .map((tag) => `<span class="journal-tag">${escapeHtml(tag)}</span>`)
-            .join("")}</div>`
-        : "";
-
-      return `
-        <article class="journal-entry-card">
-          <div class="journal-entry-head">
-            <div class="journal-entry-title-block">
-              <span class="pill ${journalEntryTone(entry.entry_type)}">${escapeHtml(entry.entry_type)}</span>
-              <strong>${escapeHtml(entry.title)}</strong>
-            </div>
-            <span class="journal-entry-time">${escapeHtml(formatDateTime(entry.updated_at))}</span>
-          </div>
-          <div class="journal-entry-meta">
-            <span>${escapeHtml(linkMeta.join(" / ") || "Order linked")}</span>
-            <span>${escapeHtml(entry.symbol)}</span>
-          </div>
-          <p class="journal-entry-notes">${formatMultilineText(entry.notes)}</p>
-          ${tags}
-        </article>
-      `;
-    })
-    .join("");
-}
-
-function updateJournalFormAvailability(enabled) {
-  els.journalEntryType.disabled = !enabled;
-  els.journalTitle.disabled = !enabled;
-  els.journalTags.disabled = !enabled;
-  els.journalNotes.disabled = !enabled;
-  els.submitJournal.disabled = !enabled;
-  els.submitJournal.title = enabled ? "" : "Select an order first.";
-}
-
-function populateReplaceForm(order) {
-  els.replaceOrderForm.dataset.orderId = order.id;
-  els.replaceQuantity.value = String(order.quantity);
-  els.replaceLimitPrice.value = order.limit_price ?? "";
-  els.replaceStopPrice.value = order.stop_price ?? "";
-  els.replaceRemark.value = "";
-  syncReplaceOrderFields(order.order_type);
-  if (els.replaceSubmit) {
-    els.replaceSubmit.dataset.actionKey = `order-replace:${order.id}`;
-    setBusinessDisabled(els.replaceSubmit, false, "");
-  }
-  els.replaceOrderForm.classList.remove("hidden");
-  applyTradingSafetyState();
-}
-
-function hideReplaceForm() {
-  els.replaceOrderForm.dataset.orderId = "";
-  els.replaceOrderForm.classList.add("hidden");
-}
-
-function updateOrderTicketAvailability() {
-  const hasAccount = Boolean(state.selectedAccountId);
-  setBusinessDisabled(els.submitOrder, !hasAccount, hasAccount ? "" : "Select a broker account first.");
-  applyTradingSafetyState();
-}
-
 function updateSyncButtons() {
   const account = getSelectedAccount();
   const hasAccount = Boolean(account);
@@ -5222,134 +3278,72 @@ function updatePreOpenButtons(forceSaving = false) {
   els.savePreOpenBoard.title = canSaveAssessment ? "Store the current live macro board as the latest run." : "Load the live macro board first.";
 }
 
-function syncTicketOrderFields() {
-  syncOrderTypeFields({
-    orderType: els.orderType.value,
-    limitField: els.orderLimitField,
-    stopField: els.orderStopField,
-    limitInput: els.orderLimitPrice,
-    stopInput: els.orderStopPrice,
-    hintEl: els.orderFormHint,
-    marketHint: "Market orders use the selected paper account and do not require a price.",
-    limitHint: "Limit orders require a limit price.",
-    stopHint: "Stop orders require a stop price. Add an optional limit price to send a stop-limit style order.",
-  });
-}
-
-function syncReplaceOrderFields(orderType) {
-  syncOrderTypeFields({
-    orderType,
-    limitField: els.replaceLimitField,
-    stopField: els.replaceStopField,
-    limitInput: els.replaceLimitPrice,
-    stopInput: els.replaceStopPrice,
     hintEl: els.replaceFormHint,
-    marketHint: "Market order replacements update quantity only.",
-    limitHint: "Limit order replacements require a limit price.",
-    stopHint: "Stop order replacements require a stop price. Limit price remains optional.",
-  });
+async function submitOrder(...args) {
+  return ordersView.submitOrder(...args);
 }
 
-function syncOrderTypeFields({
-  orderType,
-  limitField,
-  stopField,
-  limitInput,
-  stopInput,
-  hintEl,
-  marketHint,
-  limitHint,
-  stopHint,
-}) {
-  const showLimit = orderType === "limit" || orderType === "stop";
-  const showStop = orderType === "stop";
-
-  setFieldVisibility(limitField, limitInput, showLimit);
-  setFieldVisibility(stopField, stopInput, showStop);
-
-  if (orderType === "market") {
-    limitInput.value = "";
-    stopInput.value = "";
-    hintEl.textContent = marketHint;
-    return;
-  }
-
-  if (orderType === "limit") {
-    stopInput.value = "";
-    hintEl.textContent = limitHint;
-    return;
-  }
-
-  hintEl.textContent = stopHint;
+async function refreshOrder(...args) {
+  return ordersView.refreshOrder(...args);
 }
 
-function setFieldVisibility(field, input, visible) {
-  field.classList.toggle("hidden", !visible);
-  input.disabled = !visible;
+async function cancelOrder(...args) {
+  return ordersView.cancelOrder(...args);
 }
 
-function buildCreateOrderPayload() {
-  const symbol = els.orderSymbol.value.trim().toUpperCase();
-  if (!symbol) {
-    throw new Error("Order symbol is required.");
-  }
-
-  const payload = {
-    external_account_id: state.selectedAccountId,
-    symbol,
-    side: els.orderSide.value,
-    quantity: parsePositiveInteger(els.orderQuantity.value, "Order quantity"),
-    order_type: els.orderType.value,
-    time_in_force: els.orderTimeInForce.value,
-    mode: "paper",
-    remark: normalizeOptionalText(els.orderRemark.value),
-  };
-  applyOrderTypePrices({
-    orderType: payload.order_type,
-    limitValue: els.orderLimitPrice.value,
-    stopValue: els.orderStopPrice.value,
-    payload,
-    contextLabel: "Order",
-  });
-  return payload;
+async function replaceSelectedOrder(...args) {
+  return ordersView.replaceSelectedOrder(...args);
 }
 
-function buildReplaceOrderPayload(order) {
-  const payload = {
-    quantity: parsePositiveInteger(els.replaceQuantity.value, "Replace quantity"),
-    remark: normalizeOptionalText(els.replaceRemark.value),
-  };
-  applyOrderTypePrices({
-    orderType: order.order_type,
-    limitValue: els.replaceLimitPrice.value,
-    stopValue: els.replaceStopPrice.value,
-    payload,
-    contextLabel: "Replace",
-  });
-  return payload;
+async function submitJournalEntry() {
+  return ordersView.submitJournalEntry();
 }
 
-function applyOrderTypePrices({ orderType, limitValue, stopValue, payload, contextLabel }) {
-  if (orderType === "market") {
-    payload.limit_price = null;
-    payload.stop_price = null;
-    return;
-  }
-
-  if (orderType === "limit") {
-    payload.limit_price = parsePositiveNumber(limitValue, `${contextLabel} limit price`, true);
-    payload.stop_price = null;
-    return;
-  }
-
-  if (orderType === "stop") {
-    payload.limit_price = parsePositiveNumber(limitValue, `${contextLabel} limit price`, false);
-    payload.stop_price = parsePositiveNumber(stopValue, `${contextLabel} stop price`, true);
-    return;
-  }
-
-  throw new Error(`Unsupported order type: ${orderType}`);
+function renderOrders(...args) {
+  return ordersView.renderOrders(...args);
 }
+
+function renderSelectedOrder(...args) {
+  return ordersView.renderSelectedOrder(...args);
+}
+
+function setSelectedOrder(...args) {
+  return ordersView.setSelectedOrder(...args);
+}
+
+function getSelectedOrder(...args) {
+  return ordersView.getSelectedOrder(...args);
+}
+
+function getSelectedExecution(...args) {
+  return ordersView.getSelectedExecution(...args);
+}
+
+function getSelectedJournalEntries(...args) {
+  return ordersView.getSelectedJournalEntries(...args);
+}
+
+function renderSelectedExecution() {
+  return ordersView.renderSelectedExecution();
+}
+
+function renderSelectedJournal() {
+  return ordersView.renderSelectedJournal();
+}
+
+function updateOrderTicketAvailability(...args) {
+  return ordersView.updateOrderTicketAvailability(...args);
+}
+
+function syncTicketOrderFields(...args) {
+  return ordersView.syncTicketOrderFields(...args);
+}
+
+function syncReplaceOrderFields(...args) {
+  return ordersView.syncReplaceOrderFields(...args);
+}
+
+
 
 function parsePositiveInteger(value, label) {
   const number = Number.parseInt(String(value).trim(), 10);
@@ -5412,48 +3406,16 @@ function normalizeLotterySymbol() {
   return symbol;
 }
 
-function isCancelableOrder(order) {
-  return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
-}
-
-function isActiveSpread(spread) {
-  return (
-    spread.status === "entry_pending_long" ||
-    spread.status === "entry_pending_short" ||
-    spread.status === "open" ||
-    spread.status === "exit_pending_short" ||
-    spread.status === "exit_pending_long"
-  );
-}
-
-function isExitPendingSpread(spread) {
-  return spread.status === "exit_pending_short" || spread.status === "exit_pending_long";
-}
-
-function isMonitorableSpread(spread) {
-  return spread.status === "open" || isExitPendingSpread(spread);
-}
-
-function isReplaceableOrder(order) {
-  return order.status === "created" || order.status === "submitted" || order.status === "partially_filled";
-}
-
 function matchingQuoteTime(symbol) {
-  if (!state.quote || String(state.quote.symbol || "").toUpperCase() !== String(symbol || "").toUpperCase()) {
+  const researchState = window.StocksToolResearch?.getState?.();
+  const researchRow = researchState?.rows?.find(
+    (row) => String(row?.symbol || "").toUpperCase() === String(symbol || "").toUpperCase()
+  );
+  const timestamp = researchRow?.quote?.timestamp || researchRow?.quote?.updated_at;
+  if (!timestamp) {
     return "Not loaded";
   }
-  return formatDateTime(state.quote.timestamp);
-}
-
-function formatOrderPrice(order) {
-  const parts = [];
-  if (order.limit_price !== null && order.limit_price !== undefined) {
-    parts.push(`L ${formatNumber(order.limit_price)}`);
-  }
-  if (order.stop_price !== null && order.stop_price !== undefined) {
-    parts.push(`S ${formatNumber(order.stop_price)}`);
-  }
-  return parts.length > 0 ? parts.join(" / ") : "--";
+  return `${formatDateTime(timestamp)} (research context only)`;
 }
 
 function buildSortedPositions(positions) {

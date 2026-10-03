@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from regression_common import build_report, emit_report
+from regression_common import (
+    ObservedRun,
+    build_observed_child_report,
+    build_report,
+    default_child_timeout_seconds,
+    emit_report,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,19 +46,25 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         for path in sorted((ROOT / "scripts").glob("*.py"))
         if path.name != "__init__.py"
     ]
+    static_dir = ROOT / "src" / "stocks_tool" / "ui" / "static"
     dashboard_js_paths = [
-        "lifecycle-warning.js",
-        "api-client.js",
-        "formatters.js",
-        "i18n.js",
-        "state.js",
-        "app.js",
+        path.relative_to(static_dir).as_posix()
+        for path in sorted(static_dir.rglob("*.js"))
     ]
     specs: list[dict[str, Any]] = [
+        {
+            "name": "environment-preflight",
+            "command": [
+                sys.executable,
+                str(ROOT / "scripts" / "check_environment.py"),
+                "--strict", "--json-output", str(evidence_dir / "environment.json"),
+            ],
+        },
         {"name": "pytest", "command": [sys.executable, "-m", "pytest", "-q"]},
         {
             "name": "py-compile-scripts",
             "command": [sys.executable, "-m", "py_compile", *py_compile_paths],
+            "cacheable": True,
         },
         *[
             {
@@ -63,16 +74,17 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                     "--check",
                     str(ROOT / "src" / "stocks_tool" / "ui" / "static" / filename),
                 ],
+                "cacheable": True,
             }
             for filename in dashboard_js_paths
         ],
         {
             "name": "alembic-heads",
-            "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "heads"],
+            "command": [sys.executable, "-m", "alembic", "heads"],
         },
         {
             "name": "alembic-current",
-            "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "current"],
+            "command": [sys.executable, "-m", "alembic", "current"],
         },
         {
             "name": "alembic-head-current-match",
@@ -113,6 +125,15 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 str(evidence_dir / "mock-ui.json"),
             ],
         },
+        {
+            "name": "recovery-ui",
+            "command": [
+                sys.executable,
+                str(ROOT / "scripts" / "run_recovery_ui_regression.py"),
+                "--json-output",
+                str(evidence_dir / "recovery-ui.json"),
+            ],
+        },
     ]
     if not args.skip_running_api_checks:
         specs.append(
@@ -131,38 +152,39 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 ],
             }
         )
-    specs.append({"name": "git-diff-check", "command": ["git", "diff", "--check"]})
+    specs.append({"name": "git-diff-check", "command": ["git", "diff", "--check"], "cacheable": True})
     return specs
 
 
-def run_child(spec: dict[str, Any]) -> dict[str, Any]:
+def run_child(spec: dict[str, Any], observed_run: ObservedRun) -> dict[str, Any]:
     started = time.monotonic()
-    completed = subprocess.run(
-        spec["command"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+    child = observed_run.run_child(
+        {**spec, "cwd": str(ROOT)},
+        timeout_seconds=spec.get("timeout_seconds", default_child_timeout_seconds(spec["name"])),
     )
-    return {
-        "name": spec["name"],
-        "command": spec["command"],
-        "returncode": completed.returncode,
-        "duration_seconds": round(time.monotonic() - started, 3),
-        "status": "passed" if completed.returncode == 0 else "failed",
-        "stdout_tail": completed.stdout[-1200:],
-        "stderr_tail": completed.stderr[-1200:],
-    }
+    return build_observed_child_report(spec, child, started_monotonic=started)
 
 
 def main() -> None:
     args = parse_args()
     evidence_dir = Path(args.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    children = [run_child(spec) for spec in child_specs(args, evidence_dir)]
-    failed = any(child["returncode"] != 0 for child in children)
+    observed_run = ObservedRun(evidence_dir, source_root=ROOT)
+    observed_run.start()
+    children: list[dict[str, Any]] = []
+    failed = False
+    try:
+        for spec in child_specs(args, evidence_dir):
+            child = run_child(spec, observed_run)
+            children.append(child)
+            if child["returncode"] != 0:
+                failed = True
+    except Exception as error:
+        failed = True
+        observed_run.finish("failed", next_action="inspect observability state and child logs", error=str(error))
+        raise
+    else:
+        observed_run.finish("failed" if failed else "passed")
     emit_report(
         build_report(
             script="run_p0_safety_gate.py",
@@ -183,6 +205,7 @@ def main() -> None:
                 "destructive_actions_allowed": False,
                 "running_api_checks_skipped": args.skip_running_api_checks,
                 "children": children,
+                "observability": observed_run.payload(),
             },
         ),
         json_output=args.json_output,

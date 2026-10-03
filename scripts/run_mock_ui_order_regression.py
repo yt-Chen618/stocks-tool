@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import httpx
-from regression_common import build_report, emit_report
+from browser_runtime import browser_environment, resolve_node, resolve_playwright_core
+from regression_common import (
+    ObservedRun,
+    build_report,
+    emit_report,
+    run_bounded_process,
+    start_utf8_process,
+    stop_process,
+    wait_for_http,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8765
@@ -52,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Mock server host.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Mock server port.")
     parser.add_argument("--timeout-seconds", type=float, default=30.0, help="HTTP timeout and step deadline.")
+    parser.add_argument("--browser-timeout-seconds", type=float, default=300.0, help="Finite timeout for one browser flow.")
     parser.add_argument("--poll-seconds", type=float, default=0.5, help="Polling interval for mock state checks.")
     parser.add_argument("--keep-server", action="store_true", help="Leave the mock server running after the script exits.")
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
@@ -65,7 +72,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str]:
-    return subprocess.Popen(
+    server_log = ROOT / "artifacts" / "mock-server-logs" / f"{scenario}-{port}.log"
+    return start_utf8_process(
         [
             sys.executable,
             str(ROOT / "scripts" / "mock_dashboard_server.py"),
@@ -77,42 +85,19 @@ def start_server(host: str, port: int, *, scenario: str) -> subprocess.Popen[str
             scenario,
         ],
         cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        output_log=server_log,
     )
 
 
 def stop_server(process: subprocess.Popen[str]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+    stop_process(process)
 
 
 def wait_for_server(base_url: str, timeout_seconds: float, process: subprocess.Popen[str]) -> None:
-    deadline = time.time() + timeout_seconds
-    last_error: str | None = None
-    while time.time() < deadline:
-        if process.poll() is not None:
-            output = ""
-            if process.stdout is not None:
-                output = process.stdout.read()
-            raise RegressionError(f"Mock server exited early.\nServer output:\n{output}")
-        try:
-            response = httpx.get(base_url, timeout=2.0)
-            if response.status_code == 200:
-                return
-        except Exception as error:  # pragma: no cover - transient bootstrap noise
-            last_error = str(error)
-        time.sleep(0.25)
-    raise RegressionError(f"Mock server did not become ready at {base_url}: {last_error}")
+    try:
+        wait_for_http(base_url, process=process, timeout_seconds=timeout_seconds)
+    except RuntimeError as error:
+        raise RegressionError(f"Mock server did not become ready at {base_url}: {error}") from error
 
 
 def require_ok(response: httpx.Response) -> Any:
@@ -128,38 +113,16 @@ def require_ok(response: httpx.Response) -> Any:
     raise RegressionError(detail)
 
 
-def resolve_playwright_core() -> str:
-    npm_command = shutil.which("npm.cmd") or shutil.which("npm")
-    if npm_command is None:
-        raise RegressionError("Could not find npm. Install Node.js/npm before running browser regression.")
-    npm_root = subprocess.run(
-        [npm_command, "root", "-g"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    ).stdout.strip()
-    candidates = [
-        Path(npm_root) / "@playwright" / "cli" / "node_modules" / "playwright-core",
-        Path(npm_root) / "playwright-core",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    raise RegressionError(
-        "Could not locate a global playwright-core install. Install @playwright/cli and browsers first."
-    )
-
-
-def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, Any]:
+def run_browser_flow(
+    base_url: str,
+    *,
+    scenario: str = "normal",
+    timeout_seconds: float = 300.0,
+) -> dict[str, Any]:
     screenshot_path = ROOT / "output" / "playwright" / f"mock-ui-{scenario}-regression.png"
     playwright_core_path = resolve_playwright_core()
-    node_command = shutil.which("node.exe") or shutil.which("node")
-    if node_command is None:
-        raise RegressionError("Could not find node. Install Node.js before running browser regression.")
-    completed = subprocess.run(
+    node_command = resolve_node()
+    completed = run_bounded_process(
         [
             node_command,
             str(ROOT / "scripts" / "mock_ui_browser_flow.js"),
@@ -169,16 +132,15 @@ def run_browser_flow(base_url: str, *, scenario: str = "normal") -> dict[str, An
             scenario,
         ],
         cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env={**os.environ},
+        env=browser_environment(),
+        timeout_seconds=timeout_seconds,
     )
-    if completed.returncode != 0:
+    if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(detail)
+        error = RegressionError(f"Browser flow {completed.status}: {detail}")
+        error.process_status = completed.status
+        error.process_cleanup = completed.cleanup
+        raise error
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -291,37 +253,46 @@ def main() -> None:
     args = parse_args()
     if args.scenario == "all":
         scenario_reports: list[dict[str, Any]] = []
-        for scenario in MOCK_SCENARIOS:
-            command = [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--host",
-                args.host,
-                "--port",
-                str(args.port),
-                "--timeout-seconds",
-                str(args.timeout_seconds),
-                "--poll-seconds",
-                str(args.poll_seconds),
-                "--scenario",
-                scenario,
-            ]
-            completed = subprocess.run(
-                command,
-                cwd=ROOT,
-                check=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-            if completed.returncode != 0:
-                detail = completed.stderr.strip() or completed.stdout.strip() or f"Scenario {scenario} failed."
-                raise RegressionError(detail)
-            try:
-                scenario_reports.append(json.loads(completed.stdout))
-            except json.JSONDecodeError as error:
-                raise RegressionError(f"Scenario {scenario} did not emit JSON evidence: {completed.stdout}") from error
+        evidence_dir = ROOT / "artifacts" / "mock-ui-scenario-matrix"
+        observed_run = ObservedRun(evidence_dir, source_root=ROOT)
+        observed_run.start()
+        try:
+            for scenario in MOCK_SCENARIOS:
+                command = [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--host",
+                    args.host,
+                    "--port",
+                    str(args.port),
+                    "--timeout-seconds",
+                    str(args.timeout_seconds),
+                    "--poll-seconds",
+                    str(args.poll_seconds),
+                    "--browser-timeout-seconds",
+                    str(args.browser_timeout_seconds),
+                    "--scenario",
+                    scenario,
+                ]
+                child = observed_run.run_child(
+                    {"name": f"scenario-{scenario}", "command": command, "cacheable": False},
+                    timeout_seconds=args.browser_timeout_seconds + 30,
+                )
+                if child["status"] != "passed":
+                    stderr = Path(child["stderr_log"]).read_text(encoding="utf-8", errors="replace")
+                    raise RegressionError(
+                        f"Scenario {scenario} failed with code {child['returncode']}. {stderr[-2000:]}"
+                    )
+                try:
+                    scenario_output = Path(child["stdout_log"]).read_text(encoding="utf-8")
+                    scenario_reports.append(json.loads(scenario_output))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise RegressionError(f"Scenario {scenario} did not emit JSON evidence.") from error
+        except Exception as error:
+            observed_run.finish("failed", next_action="inspect scenario logs", error=str(error))
+            raise
+        else:
+            observed_run.finish("passed")
         emit_report(
             build_report(
                 script="run_mock_ui_order_regression.py",
@@ -330,7 +301,7 @@ def main() -> None:
                 mode="mock",
                 target=f"http://{args.host}:{args.port}",
                 summary="Mock dashboard posture scenario matrix passed.",
-                payload={"scenarios": scenario_reports},
+                payload={"scenarios": scenario_reports, "observability": observed_run.payload()},
             ),
             json_output=args.json_output,
         )
@@ -345,7 +316,11 @@ def main() -> None:
         try:
             if args.scenario != "normal":
                 evidence = run_scenario_assertions(client, scenario=args.scenario)
-                browser = run_browser_flow(base_url, scenario=args.scenario)
+                browser = run_browser_flow(
+                    base_url,
+                    scenario=args.scenario,
+                    timeout_seconds=args.browser_timeout_seconds,
+                )
                 assert browser["rendered"] is True
                 emit_report(
                     build_report(
@@ -363,6 +338,13 @@ def main() -> None:
 
             dashboard = client.get("/")
             dashboard.raise_for_status()
+            assert 'data-workspace="research"' in dashboard.text
+            assert dashboard.text.count("data-workspace-option=") == 5
+            assert 'id="research-section"' in dashboard.text
+            assert 'id="research-table-body"' in dashboard.text
+            assert 'id="research-chart-container"' in dashboard.text
+            assert 'id="execution-drawer"' in dashboard.text
+            assert dashboard.text.count("data-execution-tab=") == 4
             assert "Strategy Center" in dashboard.text
             assert "Holdings Overview" in dashboard.text
             assert "Real-time Macro Board" in dashboard.text
@@ -386,65 +368,56 @@ def main() -> None:
             assert "Execution Summary" in dashboard.text
             assert "Review Workflow" in dashboard.text
             assert "Orders" in dashboard.text
-            assert "Watchlists" not in dashboard.text
+            assert "Manage Watchlist" in dashboard.text
             assert "Longbridge Status" not in dashboard.text
             assert "Quick Quote" not in dashboard.text
-
-            app_js = client.get("/static/app.js")
-            app_js.raise_for_status()
-            for marker in (
-                "order-ticket-form",
-                "replace-order-form",
-                "selected-order-card",
-                "selected-order-execution",
-                "journal-entry-form",
-                "selected-order-journal",
-                "strategy-runtime-strip",
-                "strategy-experiment-strip",
-                "market-events-card",
-                "preopen-summary-strip",
-                "preopen-assessment-card",
-                "preopen-run-review",
-                "LANGUAGE_STORAGE_KEY",
-                "prepareMarketOverlayPanels()",
-                "renderPreOpenAssessment(",
-                "renderLatestPreOpenRun()",
-                "saveCurrentPreOpenBoard()",
-                "strategy-controls-form",
-                "zero-dte-lottery-controls-form",
-                "previewZeroDteLottery()",
-                "zero-dte-lottery/runtime",
-                "runConfirmedBrokerMutation(",
-                '"Idempotency-Key"',
-                "Promise.allSettled",
-                "runStrategyScan(",
-                "runStrategyReview()",
-                "saveStrategyControls(",
-                "reconcileCoveredCallLifecycle(",
-                "covered-call/lifecycle",
-                "Refresh Lifecycle",
-                "renderCoveredCallLatestMonitor(",
-                "Latest Monitor",
-                "renderStrategyRuntime()",
-                "renderStrategyExperiment()",
-                "renderMarketEvents()",
-                "spread-summary-strip",
-                "spreads-body",
-                "submitOrder(",
-                "submitJournalEntry()",
-                "replaceSelectedOrder(",
-                "renderSpreads()",
-                "monitorSpread(",
-                "recoverCloseSpread(",
-                "recover-close/eligibility",
-                "renderSelectedExecution()",
-                "renderSelectedJournal()",
-            ):
-                assert marker in app_js.text, f"Missing dashboard app marker: {marker}"
+            assert "data-view-mode-option" not in dashboard.text
+            static_assets = (
+                "workspace.css",
+                "vendor/lightweight-charts-5.2.0.standalone.production.js",
+                "chart-view.js",
+                "research-view.js",
+                "watchlist-view.js",
+                "account-loader.js",
+                "bull-put-view.js",
+                "advisor-view.js",
+                "orders-view.js",
+                "execution-drawer.js",
+                "workspace-shell.js",
+            )
+            for asset in static_assets:
+                assert f"/static/{asset}?v=" in dashboard.text
+            asset_http_contract = {}
+            for asset in static_assets:
+                asset_response = client.get(f"/static/{asset}?v=contract")
+                asset_response.raise_for_status()
+                asset_http_contract[asset] = {
+                    "status": asset_response.status_code,
+                    "content_type": asset_response.headers.get("content-type", ""),
+                    "bytes": len(asset_response.content),
+                }
+                assert asset_response.content, f"Static asset returned an empty response: {asset}"
 
             accounts = require_ok(client.get("/broker-accounts"))
             assert accounts[0]["external_account_id"] == "LBPT10087357"
             assert accounts[0]["auto_reconcile_enabled"] is True
+            research_universe = require_ok(
+                client.get(
+                    "/research/universe",
+                    params={
+                        "external_account_id": "LBPT10087357",
+                        "watchlist_id": "mock-watchlist-1",
+                        "mode": "paper",
+                    },
+                )
+            )
+            assert [row["symbol"] for row in research_universe["rows"]] == ["MOCK.US", "QQQ.US"]
+            research_technicals = require_ok(
+                client.get("/research/technicals", params=[("symbols", "MOCK.US"), ("symbols", "QQQ.US")])
+            )
+            assert len(research_technicals["results"]) == 2
+            research_history = require_ok(client.get("/research/symbols/MOCK.US/history", params={"range": "3m"}))
+            assert len(research_history["bars"]) == 66
             pre_open = require_ok(client.get("/strategies/pre-open-risk"))
             assert pre_open["preferred_vehicle"] == "QQQ"
             assert pre_open["plain_put_view"] == "reasonable"
@@ -509,7 +482,11 @@ def main() -> None:
             assert any(event["action"] == "advisor_run_card_recorded" for event in audit_events)
             audit_summary = require_ok(client.get("/ops/audit/summary", params={"external_account_id": "LBPT10087357", "mode": "paper"}))
             assert audit_summary["event_count"] >= 1
-            browser = run_browser_flow(base_url, scenario=args.scenario)
+            browser = run_browser_flow(
+                base_url,
+                scenario=args.scenario,
+                timeout_seconds=args.browser_timeout_seconds,
+            )
             assert browser["operator"]["rendered"] is True
             scenario_evidence = run_scenario_assertions(client, scenario=args.scenario)
 
@@ -530,7 +507,10 @@ def main() -> None:
                             "execution_summary_shell": True,
                             "pre_open_seed": True,
                             "pre_open_run_seed": True,
-                            "app_js_markers": True,
+                            "asset_http_contract": asset_http_contract,
+                            "research_universe_seed": True,
+                            "research_technicals_seed": True,
+                            "research_history_seed": True,
                             "account_seed": True,
                             "snapshot_seed": True,
                             "runtime_seed": True,
@@ -559,7 +539,7 @@ def main() -> None:
             build_report(
                 script="run_mock_ui_order_regression.py",
                 workflow="mock-dashboard-order-regression",
-                status="failed",
+                status=getattr(error, "process_status", "failed"),
                 mode="mock",
                 target=base_url,
                 summary="Mock dashboard regression failed.",

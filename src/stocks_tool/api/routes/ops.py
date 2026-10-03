@@ -7,11 +7,13 @@ from stocks_tool.api.dependencies import (
     get_operator_consistency_service,
     get_operator_status_service,
     get_order_service,
+    get_recovery_status_service,
 )
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.adapters.brokers.longbridge import LongbridgeBrokerAdapter
 from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.operator_status import OPERATOR_REASON_CODE_DETAILS, OperatorStatusService
+from stocks_tool.application.services.recovery_status import RecoveryStatusService
 from stocks_tool.domain.enums import ExecutionMode, TradingIntentState
 from stocks_tool.domain.models import (
     OperatorConsistencyRepairRequest,
@@ -25,6 +27,7 @@ from stocks_tool.domain.models import (
     StrategyAuditEvent,
     StrategyAuditSummary,
     TradeActionIntent,
+    OperatorRecoveryStatusSnapshot,
 )
 
 
@@ -114,6 +117,20 @@ def get_market_data_runtime(
     adapter: LongbridgeBrokerAdapter = Depends(get_longbridge_adapter),
 ) -> MarketDataRuntimeSnapshot:
     return adapter.get_market_data_runtime_status()
+
+
+@router.get("/recovery-status", response_model=OperatorRecoveryStatusSnapshot)
+def get_recovery_status(
+    external_account_id: str = Query(..., description="Broker account id, e.g. LBPT10087357"),
+    mode: ExecutionMode = Query(default=ExecutionMode.PAPER),
+    limit: int = Query(default=100, ge=1, le=500),
+    service: RecoveryStatusService = Depends(get_recovery_status_service),
+) -> OperatorRecoveryStatusSnapshot:
+    return service.get_status(
+        external_account_id=external_account_id,
+        mode=mode,
+        limit=limit,
+    )
 
 
 @router.get("/unattended-status", response_model=OperatorStatusSnapshot)

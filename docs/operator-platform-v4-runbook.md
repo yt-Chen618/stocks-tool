@@ -1,5 +1,7 @@
 # Operator Platform V4 Runbook
 
+Historical operator reference. Current procedures and release gates are in `runtime-operations.md`, `regression-matrix.md`, and `project-wide-optimization-campaign.md`.
+
 Last updated: 2026-06-16
 
 This runbook is for the local paper-first operator workflow around Longbridge paper account `LBPT10087357`. It does not enable live autonomous trading.

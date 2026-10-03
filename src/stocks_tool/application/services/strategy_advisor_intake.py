@@ -10,8 +10,6 @@ from stocks_tool.domain.models import (
     StrategyAdvisorProposalDraft,
     StrategyAdvisorResponseResult,
     StrategyAdvisorReviewDraft,
-    StrategyProposal,
-    StrategyReview,
 )
 
 
@@ -45,24 +43,25 @@ class StrategyAdvisorIntakeService:
         )
         self._assert_source_allowed(source, context)
 
-        proposals = [
-            self._record_proposal(request=request, source=source, context=context, draft=draft)
+        proposal_requests = [
+            self._proposal_request(request=request, source=source, context=context, draft=draft)
             for draft in request.proposals
         ]
-        reviews = [
-            self._record_review(request=request, source=source, context=context, draft=draft)
+        review_requests = [
+            self._review_request(request=request, source=source, context=context, draft=draft)
             for draft in request.reviews
         ]
         response_payload = request.model_dump(mode="json", exclude_none=True)
-        advisor_run = (
-            self.strategy_experiments.mark_advisor_run_recorded(
-                request.advisor_run_id,
-                proposal_count=len(proposals),
-                review_count=len(reviews),
-                response_payload=response_payload,
-            )
-            if request.advisor_run_id
-            else None
+        response_payload["source"] = source
+        proposals, reviews, advisor_run = self.strategy_experiments.record_advisor_response(
+            external_account_id=request.external_account_id,
+            source=source,
+            mode=ExecutionMode.PAPER,
+            advisor_run_id=request.advisor_run_id,
+            proposal_requests=proposal_requests,
+            review_requests=review_requests,
+            response_payload=response_payload,
+            recorded_at=datetime.now(timezone.utc),
         )
         return StrategyAdvisorResponseResult(
             external_account_id=request.external_account_id,
@@ -75,79 +74,76 @@ class StrategyAdvisorIntakeService:
             recorded_at=datetime.now(timezone.utc),
         )
 
-    def _record_proposal(
+    def _proposal_request(
         self,
         *,
         request: RecordStrategyAdvisorResponseRequest,
         source: str,
         context: StrategyAdvisorContext,
         draft: StrategyAdvisorProposalDraft,
-    ) -> StrategyProposal:
-        return self.strategy_experiments.create_proposal(
-            CreateStrategyProposalRequest(
-                strategy_id=draft.strategy_id,
-                external_account_id=request.external_account_id,
-                mode=ExecutionMode.PAPER,
-                symbol=draft.symbol,
-                title=draft.title,
-                proposed_action=draft.proposed_action,
-                thesis=draft.thesis,
-                rationale=draft.rationale,
-                confidence=draft.confidence,
-                expected_max_loss=draft.expected_max_loss,
-                expected_max_profit=draft.expected_max_profit,
-                approval_required=True,
-                expires_at=draft.expires_at,
+    ) -> CreateStrategyProposalRequest:
+        return CreateStrategyProposalRequest(
+            strategy_id=draft.strategy_id,
+            external_account_id=request.external_account_id,
+            mode=ExecutionMode.PAPER,
+            symbol=draft.symbol,
+            title=draft.title,
+            proposed_action=draft.proposed_action,
+            thesis=draft.thesis,
+            rationale=draft.rationale,
+            confidence=draft.confidence,
+            expected_max_loss=draft.expected_max_loss,
+            expected_max_profit=draft.expected_max_profit,
+            approval_required=True,
+            expires_at=draft.expires_at,
+            source=source,
+            source_run_id=request.advisor_run_id,
+            candidate_payload=self._with_advisor_metadata(
+                draft.candidate_payload,
                 source=source,
-                source_run_id=request.advisor_run_id,
-                candidate_payload=self._with_advisor_metadata(
-                    draft.candidate_payload,
-                    source=source,
-                    context=context,
-                    raw_response=request.raw_response,
-                    advisor_run_id=request.advisor_run_id,
-                ),
-                risk_payload=self._with_advisor_metadata(
-                    draft.risk_payload,
-                    source=source,
-                    context=context,
-                    raw_response=None,
-                    advisor_run_id=request.advisor_run_id,
-                ),
-                checks=self._merge_checks(draft.checks),
-            )
+                context=context,
+                raw_response=request.raw_response,
+                advisor_run_id=request.advisor_run_id,
+            ),
+            risk_payload=self._with_advisor_metadata(
+                draft.risk_payload,
+                source=source,
+                context=context,
+                raw_response=None,
+                advisor_run_id=request.advisor_run_id,
+            ),
+            checks=self._merge_checks(draft.checks),
         )
 
-    def _record_review(
+    def _review_request(
         self,
         *,
         request: RecordStrategyAdvisorResponseRequest,
         source: str,
         context: StrategyAdvisorContext,
         draft: StrategyAdvisorReviewDraft,
-    ) -> StrategyReview:
-        return self.strategy_experiments.create_review(
-            CreateStrategyReviewRequest(
-                strategy_id=draft.strategy_id,
-                external_account_id=request.external_account_id,
-                mode=ExecutionMode.PAPER,
-                review_type=draft.review_type,
-                status=draft.status,
-                summary=draft.summary,
-                recommendation=draft.recommendation,
-                parameter_name=draft.parameter_name,
-                current_value=draft.current_value,
-                suggested_value=draft.suggested_value,
-                proposal_id=draft.proposal_id,
-                metrics_payload=self._with_advisor_metadata(
-                    draft.metrics_payload,
-                    source=source,
-                    context=context,
-                    raw_response=request.raw_response,
-                    advisor_run_id=request.advisor_run_id,
-                ),
-                reviewed_at=draft.reviewed_at,
-            )
+    ) -> CreateStrategyReviewRequest:
+        return CreateStrategyReviewRequest(
+            strategy_id=draft.strategy_id,
+            external_account_id=request.external_account_id,
+            mode=ExecutionMode.PAPER,
+            review_type=draft.review_type,
+            status=draft.status,
+            summary=draft.summary,
+            recommendation=draft.recommendation,
+            parameter_name=draft.parameter_name,
+            current_value=draft.current_value,
+            suggested_value=draft.suggested_value,
+            run_id=request.advisor_run_id,
+            proposal_id=draft.proposal_id,
+            metrics_payload=self._with_advisor_metadata(
+                draft.metrics_payload,
+                source=source,
+                context=context,
+                raw_response=request.raw_response,
+                advisor_run_id=request.advisor_run_id,
+            ),
+            reviewed_at=draft.reviewed_at,
         )
 
     @classmethod
@@ -169,13 +165,20 @@ class StrategyAdvisorIntakeService:
         advisor_run_id: str | None,
     ) -> dict:
         enriched = dict(payload or {})
-        enriched.setdefault("advisor_source", source)
+        # These fields are local provenance and safety controls.  They must
+        # never be accepted from an advisor payload, even when the payload is
+        # otherwise preserved for research-specific business data.
+        enriched["advisor_source"] = source
         if advisor_run_id is not None:
-            enriched.setdefault("advisor_run_id", advisor_run_id)
-        enriched.setdefault("llm_direct_execution_allowed", False)
-        enriched.setdefault("advisor_hard_rules", [rule.name for rule in context.hard_rules])
+            enriched["advisor_run_id"] = advisor_run_id
+        else:
+            enriched.pop("advisor_run_id", None)
+        enriched["llm_direct_execution_allowed"] = False
+        enriched["advisor_hard_rules"] = [rule.name for rule in context.hard_rules]
         if raw_response is not None:
-            enriched.setdefault("advisor_raw_response", raw_response)
+            enriched["advisor_raw_response"] = raw_response
+        else:
+            enriched.pop("advisor_raw_response", None)
         return enriched
 
     @staticmethod

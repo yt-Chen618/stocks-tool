@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Collection, Iterator
 from datetime import date, datetime
 
 from stocks_tool.domain.enums import (
@@ -10,6 +11,7 @@ from stocks_tool.domain.enums import (
     ReconciliationStatus,
     SpreadStatus,
     StrategyProposalStatus,
+    StrategyRunStatus,
 )
 from stocks_tool.domain.models import (
     AccountSnapshot,
@@ -40,12 +42,21 @@ from stocks_tool.domain.models import (
     StrategyRun,
     StrategySignal,
     TradePlan,
+    UpdateWatchlistItemRequest,
+    UpdateWatchlistRequest,
     Watchlist,
 )
+from stocks_tool.domain.pagination import CursorPage
 
 
 class ConcurrentSpreadUpdateError(RuntimeError):
     pass
+
+
+class WatchlistItemConflictError(ValueError):
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+        super().__init__(f"Watchlist already contains symbol {symbol}.")
 
 
 class TradePlanRepository(ABC):
@@ -72,7 +83,32 @@ class WatchlistRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_watchlist(self, watchlist_id: str) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
     def add_item(self, watchlist_id: str, request: AddWatchlistItemRequest) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_watchlist(
+        self,
+        watchlist_id: str,
+        request: UpdateWatchlistRequest,
+    ) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_item(
+        self,
+        watchlist_id: str,
+        item_id: str,
+        request: UpdateWatchlistItemRequest,
+    ) -> Watchlist | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_item(self, watchlist_id: str, item_id: str) -> bool:
         raise NotImplementedError
 
 
@@ -86,10 +122,11 @@ class MarketEventRepository(ABC):
         self,
         *,
         symbol: str | None = None,
+        symbols: list[str] | None = None,
         event_type: MarketEventType | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
-        limit: int = 100,
+        limit: int | None = 100,
     ) -> list[MarketEvent]:
         raise NotImplementedError
 
@@ -179,7 +216,48 @@ class OrderRepository(ABC):
         self,
         external_account_id: str | None = None,
         status: OrderStatus | None = None,
+        *,
+        broker: BrokerName | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        statuses: Collection[OrderStatus] | None = None,
+        order_ids: Collection[str] | None = None,
+        order_intent_ids: Collection[str] | None = None,
     ) -> list[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> Iterator[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_orders_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Order]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def has_working_orders(
+        self,
+        external_account_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+        statuses: Collection[OrderStatus],
+    ) -> bool:
         raise NotImplementedError
 
     @abstractmethod
@@ -205,6 +283,17 @@ class ExecutionRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def list_executions_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Execution]:
+        raise NotImplementedError
+
+    @abstractmethod
     def upsert_execution(self, execution: Execution) -> Execution:
         raise NotImplementedError
 
@@ -224,6 +313,19 @@ class JournalRepository(ABC):
     ) -> list[JournalEntry]:
         raise NotImplementedError
 
+    @abstractmethod
+    def list_entries_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        order_id: str | None = None,
+        trade_plan_id: str | None = None,
+        entry_type: JournalEntryType | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[JournalEntry]:
+        raise NotImplementedError
+
 
 class BullPutSpreadRepository(ABC):
     @abstractmethod
@@ -239,6 +341,31 @@ class BullPutSpreadRepository(ABC):
         self,
         external_account_id: str | None = None,
         status: SpreadStatus | None = None,
+        *,
+        statuses: Collection[SpreadStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        underlying_symbol: str | None = None,
+    ) -> list[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_spreads_page(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[BullPutSpread]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_working_spreads(
+        self,
+        *,
+        external_account_id: str,
+        mode: ExecutionMode,
+        active_statuses: Collection[SpreadStatus],
     ) -> list[BullPutSpread]:
         raise NotImplementedError
 
@@ -423,8 +550,25 @@ class StrategyExperimentRepository(ABC):
         external_account_id: str | None = None,
         strategy_id: str | None = None,
         status: StrategyProposalStatus | None = None,
-        limit: int = 20,
+        statuses: Collection[StrategyProposalStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        proposal_ids: Collection[str] | None = None,
+        proposed_actions: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyProposal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_proposals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        status: StrategyProposalStatus | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> Iterator[StrategyProposal]:
         raise NotImplementedError
 
     @abstractmethod
@@ -437,8 +581,70 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        status: StrategyRunStatus | None = None,
+        statuses: Collection[StrategyRunStatus] | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        order_id: str | None = None,
+        proposal_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
+        run_types: Collection[str] | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_latest_run_for_proposal(
+        self,
+        *,
+        proposal_id: str,
+        strategy_id: str,
+        run_types: set[str],
+    ) -> StrategyRun | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_latest_runs_by_proposal(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_types: Collection[str],
+        proposal_ids: Collection[str] | None = None,
+    ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_runs_for_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        order_ids: Collection[str],
+    ) -> list[StrategyRun]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_covered_call_activity_aggregate(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ) -> dict[str, object]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_runs(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        order_id: str | None = None,
+        proposal_ids: Collection[str] | None = None,
+    ) -> Iterator[StrategyRun]:
         raise NotImplementedError
 
     @abstractmethod
@@ -451,7 +657,34 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+        limit: int | None = 20,
+    ) -> list[StrategySignal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def iter_signals(
+        self,
+        *,
+        external_account_id: str | None = None,
+        strategy_id: str | None = None,
+        mode: ExecutionMode | None = None,
+        run_id: str | None = None,
+        proposal_id: str | None = None,
+    ) -> Iterator[StrategySignal]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def list_signals_for_run_or_order_ids(
+        self,
+        *,
+        external_account_id: str,
+        strategy_id: str,
+        mode: ExecutionMode,
+        run_ids: Collection[str],
+        order_ids: Collection[str],
     ) -> list[StrategySignal]:
         raise NotImplementedError
 
@@ -465,7 +698,8 @@ class StrategyExperimentRepository(ABC):
         *,
         external_account_id: str | None = None,
         strategy_id: str | None = None,
-        limit: int = 20,
+        mode: ExecutionMode | None = None,
+        limit: int | None = 20,
     ) -> list[StrategyReview]:
         raise NotImplementedError
 
@@ -474,12 +708,18 @@ class StrategyExperimentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_advisor_run_response_payload(
+    def record_advisor_intake(
         self,
-        advisor_run_id: str,
         *,
+        external_account_id: str,
+        source: str,
+        mode: ExecutionMode,
+        advisor_run_id: str | None,
+        proposal_requests: list[CreateStrategyProposalRequest],
+        review_requests: list[CreateStrategyReviewRequest],
         response_payload: dict,
-    ) -> StrategyAdvisorRun:
+        recorded_at: datetime,
+    ) -> tuple[list[StrategyProposal], list[StrategyReview], StrategyAdvisorRun | None]:
         raise NotImplementedError
 
     @abstractmethod

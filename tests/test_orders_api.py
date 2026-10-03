@@ -21,6 +21,7 @@ from stocks_tool.domain.enums import (
     TimeInForce,
 )
 from stocks_tool.domain.models import Order
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.main import app
 
 
@@ -58,6 +59,55 @@ def with_order_service(service: Mock) -> TestClient:
 
 def clear_overrides() -> None:
     app.dependency_overrides.clear()
+
+
+def test_list_orders_paged_is_explicit_and_preserves_cursor_contract() -> None:
+    service = Mock()
+    service.list_orders_page.return_value = CursorPage(
+        items=[build_order()],
+        next_cursor="next-order-cursor",
+        has_more=True,
+        limit=1,
+    )
+    client = with_order_service(service)
+    try:
+        response = client.get(
+            "/orders/paged",
+            params={
+                "external_account_id": "LBPT10087357",
+                "mode": "paper",
+                "limit": 1,
+                "cursor": "previous-order-cursor",
+            },
+        )
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == "order-123"
+    assert response.json()["next_cursor"] == "next-order-cursor"
+    assert response.json()["has_more"] is True
+    service.list_orders_page.assert_called_once_with(
+        external_account_id="LBPT10087357",
+        status=None,
+        mode=ExecutionMode.PAPER,
+        symbol=None,
+        limit=1,
+        cursor="previous-order-cursor",
+    )
+
+
+def test_list_orders_paged_rejects_invalid_cursor() -> None:
+    service = Mock()
+    service.list_orders_page.side_effect = ValueError("Invalid pagination cursor.")
+    client = with_order_service(service)
+    try:
+        response = client.get("/orders/paged", params={"cursor": "not-a-cursor"})
+    finally:
+        clear_overrides()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid pagination cursor."
 
 
 def test_submit_order_returns_created_order() -> None:

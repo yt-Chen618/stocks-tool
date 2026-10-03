@@ -1,15 +1,17 @@
 # Runtime Operations
 
-Last updated: 2026-07-11
+Last updated: 2026-10-02
 
 ## Local Startup
 
 ```powershell
-docker compose up -d db
-.venv\Scripts\python.exe -m pip install -e .[dev]
-.venv\Scripts\alembic.exe upgrade head
+python scripts\setup_environment.py --start-postgres
+.venv\Scripts\python.exe -m alembic upgrade head
+.venv\Scripts\python.exe scripts\check_environment.py --strict --json-output artifacts\environment-preflight.json
 .venv\Scripts\uvicorn.exe --app-dir src stocks_tool.main:app --reload
 ```
+
+`setup_environment.py` is the clean-checkout entry point. It enforces the versions in `.python-version` and `.node-version`, installs the locked Python dependencies from `uv.lock`, installs the project-local Playwright dependency from `package-lock.json`, downloads Chromium into `.playwright-browsers`, and starts the PostgreSQL image pinned in `compose.yaml`. `check_environment.py --strict` is read-only: it reports tool versions, lock synchronization, browser availability, PostgreSQL reachability, and Alembic head/current without installing packages, starting containers, reading `.env`, or opening a broker connection. For an existing environment, use `uv sync --locked --extra dev` rather than refreshing the lock implicitly.
 
 Open:
 
@@ -18,6 +20,8 @@ Open:
 - Health: `http://127.0.0.1:8000/health`
 
 The canonical local paper account id is `LBPT10087357`.
+
+Dashboard mutation keys remain in session storage and are scoped to account and action. Known unknown outcomes also retain their intent identity across reloads. The loader clears those locks only after an exact ID/account/mode detail read confirms `persisted`, `rejected`, or `resolved_no_order`; missing rows, truncated lists and failed reads do not authorize clearing. A legacy unscoped key is migrated only when its stored account/signature proves ownership. Ambiguous legacy keys remain preserved and block a new key for that action until reviewed. A normal pending key alone is not a synthetic unknown intent.
 
 ## P0 Migration and Release Procedure
 
@@ -32,9 +36,13 @@ $env:ALLOW_LIVE_TRADING = "false"
 $env:BULL_PUT_STRATEGY__ENTRY_KILL_SWITCH_ACTIVE = "true"
 $env:RECONCILIATION_SCHEDULER_ENABLED = "false"
 .venv\Scripts\python.exe scripts\check_order_external_id_duplicates.py
-.venv\Scripts\alembic.exe upgrade head
+.venv\Scripts\python.exe -m alembic upgrade head
 .venv\Scripts\python.exe scripts\check_alembic_head_current.py
 ```
+
+Migration `20261002_0018` adds the bounded-history keyset indexes for orders, executions, and journals, Covered Call proposal/run decision-scope indexes, and the active Bull Put spread scope index. The next revision, `20261002_0019`, adds the Bull Put `(external_account_id, execution_mode, created_at, id)` history index. Both are additive and preserve all historical migrations and rows. Apply `alembic upgrade head` before using the query paths; head/current equality is schema evidence, not a substitute for regression gates.
+
+Validate upgrades in an isolated database first. Back up the local database before applying them, then compare business-table row counts and sorted complete-row digests. The October 2 campaign verified unchanged contents of all 24 business tables around `0019`; its dump and comparison remain local under the campaign artifact directory. For recovery, retain that backup and investigate in a separate restored database. Do not restore over the operator database or remove historical migrations as an automatic rollback.
 
 Then run mock/fault/concurrency verification and a read-only account consistency check. The aggregate command is:
 
@@ -93,6 +101,16 @@ Use `GET /strategies/controls?external_account_id=LBPT10087357` for the static p
 
 ## Lifecycle Data Hygiene
 
+Apply migration `20261002_0017` before running the corrected order-reconciliation code. It adds nullable history-coverage timestamps to `order_intents`; it does not delete or rewrite order history. Back up the database before upgrading. A rollback to older application code must keep these additive columns, because removing them also removes the new reconciliation evidence.
+
+Unknown-order reconciliation requests history from the earliest unresolved intent's creation time through the current check and reads known cancel/replace targets by their exact broker order ID. A manual `resolve-no-order` requires three consecutive complete zero-match checks over at least 60 seconds with persisted coverage of the intent. Historical counts without coverage evidence do not qualify: the first new complete check starts a fresh count. Failed/incomplete reads or contradictory broker identity evidence invalidate the previous zero-match chain.
+
+The [Longbridge history-orders API](https://open.longbridge.com/docs/trade/order/history_orders) returns at most 1,000 orders per query. The current Python SDK returns only an order list, without `has_more`; a response at that cap is therefore rejected as incomplete, and the intent remains unresolved. Do not bypass this guard by resolving from a truncated list.
+
+If an SDK operation times out after its worker has started, its outcome is not known. The adapter temporarily rejects further account/order SDK work until that worker finishes, while paper/live market-data circuits remain independent. Do not retry a timed-out mutation with a new idempotency key. Reconcile its original intent when the SDK becomes available again; an indefinitely blocked native call requires operator investigation and a controlled process restart, not automatic replacement threads or resubmission.
+
+Covered-call roll continuation requires the order IDs linked to the latest roll run for that proposal. If a successor sell already exists, supply that ID; omitting it does not authorize a second sell. Wrong proposal linkage or contract quantity is rejected before advancing the lifecycle.
+
 Bull put lifecycle summaries are normalized in `bull_put_spreads` after migration `20260615_0013` is applied:
 
 - `lifecycle_warning_code`
@@ -118,6 +136,24 @@ Use `GET /strategies/bull-put/spreads/{spread_id}/recover-close/eligibility?exte
 
 Use `scripts\run_regression.py bull-put-recovery-drill` for a read-only recovery drill report. The script inspects all listed spreads or a selected `--spread-id`, classifies the operator action, and never calls `POST /recover-close`.
 
+## Bounded History and Recovery Reads
+
+The dashboard uses the bounded history routes for account activity:
+
+- `GET /orders/paged` accepts `external_account_id`, optional `status`, `mode`, and `symbol`, plus `limit=1..100` (default `50`) and an opaque `cursor`.
+- `GET /executions/paged` accepts `external_account_id`, optional `order_id`, `limit`, and `cursor`.
+- `GET /journals/paged` accepts `external_account_id`, optional `order_id`, `trade_plan_id`, `entry_type`, `limit`, and `cursor`.
+
+Each returns `items`, `next_cursor`, `has_more`, and `limit`. The cursor is a keyset position over `(created_at, id)` and is bound to the complete filter scope. Reusing it with another account or filter is rejected. The legacy `/orders`, `/executions`, and `/journals` routes remain complete reads for explicit history and reconciliation; do not replace a complete-history decision with a page response.
+
+`GET /strategies/bull-put/active-spreads?external_account_id=LBPT10087357&mode=paper` pushes the active lifecycle-status predicate into PostgreSQL and accepts an optional `symbol`. It is a read-only strategy/dashboard view. `GET /strategies/bull-put/spreads` remains the complete historical route, and the active view must not be used for order capacity or lifecycle decisions.
+
+The Bull Put dashboard uses `/working-spreads` for current or manual-action records and loads `/spreads/paged` only when history is opened. History uses account/mode-bound cursors and 25-row UI pages. ID-detail reads retain old and just-completed results even when a record leaves the working set. Recovery eligibility is loaded only when that spread's recovery disclosure is opened; it is not preloaded for every historical row.
+
+`GET /ops/recovery-status?external_account_id=LBPT10087357&mode=paper&limit=100` composes local unresolved parent/child intent evidence with the SDK timeout-quarantine read model. It reports total versus displayed counts, `truncated`, coverage start/end, count and time evidence, reason codes, next actions, and whether recovery is blocked. The endpoint does not reconcile, resolve, submit, or initialize a Longbridge context. Treat `truncated=true` or unavailable quarantine state as incomplete operator evidence.
+
+Migration `20261002_0018` adds the query indexes supporting these paths: account/time/id keysets for orders, executions, and journals; decision-scope indexes for strategy proposals and runs; and the account/mode/status/symbol scope for active Bull Put spreads. The migration is additive and does not alter the legacy complete-read contract.
+
 ## Ledger Consistency and Local Repair
 
 Use `GET /ops/consistency?external_account_id=LBPT10087357&mode=paper` or `scripts\run_regression.py consistency-report` to inspect read-only consistency evidence. The report currently checks:
@@ -125,6 +161,8 @@ Use `GET /ops/consistency?external_account_id=LBPT10087357&mode=paper` or `scrip
 - zero-DTE manual-scan paper orders that are missing local `strategy_runs` or `strategy_signals`
 - covered-call executed/closed/rolled proposals without observable local order linkage
 - bull put close-order lifecycle warning drift versus linked order state
+
+The report's `total_*` fields and `coverage_complete` are the authority for overall posture. Legacy counts describe the displayed checks; `limit` never restricts the global judgement. A warning outside the visible window remains a warning. Metadata from old runs/signals is processed in bounded batches, including older valid links when a newer run has none.
 
 Consistency repair is explicit and local-only. `POST /ops/consistency/repairs/{repair_id}` currently supports guarded zero-DTE manual-scan ledger repair only. It requires `mode=paper`, `confirm_local_repair=true`, `actor`, and `note`; it creates missing local strategy run/signal records and never submits broker orders or deletes history. A report may expose `repair_available=true`, but operators should still inspect the related order id before applying a repair.
 
@@ -146,6 +184,14 @@ Use these read-only checks before leaving the local process running:
 .venv\Scripts\python.exe scripts\run_regression.py 60h-completion-audit
 .venv\Scripts\python.exe scripts\run_regression.py operator-platform-v8
 ```
+
+For the bounded-read scale check, run the isolated gate directly:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_regression.py history-query --json-output artifacts\history-query-regression.json
+```
+
+The gate requires PostgreSQL, applies migrations to a temporary database, seeds 10,000 and 100,000 rows per history table, and validates 50-row keyset pages for account isolation, tied timestamps, duplicate/omission-free cursors, bounded ORM materialization, and indexed `EXPLAIN` plans. It performs no broker call and removes the temporary database. A failed or interrupted run is incomplete evidence and must not be described as a passing large-history gate.
 
 Use `unattended-paper arm` to disable new bull put entries while leaving existing spread monitoring and lifecycle reconciliation active. Use `resume` only after intentionally restoring auto-entry posture.
 

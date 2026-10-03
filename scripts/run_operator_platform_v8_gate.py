@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
-import json
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-from regression_common import build_report, emit_report
+from regression_common import (
+    ObservedRun,
+    build_observed_child_report,
+    build_report,
+    default_child_timeout_seconds,
+    emit_report,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -37,27 +41,29 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
         for path in sorted((ROOT / "scripts").glob("*.py"))
         if path.name not in {"__init__.py"}
     ]
+    static_dir = ROOT / "src" / "stocks_tool" / "ui" / "static"
     dashboard_js_paths = [
-        "lifecycle-warning.js",
-        "api-client.js",
-        "formatters.js",
-        "i18n.js",
-        "state.js",
-        "app.js",
+        path.relative_to(static_dir).as_posix()
+        for path in sorted(static_dir.rglob("*.js"))
     ]
     dashboard_node_specs = [
         {
             "name": f"dashboard-node-check-{Path(filename).stem}",
             "command": ["node", "--check", str(ROOT / "src" / "stocks_tool" / "ui" / "static" / filename)],
+            "cacheable": True,
         }
         for filename in dashboard_js_paths
     ]
     return [
         {"name": "pytest", "command": [sys.executable, "-m", "pytest", "-q"]},
-        {"name": "py-compile-scripts", "command": [sys.executable, "-m", "py_compile", *py_compile_paths]},
+        {
+            "name": "py-compile-scripts",
+            "command": [sys.executable, "-m", "py_compile", *py_compile_paths],
+            "cacheable": True,
+        },
         *dashboard_node_specs,
-        {"name": "alembic-heads", "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "heads"]},
-        {"name": "alembic-current", "command": [str(ROOT / ".venv" / "Scripts" / "alembic.exe"), "current"]},
+        {"name": "alembic-heads", "command": [sys.executable, "-m", "alembic", "heads"]},
+        {"name": "alembic-current", "command": [sys.executable, "-m", "alembic", "current"]},
         {
             "name": "worktree-release-inventory",
             "command": [
@@ -127,38 +133,39 @@ def child_specs(args: argparse.Namespace, evidence_dir: Path) -> list[dict[str, 
                 str(evidence_dir / "consistency-report.json"),
             ],
         },
-        {"name": "git-diff-check", "command": ["git", "diff", "--check"]},
+        {"name": "git-diff-check", "command": ["git", "diff", "--check"], "cacheable": True},
     ]
 
 
-def run_child(spec: dict[str, Any]) -> dict[str, Any]:
+def run_child(spec: dict[str, Any], observed_run: ObservedRun) -> dict[str, Any]:
     started = time.monotonic()
-    completed = subprocess.run(
-        spec["command"],
-        cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+    child = observed_run.run_child(
+        {**spec, "cwd": str(ROOT)},
+        timeout_seconds=spec.get("timeout_seconds", default_child_timeout_seconds(spec["name"])),
     )
-    return {
-        "name": spec["name"],
-        "command": spec["command"],
-        "returncode": completed.returncode,
-        "duration_seconds": round(time.monotonic() - started, 3),
-        "status": "passed" if completed.returncode == 0 else "failed",
-        "stdout_tail": completed.stdout[-1200:],
-        "stderr_tail": completed.stderr[-1200:],
-    }
+    return build_observed_child_report(spec, child, started_monotonic=started)
 
 
 def main() -> None:
     args = parse_args()
     evidence_dir = Path(args.evidence_dir)
     evidence_dir.mkdir(parents=True, exist_ok=True)
-    children = [run_child(spec) for spec in child_specs(args, evidence_dir)]
-    failed = any(child["returncode"] != 0 for child in children)
+    observed_run = ObservedRun(evidence_dir, source_root=ROOT)
+    observed_run.start()
+    children: list[dict[str, Any]] = []
+    failed = False
+    try:
+        for spec in child_specs(args, evidence_dir):
+            child = run_child(spec, observed_run)
+            children.append(child)
+            if child["returncode"] != 0:
+                failed = True
+    except Exception as error:
+        failed = True
+        observed_run.finish("failed", next_action="inspect observability state and child logs", error=str(error))
+        raise
+    else:
+        observed_run.finish("failed" if failed else "passed")
     emit_report(
         build_report(
             script="run_operator_platform_v8_gate.py",
@@ -178,6 +185,7 @@ def main() -> None:
                 "confirmed_zero_dte_force_scan_included": False,
                 "deepseek_call_included": False,
                 "children": children,
+                "observability": observed_run.payload(),
             },
         ),
         json_output=args.json_output,

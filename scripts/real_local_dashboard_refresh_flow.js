@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const { launchBrowserPage, resolveBrowserExecutable } = require("./browser_test_helpers");
 
 async function main() {
   const [, , baseUrl, screenshotPath, playwrightCorePath, iterationsArg, settleTimeoutArg, pauseMsArg] = process.argv;
@@ -17,8 +18,14 @@ async function main() {
   }
 
   const { chromium } = require(playwrightCorePath);
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 2200 } });
+  const executablePath = resolveBrowserExecutable();
+  const { browser, page } = await launchBrowserPage(chromium, {
+    browserOptions: {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    },
+    pageOptions: { viewport: { width: 1600, height: 2200 } },
+  });
   const runs = [];
 
   try {
@@ -31,10 +38,12 @@ async function main() {
         await page.reload({ waitUntil: "load" });
       }
 
-      await page.waitForSelector("#account-select", { timeout: settleTimeoutMs });
-      await page.waitForSelector("#positions-body", { timeout: settleTimeoutMs });
+      await page.waitForSelector("#account-select", { state: "attached", timeout: settleTimeoutMs });
+      await page.waitForSelector("#positions-body", { state: "attached", timeout: settleTimeoutMs });
 
       const dashboardReadyMs = await waitForDashboardReady(page, startedAt, settleTimeoutMs);
+      const researchTableReadyMs = await waitForResearchTableReady(page, startedAt, settleTimeoutMs);
+      const chartReadyMs = await measureSelectedChartReady(page, settleTimeoutMs);
       const overlaysSettledMs = await waitForOverlaysSettled(page, startedAt, settleTimeoutMs);
       const snapshot = await captureSnapshot(page);
       const resources = await captureResourceTimings(page);
@@ -42,11 +51,14 @@ async function main() {
       runs.push({
         label,
         dashboard_ready_ms: dashboardReadyMs,
+        research_table_ready_ms: researchTableReadyMs,
+        selected_chart_ready_ms: chartReadyMs,
         overlays_settled_ms: overlaysSettledMs,
         account_id: snapshot.accountId,
         status_banner: snapshot.statusBanner,
-        quote_status: snapshot.quoteStatus,
-        quote_detail: snapshot.quoteDetail,
+        research_status: snapshot.researchStatus,
+        research_progress: snapshot.researchProgress,
+        research_rows: snapshot.researchRows,
         pre_open_status: snapshot.preOpenStatus,
         pre_open_detail: snapshot.preOpenDetail,
         positions_rows: snapshot.positionsRows,
@@ -77,6 +89,52 @@ async function main() {
   }
 }
 
+async function measureSelectedChartReady(page, timeoutMs) {
+  const startedAt = Date.now();
+  const preferredRow = page.locator("#research-table-body tr[data-research-select='QQQ.US']").first();
+  if ((await preferredRow.count()) > 0 && (await preferredRow.getAttribute("aria-selected")) !== "true") {
+    await preferredRow.click();
+  }
+  const chartTab = page.locator("[data-research-view='chart']");
+  if ((await chartTab.getAttribute("aria-selected")) !== "true") {
+    await chartTab.click();
+  }
+  await page.waitForFunction(
+    () => {
+      const container = document.getElementById("research-chart-container");
+      const summary = document.getElementById("research-chart-summary")?.textContent?.trim().toLowerCase() ?? "";
+      const unavailable = container?.querySelector("[data-chart-unavailable]:not([hidden])");
+      return (
+        container?.getAttribute("aria-busy") !== "true" &&
+        Boolean(container?.querySelector("canvas")) &&
+        Boolean(summary) &&
+        !summary.includes("loading") &&
+        !summary.includes("正在加载") &&
+        !unavailable
+      );
+    },
+    null,
+    { timeout: timeoutMs },
+  );
+  return Date.now() - startedAt;
+}
+
+async function waitForResearchTableReady(page, startedAt, timeoutMs) {
+  await page.waitForFunction(
+    () => {
+      const body = document.getElementById("research-table-body");
+      const progress = document.getElementById("research-progress")?.textContent?.trim().toLowerCase() ?? "";
+      const hasDataRow = Boolean(body?.querySelector("tr[data-research-select]"));
+      const hasTerminalEmpty = Boolean(body?.querySelector("td.research-empty-cell"));
+      const universePending = progress.includes("waiting") || progress.includes("universe") || progress.includes("等待");
+      return (hasDataRow || hasTerminalEmpty) && !universePending;
+    },
+    null,
+    { timeout: timeoutMs },
+  );
+  return Date.now() - startedAt;
+}
+
 async function waitForDashboardReady(page, startedAt, timeoutMs) {
   await page.waitForFunction(
     () => {
@@ -102,10 +160,7 @@ async function waitForDashboardReady(page, startedAt, timeoutMs) {
 async function waitForOverlaysSettled(page, startedAt, timeoutMs) {
   await page.waitForFunction(
     () => {
-      const quoteStatus =
-        document.querySelector("#quote-card .pill")?.textContent?.trim().toUpperCase() ?? "";
-      const quoteCard = document.getElementById("quote-card");
-      const quoteText = quoteCard?.innerText ?? "";
+      const researchProgress = document.getElementById("research-progress")?.textContent?.trim().toLowerCase() ?? "";
       const boardStatusTile = Array.from(document.querySelectorAll("#preopen-summary-strip .mini-metric-tile")).find(
         (tile) => {
           const text = tile.textContent ?? "";
@@ -115,14 +170,19 @@ async function waitForOverlaysSettled(page, startedAt, timeoutMs) {
       const preOpenStatus =
         boardStatusTile?.querySelector("strong")?.textContent?.trim().toUpperCase() ?? "";
       const preOpenText = document.getElementById("preopen-assessment-card")?.innerText ?? "";
-      const quoteSettled =
-        !quoteCard ||
-        (!!quoteStatus && quoteStatus !== "REFRESHING") ||
-        (!!quoteText && !quoteText.toUpperCase().includes("REFRESHING"));
+      const researchSettled =
+        researchProgress.includes("complete") ||
+        researchProgress.includes("stale") ||
+        researchProgress.includes("error") ||
+        researchProgress.includes("no research") ||
+        researchProgress.includes("完成") ||
+        researchProgress.includes("陈旧") ||
+        researchProgress.includes("失败") ||
+        researchProgress.includes("没有可用");
       const preOpenSettled =
         (!!preOpenStatus && preOpenStatus !== "REFRESHING") ||
         (!!preOpenText && !preOpenText.toUpperCase().includes("REFRESHING"));
-      return quoteSettled && preOpenSettled;
+      return researchSettled && preOpenSettled;
     },
     null,
     { timeout: timeoutMs },
@@ -138,8 +198,9 @@ async function captureSnapshot(page) {
     return {
       accountId: document.getElementById("account-select")?.value ?? "",
       statusBanner: document.getElementById("status-banner")?.textContent?.trim() ?? "",
-      quoteStatus: document.querySelector("#quote-card .pill")?.textContent?.trim() ?? "",
-      quoteDetail: document.querySelector("#quote-card .overlay-detail")?.textContent?.trim() ?? "",
+      researchStatus: document.getElementById("research-status")?.textContent?.trim() ?? "",
+      researchProgress: document.getElementById("research-progress")?.textContent?.trim() ?? "",
+      researchRows: document.querySelectorAll("#research-table-body tr[data-research-select]").length,
       preOpenStatus: boardStatusTile?.querySelector("strong")?.textContent?.trim() ?? "",
       preOpenDetail: boardStatusTile?.querySelector(".mini-metric-detail")?.textContent?.trim() ?? "",
       positionsRows: document.querySelectorAll("#positions-body tr").length,
@@ -155,13 +216,15 @@ async function captureResourceTimings(page) {
       "/broker-accounts",
       "/account-snapshots/latest",
       "/orders",
-      "/strategies/bull-put/spreads",
+      "/strategies/bull-put/working-spreads",
       "/strategies/bull-put/runtime",
       "/strategies/experiment",
       "/executions",
       "/journals",
       "/strategies/pre-open-runs",
-      "/brokers/longbridge/quote",
+      "/research/universe",
+      "/research/technicals",
+      "/research/symbols/",
       "/strategies/pre-open-risk",
     ];
     return performance

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import Mock
 
@@ -623,6 +623,183 @@ def test_reconciliation_leaves_zero_matches_unknown_and_never_submits() -> None:
     adapter.submit_order.assert_not_called()
 
 
+def test_reconciliation_history_covers_oldest_unresolved_intent_before_counting_zero_match() -> None:
+    ledger = Mock()
+    adapter = Mock()
+    order_service = service(ledger, adapter)
+    payload_hash = order_service._request_hash(request().model_dump(mode="json"))
+    created_at = datetime.now(timezone.utc) - timedelta(days=8)
+    unknown = intent(state=TradingIntentState.UNKNOWN, request_hash=payload_hash).model_copy(
+        update={"created_at": created_at}
+    )
+    ledger.list_intents.side_effect = (
+        lambda **kwargs: [unknown]
+        if kwargs["state"] == TradingIntentState.UNKNOWN
+        else []
+    )
+    adapter.list_today_orders.return_value = []
+    adapter.list_history_orders.return_value = []
+
+    result = order_service.reconcile_unresolved_intents("LBPT10087357")
+
+    assert result.unresolved_intents == 1
+    history_call = adapter.list_history_orders.call_args.kwargs
+    assert history_call["start_at"] == created_at
+    assert history_call["end_at"] >= created_at
+    attempt_kwargs = ledger.record_reconciliation_attempt.call_args.kwargs
+    assert attempt_kwargs["zero_match"] is True
+    assert attempt_kwargs["reconciliation_coverage_start_at"] == created_at
+    assert attempt_kwargs["reconciliation_coverage_end_at"] == history_call["end_at"]
+
+
+@pytest.mark.parametrize("operation", [TradingOperation.CANCEL, TradingOperation.REPLACE])
+def test_reconciliation_exactly_reads_old_target_for_today_cancel_or_replace_intent(
+    operation: TradingOperation,
+) -> None:
+    ledger = Mock()
+    adapter = Mock()
+    order_service = service(ledger, adapter)
+    created_at = datetime.now(timezone.utc)
+    old_submitted_at = created_at - timedelta(days=8)
+    payload_hash = order_service._request_hash(request().model_dump(mode="json"))
+    if operation == TradingOperation.CANCEL:
+        request_payload = {"external_order_id": "external-order-1"}
+        remote_updates = {
+            "status": OrderStatus.CANCELED,
+            "executed_quantity": 0,
+            "executed_price": None,
+            "submitted_at": old_submitted_at,
+            "updated_at": old_submitted_at,
+        }
+    else:
+        request_payload = {
+            "external_order_id": "external-order-1",
+            "quantity": 1,
+            "limit_price": "322.00",
+            "stop_price": None,
+        }
+        remote_updates = {
+            "status": OrderStatus.SUBMITTED,
+            "executed_quantity": 0,
+            "executed_price": None,
+            "limit_price": Decimal("322.00"),
+            "submitted_at": old_submitted_at,
+            "updated_at": old_submitted_at,
+            "remark": "st:0123456789abcdef operator note",
+        }
+    unknown = intent(state=TradingIntentState.UNKNOWN, request_hash=payload_hash).model_copy(
+        update={
+            "created_at": created_at,
+            "operation": operation,
+            "target_order_id": "order-1",
+            "request_payload": request_payload,
+        }
+    )
+    ledger.list_intents.side_effect = (
+        lambda **kwargs: [unknown]
+        if kwargs["state"] == TradingIntentState.UNKNOWN
+        else []
+    )
+    remote = snapshot().model_copy(update=remote_updates)
+    adapter.list_today_orders.return_value = []
+    adapter.list_history_orders.return_value = []
+    adapter.get_order.return_value = remote
+    order_service.orders.get_order.return_value = local_order()
+    ledger.persist_broker_result.side_effect = lambda **kwargs: kwargs["order"]
+
+    result = order_service.reconcile_unresolved_intents("LBPT10087357")
+
+    assert result.resolved_intents == 1
+    assert result.resolved_intent_ids == ["intent-1"]
+    adapter.get_order.assert_called_once_with("external-order-1", ExecutionMode.PAPER)
+    assert adapter.list_history_orders.call_args.kwargs["start_at"] == created_at
+    ledger.record_reconciliation_attempt.assert_not_called()
+
+
+def test_reconciliation_does_not_count_cancel_zero_match_when_exact_lookup_fails() -> None:
+    ledger = Mock()
+    adapter = Mock()
+    order_service = service(ledger, adapter)
+    created_at = datetime.now(timezone.utc)
+    payload_hash = order_service._request_hash(request().model_dump(mode="json"))
+    unknown = intent(state=TradingIntentState.UNKNOWN, request_hash=payload_hash).model_copy(
+        update={
+            "created_at": created_at,
+            "operation": TradingOperation.CANCEL,
+            "target_order_id": "order-1",
+            "request_payload": {"external_order_id": "external-order-1"},
+        }
+    )
+    ledger.list_intents.side_effect = (
+        lambda **kwargs: [unknown]
+        if kwargs["state"] == TradingIntentState.UNKNOWN
+        else []
+    )
+    adapter.get_order.side_effect = RuntimeError("order detail unavailable")
+    adapter.list_today_orders.return_value = []
+    adapter.list_history_orders.return_value = []
+
+    result = order_service.reconcile_unresolved_intents("LBPT10087357")
+
+    assert result.unresolved_intents == 1
+    attempt_kwargs = ledger.record_reconciliation_attempt.call_args.kwargs
+    assert attempt_kwargs["zero_match"] is False
+    assert "exact broker order lookup failed" in ledger.record_reconciliation_attempt.call_args.args[1]
+
+
+@pytest.mark.parametrize("operation", [TradingOperation.CANCEL, TradingOperation.REPLACE])
+def test_reconciliation_does_not_count_cancel_or_replace_when_target_detail_disagrees(
+    operation: TradingOperation,
+) -> None:
+    ledger = Mock()
+    adapter = Mock()
+    order_service = service(ledger, adapter)
+    created_at = datetime.now(timezone.utc)
+    payload_hash = order_service._request_hash(request().model_dump(mode="json"))
+    if operation == TradingOperation.CANCEL:
+        request_payload = {"external_order_id": "external-order-1"}
+        remote_updates = {
+            "status": OrderStatus.CANCELED,
+            "executed_quantity": 1,
+        }
+    else:
+        request_payload = {
+            "external_order_id": "external-order-1",
+            "quantity": 1,
+            "limit_price": "322.00",
+            "stop_price": None,
+        }
+        remote_updates = {
+            "status": OrderStatus.SUBMITTED,
+            "limit_price": Decimal("321.00"),
+            "remark": "st:0123456789abcdef operator note",
+        }
+    unknown = intent(state=TradingIntentState.UNKNOWN, request_hash=payload_hash).model_copy(
+        update={
+            "created_at": created_at,
+            "operation": operation,
+            "target_order_id": "order-1",
+            "request_payload": request_payload,
+        }
+    )
+    ledger.list_intents.side_effect = (
+        lambda **kwargs: [unknown]
+        if kwargs["state"] == TradingIntentState.UNKNOWN
+        else []
+    )
+    adapter.list_today_orders.return_value = []
+    adapter.list_history_orders.return_value = []
+    adapter.get_order.return_value = snapshot().model_copy(update=remote_updates)
+
+    result = order_service.reconcile_unresolved_intents("LBPT10087357")
+
+    assert result.resolved_intents == 0
+    assert result.unresolved_intents == 1
+    ledger.persist_broker_result.assert_not_called()
+    assert ledger.record_reconciliation_attempt.call_args.kwargs["zero_match"] is False
+    assert "detail exists" in ledger.record_reconciliation_attempt.call_args.args[1]
+
+
 def test_reconciliation_rejects_marker_match_with_wrong_order_fingerprint() -> None:
     ledger = Mock()
     adapter = Mock()
@@ -648,6 +825,45 @@ def test_reconciliation_rejects_marker_match_with_wrong_order_fingerprint() -> N
     assert result.resolved_intents == 0
     assert result.unresolved_intents == 1
     ledger.persist_broker_result.assert_not_called()
+    assert ledger.record_reconciliation_attempt.call_args.kwargs["zero_match"] is False
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("order_type", OrderType.MARKET),
+        ("time_in_force", TimeInForce.GTC),
+    ],
+)
+def test_reconciliation_rejects_same_marker_with_wrong_order_type_or_time_in_force(
+    field_name: str,
+    value,
+) -> None:
+    ledger = Mock()
+    adapter = Mock()
+    order_service = service(ledger, adapter)
+    payload_hash = order_service._request_hash(request().model_dump(mode="json"))
+    unknown = intent(state=TradingIntentState.UNKNOWN, request_hash=payload_hash)
+    ledger.list_intents.side_effect = (
+        lambda **kwargs: [unknown]
+        if kwargs["state"] == TradingIntentState.UNKNOWN
+        else []
+    )
+    mismatched = snapshot().model_copy(
+        update={
+            field_name: value,
+            "remark": "st:0123456789abcdef operator note",
+        }
+    )
+    adapter.list_today_orders.return_value = [mismatched]
+    adapter.list_history_orders.return_value = []
+
+    result = order_service.reconcile_unresolved_intents("LBPT10087357")
+
+    assert result.resolved_intents == 0
+    assert result.unresolved_intents == 1
+    ledger.persist_broker_result.assert_not_called()
+    assert ledger.record_reconciliation_attempt.call_args.kwargs["zero_match"] is False
 
 
 def test_marker_only_reconciliation_matches_full_order_fingerprint() -> None:
@@ -689,6 +905,13 @@ def test_cancel_reconciliation_requires_terminal_cancel_state() -> None:
     )
 
     assert order_service._snapshot_matches_intent(cancel_intent, still_working) is False
+    partial_cancel = still_working.model_copy(
+        update={
+            "status": OrderStatus.CANCELED,
+            "executed_quantity": 1,
+        }
+    )
+    assert order_service._snapshot_matches_intent(cancel_intent, partial_cancel) is False
 
 
 def test_replace_reconciliation_does_not_accept_unchanged_old_price_by_external_id() -> None:
@@ -742,6 +965,7 @@ def test_reconciliation_fails_closed_when_history_is_unavailable() -> None:
     assert result.resolved_intents == 0
     assert result.unresolved_intents == 1
     assert "complete broker order history" in result.warnings[0]
+    assert ledger.record_reconciliation_attempt.call_args.kwargs["zero_match"] is False
     ledger.persist_broker_result.assert_not_called()
 
 

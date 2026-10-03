@@ -14,6 +14,7 @@ from stocks_tool.application.services.covered_call.order_lifecycle import (
     validate_close_order,
     validate_open_sell_order,
     validate_roll_buyback_order,
+    validate_roll_sell_order,
 )
 from stocks_tool.domain.enums import AssetType, BrokerName, ExecutionMode, OrderSide, OrderStatus, OrderType, TimeInForce
 from stocks_tool.domain.models import CoveredCallCandidate, Order
@@ -111,6 +112,13 @@ def test_order_validation_rejects_mismatched_symbol_and_side() -> None:
             close_order=_order(side=OrderSide.SELL),
             proposal=_proposal(),
             candidate=_candidate(),
+        )
+
+    with pytest.raises(ValueError, match="quantity"):
+        validate_roll_sell_order(
+            sell_order=_order(symbol="UNH260717C430000.US", quantity=2),
+            proposal=_proposal(),
+            roll_to=_candidate(),
         )
 
 

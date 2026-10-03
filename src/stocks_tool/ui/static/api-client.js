@@ -81,9 +81,27 @@
     return controller.signal;
   }
 
+  function decodeCursorPage(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("Paged activity response did not match CursorPage contract.");
+    }
+    const { items, next_cursor: nextCursor, has_more: hasMore, limit } = payload;
+    if (!Array.isArray(items) || !("next_cursor" in payload) || typeof hasMore !== "boolean" || !Number.isInteger(limit) || limit < 1 || limit > 100 || items.length > limit) {
+      throw new Error("Paged activity response did not match CursorPage contract.");
+    }
+    if (nextCursor !== null && (typeof nextCursor !== "string" || !nextCursor.trim())) {
+      throw new Error("Paged activity response returned an invalid next_cursor.");
+    }
+    if (hasMore && !nextCursor) {
+      throw new Error("Paged activity response set has_more without next_cursor.");
+    }
+    return { items, cursor: nextCursor, hasMore, limit };
+  }
+
   window.StocksToolApiClient = {
     fetchJson,
     mergeAbortSignals,
+    decodeCursorPage,
   };
   window.fetchJson = fetchJson;
 })();

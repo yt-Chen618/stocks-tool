@@ -30,10 +30,12 @@ from stocks_tool.application.services.execution import ExecutionService
 from stocks_tool.application.services.journal import JournalService
 from stocks_tool.application.services.planner import PlannerService
 from stocks_tool.application.services.research import ResearchService
+from stocks_tool.application.services.research_workspace import ResearchWorkspaceService
 from stocks_tool.application.services.risk import RiskService
 from stocks_tool.application.services.orders import OrderService
 from stocks_tool.application.services.operator_consistency import OperatorConsistencyService
 from stocks_tool.application.services.operator_status import OperatorStatusService
+from stocks_tool.application.services.recovery_status import RecoveryStatusService
 from stocks_tool.application.services.strategy_advisor_intake import (
     StrategyAdvisorIntakeService,
 )
@@ -244,6 +246,28 @@ def get_longbridge_adapter() -> BrokerGateway:
     return LongbridgeBrokerAdapter(settings=settings)
 
 
+def get_research_workspace_service(
+    watchlists: WatchlistRepository = Depends(get_watchlist_repository),
+    account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
+    market_events: MarketEventRepository = Depends(get_market_event_repository),
+    bull_put_spreads: BullPutSpreadRepository = Depends(get_bull_put_spread_repository),
+    strategy_experiments: StrategyExperimentRepository = Depends(
+        get_strategy_experiment_repository
+    ),
+    adapter: BrokerMarketDataGateway = Depends(get_longbridge_adapter),
+    settings: Settings = Depends(get_settings),
+) -> ResearchWorkspaceService:
+    return ResearchWorkspaceService(
+        settings=settings,
+        watchlists=watchlists,
+        account_snapshots=account_snapshots,
+        market_events=market_events,
+        bull_put_spreads=bull_put_spreads,
+        strategy_experiments=strategy_experiments,
+        market_data=adapter,
+    )
+
+
 def get_longbridge_integration_service(
     broker_accounts: BrokerAccountRepository = Depends(get_broker_account_repository),
     account_snapshots: AccountSnapshotRepository = Depends(get_account_snapshot_repository),
@@ -419,4 +443,14 @@ def get_operator_status_service(
         scheduler_task_states=scheduler_task_states,
         audit_events=audit_events,
         broker_adapter=adapter,
+    )
+
+
+def get_recovery_status_service(
+    intent_ledger: TradingIntentLedger = Depends(get_trading_intent_ledger),
+    adapter: BrokerGateway = Depends(get_longbridge_adapter),
+) -> RecoveryStatusService:
+    return RecoveryStatusService(
+        intent_ledger=intent_ledger,
+        runtime_gateway=adapter,
     )

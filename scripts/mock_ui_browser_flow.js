@@ -1,5 +1,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  createRequestObserver,
+  expectText,
+  expectTextInsensitive,
+  isBrokerMutationPath,
+  launchBrowserPage,
+  resolveBrowserExecutable,
+  waitResponsiveSettled,
+} = require("./browser_test_helpers");
 
 async function main() {
   const [, , baseUrl, screenshotPath, playwrightCorePath, scenario = "normal"] = process.argv;
@@ -8,20 +17,26 @@ async function main() {
   }
 
   const { chromium } = require(playwrightCorePath);
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 2200 } });
-  page.on("dialog", (dialog) => dialog.accept());
-  const brokerMutationRequests = [];
-  page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (request.method() === "POST" && isBrokerMutationPath(url.pathname, url.search)) {
-      brokerMutationRequests.push({
-        path: `${url.pathname}${url.search}`,
-        headers: request.headers(),
-        postData: request.postData(),
-      });
-    }
+  const executablePath = resolveBrowserExecutable();
+  const { browser, page } = await launchBrowserPage(chromium, {
+    browserOptions: {
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    },
+    pageOptions: { viewport: { width: 1440, height: 1200 } },
   });
+  page.on("dialog", (dialog) => dialog.accept());
+  const requestObserver = createRequestObserver(page, {
+    readPredicate: (request, url) => request.method() === "GET" && (
+      url.pathname === "/strategies/bull-put/working-spreads" ||
+      url.pathname === "/strategies/bull-put/spreads/paged" ||
+      /^\/strategies\/bull-put\/spreads\/[^/]+$/.test(url.pathname) ||
+      /\/strategies\/bull-put\/spreads\/[^/]+\/recover-close\/eligibility$/.test(url.pathname)
+    ),
+    mutationPredicate: (pathname, search, request) => request.method() === "POST" && isBrokerMutationPath(pathname, search),
+  });
+  const brokerMutationRequests = requestObserver.mutationRequests;
+  const bullPutReadRequests = requestObserver.readRequests;
   let journalPanelText = "";
   let strategySkipText = "";
   let strategyReviewText = "";
@@ -34,8 +49,9 @@ async function main() {
 
   try {
     await page.goto(baseUrl, { waitUntil: "load" });
-    await page.waitForSelector("#account-select");
-    await page.waitForSelector("#spreads-body tr");
+    await page.waitForSelector("#account-select", { state: "attached" });
+    await page.waitForSelector("#spreads-body tr", { state: "attached" });
+    await page.waitForSelector("#research-table-body tr");
     await page.waitForFunction(
       () => {
         const text = document.getElementById("status-banner")?.textContent || "";
@@ -43,22 +59,133 @@ async function main() {
       },
       { timeout: 10000 },
     );
-    const initialViewMode = await page.evaluate(() => document.body.dataset.viewMode);
-    const initialVisibleSecondaryPanels = await page.locator("[data-view-priority='secondary']:visible").count();
-    if (initialViewMode !== "focus" || initialVisibleSecondaryPanels !== 0) {
-      throw new Error("Dashboard must start in focus mode with secondary information hidden.");
+    if ((await page.evaluate(() => document.body.dataset.workspace)) !== "research") {
+      throw new Error("Workbench must start in the Research workspace.");
     }
-    await page.locator("[data-view-mode-option='all']").click();
-    await page.waitForFunction(() => document.body.dataset.viewMode === "all");
-    if ((await page.locator("[data-view-priority='secondary']:visible").count()) === 0) {
-      throw new Error("All view must reveal secondary dashboard information.");
+    if (!(await page.locator("#research-section").isVisible())) {
+      throw new Error("Default Research workspace must be visible.");
     }
-    await expectText(page.locator("body"), "\u7b56\u7565\u4e2d\u5fc3");
-    await expectText(page.locator("body"), "\u6267\u884c\u5de5\u4f5c\u53f0");
-    await expectText(page.locator("body"), "\u5b9e\u65f6\u5b8f\u89c2\u677f");
+    if ((await page.locator("[data-workspace-panel]:visible").count()) !== 1) {
+      throw new Error("Exactly one workspace panel must be visible at a time.");
+    }
+    await expectText(page.locator("#research-table-body"), "MOCK.US");
+    await expectText(page.locator("#research-table-body"), "QQQ.US");
+    await page.waitForFunction(
+      () => document.getElementById("research-min-return20")?.disabled === false,
+    );
+
+    const researchTab = page.locator("[data-workspace-option='research']");
+    await researchTab.focus();
+    await researchTab.press("ArrowDown");
+    await page.waitForFunction(() => document.body.dataset.workspace === "strategy");
+    if (!(await page.locator("[data-workspace-option='strategy']").evaluate((node) => node === document.activeElement))) {
+      throw new Error("Sidebar ArrowDown must activate and focus the next workspace tab.");
+    }
+    await selectWorkspace(page, "research");
+    await page.click("#sidebar-toggle");
+    if ((await page.locator("#sidebar-toggle").getAttribute("aria-expanded")) !== "false") {
+      throw new Error("Sidebar toggle must expose its collapsed state through aria-expanded.");
+    }
+    await page.click("#sidebar-toggle");
+
     await page.locator("[data-lang-option='en']").click();
-    await expectText(page.locator("body"), "Strategy Center");
-    await expectText(page.locator("body"), "Real-time Macro Board");
+    await expectText(page.locator("#research-section"), "Research Desk");
+
+    await page.click("#manage-watchlist-button");
+    await page.waitForSelector("#watchlist-dialog[open]");
+    await page.fill("#watchlist-name", "core-us-regression");
+    await page.fill("#watchlist-description", "Updated by browser regression");
+    const watchlistPatch = page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("/watchlists/mock-watchlist-1"),
+    );
+    await page.click("#watchlist-save");
+    await watchlistPatch;
+    await expectText(page.locator("#research-watchlist-select"), "core-us-regression");
+    const notesInput = page.locator('[data-watchlist-item-notes="mock-watchlist-item-1"]');
+    await notesInput.fill("updated regression note");
+    const notesPatch = page.waitForResponse(
+      (response) => response.request().method() === "PATCH" && response.url().includes("mock-watchlist-item-1"),
+    );
+    await page.click('[data-watchlist-action="save-notes"][data-item-id="mock-watchlist-item-1"]');
+    await notesPatch;
+    await page.fill("#watchlist-symbol", "aapl.us");
+    await page.fill("#watchlist-notes", "temporary browser item");
+    const addItemResponse = page.waitForResponse(
+      (response) => response.request().method() === "POST" && response.url().endsWith("/watchlists/mock-watchlist-1/items"),
+    );
+    await page.click("#watchlist-add-item");
+    await addItemResponse;
+    const addedWatchlistRow = page.locator("#watchlist-items-body tr", { hasText: "AAPL.US" });
+    await addedWatchlistRow.waitFor();
+    const removeItemResponse = page.waitForResponse(
+      (response) => response.request().method() === "DELETE" && response.url().includes("/watchlists/mock-watchlist-1/items/"),
+    );
+    await addedWatchlistRow.locator('[data-watchlist-action="remove-item"]').click();
+    await removeItemResponse;
+    await page.waitForFunction(
+      () => !document.getElementById("watchlist-items-body")?.textContent?.includes("AAPL.US"),
+    );
+    await page.click("#close-watchlist-dialog");
+    await page.waitForSelector("#watchlist-dialog", { state: "hidden" });
+
+    await page.locator("[data-research-columns='momentum']").click();
+    await page.locator("[data-research-sort='return_20d_pct']").click();
+    const selectedResearchRow = page.locator("#research-table-body tr[data-research-select='MOCK.US']");
+    await selectedResearchRow.focus();
+    await selectedResearchRow.press("Enter");
+    if ((await selectedResearchRow.getAttribute("aria-selected")) !== "true") {
+      throw new Error("Research rows must support keyboard selection.");
+    }
+    await page.locator("[data-research-view='chart']").click();
+    await page.waitForSelector("#research-chart-view:not([hidden])");
+    if (!(await page.locator("#research-table-view").isHidden())) {
+      throw new Error("Chart view must hide the research table view.");
+    }
+    await page.locator("[data-chart-range='3m']").click();
+    await expectText(page.locator("#research-chart-summary"), "66 daily bars");
+    await page.locator("[data-chart-range='6m']").click();
+    await expectText(page.locator("#research-chart-summary"), "132 daily bars");
+    await page.fill("#research-search", "QQQ.US");
+    await page.waitForFunction(
+      () => window.StocksToolResearch?.getState?.().selectedSymbol === "QQQ.US",
+    );
+    const filteredTableSelection = page.locator(
+      "#research-table-body tr[data-research-select='QQQ.US'][aria-selected='true']",
+    );
+    const filteredRailSelection = page.locator(
+      "#research-symbol-list [data-research-select='QQQ.US'][aria-selected='true']",
+    );
+    if ((await filteredTableSelection.count()) !== 1 || (await filteredRailSelection.count()) !== 1) {
+      throw new Error("Filtering out the selected symbol must synchronize table and symbol-rail selection.");
+    }
+    await expectText(page.locator("#research-chart-summary"), "QQQ.US");
+    await expectText(page.locator("#research-chart-summary"), "132 daily bars");
+    await page.locator("[data-research-view='table']").click();
+    if (!(await filteredTableSelection.isVisible())) {
+      throw new Error("The filtered replacement selection must remain visible in Screener view.");
+    }
+    await page.locator("[data-research-view='chart']").click();
+    if (!(await filteredRailSelection.isVisible())) {
+      throw new Error("The filtered replacement selection must remain visible in Chart view.");
+    }
+    await page.click("details.research-filters > summary");
+    await page.click("#research-reset-filters");
+    await page.waitForFunction(
+      () => document.getElementById("research-search")?.value === "" &&
+        document.querySelectorAll("#research-table-body tr[data-research-select]").length === 2,
+    );
+    await page.locator("#research-symbol-list [data-research-select='MOCK.US']").click();
+    await expectText(page.locator("#research-chart-summary"), "MOCK.US");
+    const ticketBeforeResearch = await readTicketDefaults(page);
+    await page.click("#research-prepare-order");
+    await page.waitForSelector("#execution-drawer[open]");
+    if ((await page.locator("#order-symbol").inputValue()) !== "MOCK.US") {
+      throw new Error("Research order preparation must transfer the selected symbol.");
+    }
+    await assertTicketDefaultsUnchanged(page, ticketBeforeResearch);
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
+
     if (scenario !== "normal") {
       const posture = await runPostureScenarioAssertions(page, scenario);
       fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
@@ -66,10 +193,7 @@ async function main() {
       process.stdout.write(JSON.stringify({ rendered: true, scenario, screenshot: screenshotPath, ...posture }, null, 2));
       return;
     }
-    await expectText(page.locator("body"), "Risk Proxies");
-    await expectText(page.locator("body"), "QQQ / SPY Put Check");
-    await expectText(page.locator("body"), "Stored Opening Follow-through");
-    await expectText(page.locator("body"), "Bull Put Strategy");
+    await selectWorkspace(page, "operations");
     await expectText(page.locator("#reconciliation-strip"), "Broker Profile");
     await expectText(page.locator("#reconciliation-strip"), "CONFIG_DECLARED");
     await expectText(page.locator("#reconciliation-strip"), "Scheduler Posture");
@@ -79,23 +203,86 @@ async function main() {
     await expectText(page.locator("#reconciliation-strip"), "Advisor Last Run");
     await expectText(page.locator("#reconciliation-strip"), "1 Warning");
     operatorPostureText = await page.locator("#reconciliation-strip").innerText();
-    await expectText(page.locator("body"), "Lottery Strategy");
-    await expectText(page.locator("body"), "Bull Put Monitor");
-    await expectText(page.locator("body"), "Execution Desk");
+
+    await selectWorkspace(page, "strategy");
+    await selectStrategyTab(page, "bull-put");
+    await expectText(page.locator("#strategy-section"), "Bull Put Strategy");
+    await expectText(page.locator("#strategy-section"), "Bull Put Monitor");
+    const initialEligibilityReads = bullPutReadRequests.filter((request) => request.pathname.endsWith("/recover-close/eligibility")).length;
+    if (initialEligibilityReads !== 0) {
+      throw new Error(`Initial Bull Put load must not issue recovery eligibility N+1 requests: ${initialEligibilityReads}`);
+    }
+    const workingRead = bullPutReadRequests.find((request) => request.pathname === "/strategies/bull-put/working-spreads");
+    if (!workingRead || !workingRead.search.includes("external_account_id=LBPT10087357") || !workingRead.search.includes("mode=paper")) {
+      throw new Error("Bull Put working-spreads read must be scoped to the selected paper account.");
+    }
+    const historyPageResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/paged"));
+    await page.click("#bull-put-history-panel > summary");
+    await historyPageResponse;
+    await expectText(page.locator("#bull-put-history-body"), "QQQ.US");
+    const historyRows = page.locator("#bull-put-history-body tr[data-history-spread-id]");
+    if (await historyRows.count() !== 25) throw new Error("Bull Put history must initially load 25 records.");
+    const moreHistoryResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/paged") && new URL(response.url()).searchParams.has("cursor"));
+    await page.click("#bull-put-history-load-more");
+    await moreHistoryResponse;
+    await page.waitForFunction(() => document.querySelectorAll("#bull-put-history-body tr[data-history-spread-id]").length === 27);
+    const historyIds = await historyRows.evaluateAll((rows) => rows.map((row) => row.dataset.historySpreadId));
+    if (new Set(historyIds).size !== 27) throw new Error("Bull Put history pagination duplicated or omitted records.");
+    if (!(await page.locator("#bull-put-history-load-more").isHidden())) throw new Error("Exhausted history must hide Load More.");
+    const historyDetailResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/strategies/bull-put/spreads/mock-spread-closed-0001"));
+    await page.locator("#bull-put-history-body tr[data-history-spread-id='mock-spread-closed-0001'] button[data-history-action='detail']").click();
+    await historyDetailResponse;
+    await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "Closed");
+    await expectText(page.locator("[data-history-detail-row='mock-spread-closed-0001']"), "QQQ260619P467000.US");
+    const bullPutScreenshots = {};
+    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+    for (const width of [1440, 760]) {
+      await page.setViewportSize({ width, height: 1200 });
+      await waitResponsiveSettled(page, width);
+      await page.evaluate(() => {
+        document.documentElement.style.scrollBehavior = "auto";
+        window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      });
+      await page.waitForFunction(() => window.scrollY === 0);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      const capturePath = screenshotPath.replace(/\.png$/, `-bull-put-${width}.png`);
+      await page.screenshot({ path: capturePath, fullPage: true });
+      bullPutScreenshots[width] = capturePath;
+    }
+    await page.setViewportSize({ width: 1440, height: 1200 });
+    await waitResponsiveSettled(page, 1440);
+    const currentRecoveryDetails = page.locator("#spreads-body details[data-recovery-details]").first();
+    const recoveryEligibilityResponse = page.waitForResponse((response) => response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"));
+    await currentRecoveryDetails.locator("summary").click();
+    await recoveryEligibilityResponse;
+    if (bullPutReadRequests.filter((request) => request.pathname.endsWith("/recover-close/eligibility")).length !== 1) {
+      throw new Error("Recovery eligibility must load only after the corresponding current spread is expanded.");
+    }
     await expectText(page.locator("#strategy-runtime-strip"), "Entry Status");
+    await selectStrategyTab(page, "zero-dte");
+    await expectText(page.locator("#strategy-section"), "Lottery Strategy");
     await expectText(page.locator("#zero-dte-lottery-strip"), "Preview Only");
+    await selectStrategyTab(page, "experiments");
     await expectText(page.locator("#strategy-experiment-strip"), "Active Proposals");
+    await selectStrategyTab(page, "covered-call");
     await expectText(page.locator("#covered-call-activity-card"), "MSFT covered call lifecycle");
     await page.locator("#covered-call-activity-card [data-covered-call-action='reconcile-lifecycle']").click();
     await page.waitForFunction(
       () => document.getElementById("status-banner")?.textContent?.includes("Covered-call lifecycle refreshed read-only"),
     );
+    await selectWorkspace(page, "macro");
+    await expectText(page.locator("#macro-section"), "Risk Proxies");
+    await expectText(page.locator("#macro-section"), "QQQ / SPY Put Check");
+    await expectText(page.locator("#macro-section"), "Stored Opening Follow-through");
     await expectText(page.locator("#market-events-card"), "UNH earnings window");
+    await selectWorkspace(page, "strategy");
+    await selectStrategyTab(page, "bull-put");
     await expectText(page.locator("#spread-summary-strip"), "Active Spreads");
     await expectText(page.locator("#spread-summary-strip"), "Close order canceled / manual action needed");
     await expectText(page.locator("#spreads-body"), "MANUAL ACTION NEEDED");
     await expectText(page.locator("#spreads-body"), "Review close workflow before leaving unattended.");
     lifecycleWarningText = await page.locator("#spreads-body").innerText();
+    await selectStrategyTab(page, "zero-dte");
     await page.click("#preview-zero-dte-lottery");
     await page.waitForFunction(
       () => document.getElementById("zero-dte-lottery-result-card")?.innerText?.includes("Eligible Lottery Candidate"),
@@ -108,6 +295,7 @@ async function main() {
       throw new Error("Zero-DTE auto order control must stay disabled.");
     }
     lotteryScanText = "Preview only; no execution control rendered.";
+    await selectWorkspace(page, "macro");
     await page.getByRole("button", { name: "Load Live Macro" }).click();
     await expectText(page.locator("#preopen-summary-strip"), "Board Status");
     await expectText(page.locator("#preopen-assessment-card"), "QQQ cleaner than SPY");
@@ -121,6 +309,8 @@ async function main() {
     preOpenAssessmentText = await page.locator("#preopen-assessment-card").innerText();
     preOpenRunText = await page.locator("#preopen-run-review").innerText();
 
+    await selectWorkspace(page, "strategy");
+    await selectStrategyTab(page, "bull-put");
     await clickRowButton(page, "#spreads-body tr", "QQQ.US", "Monitor");
     await confirmTradeDialog(page, "Confirm Bull Put monitor", "QQQ.US");
     await page.waitForFunction(
@@ -177,10 +367,32 @@ async function main() {
     );
     strategyReviewText = await page.locator("#strategy-review-card").innerText();
 
+    await selectWorkspace(page, "portfolio");
+    await expectText(page.locator("#portfolio-section"), "Holdings Overview");
+    await page.click("#open-execution-drawer");
+    await page.waitForSelector("#execution-drawer[open]");
+    if (!(await page.locator("#execution-drawer").evaluate((node) => node.contains(document.activeElement)))) {
+      throw new Error("Opening the execution drawer must move focus inside the modal.");
+    }
+    const ticketTab = page.locator("button[data-execution-tab='ticket']");
+    await ticketTab.focus();
+    await ticketTab.press("ArrowRight");
+    if (!(await page.locator("button[data-execution-tab='orders']").evaluate((node) => node === document.activeElement))) {
+      throw new Error("Execution tab ArrowRight must activate and focus the next tab.");
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
+    if (!(await page.locator("#open-execution-drawer").evaluate((node) => node === document.activeElement))) {
+      throw new Error("Closing the execution drawer with Escape must restore trigger focus.");
+    }
+
+    await openExecutionDrawer(page, "orders");
     await clickFilledOrderManage(page);
+    await selectExecutionTab(page, "detail");
     await expectText(page.locator("#selected-order-execution"), "Filled Qty");
     await expectText(page.locator("#selected-order-execution"), "388.65");
 
+    await selectExecutionTab(page, "journal");
     await page.fill("#journal-title", "Browser regression review");
     await page.fill("#journal-tags", "browser, spread");
     await page.fill(
@@ -194,6 +406,7 @@ async function main() {
     await expectText(page.locator("#selected-order-journal"), "Browser regression review");
     journalPanelText = await page.locator("#selected-order-journal").innerText();
 
+    await selectExecutionTab(page, "ticket");
     await page.fill("#order-symbol", "MOCK.US");
     await page.fill("#order-quantity", "1");
     await page.selectOption("#order-type", "limit");
@@ -232,6 +445,7 @@ async function main() {
       throw new Error(`Terminal order success must clear its idempotency key: ${pendingIdempotencyKeys.join(", ")}`);
     }
 
+    await selectExecutionTab(page, "detail");
     await page.waitForSelector("#replace-order-form:not(.hidden)");
     await page.fill("#replace-quantity", "2");
     await page.fill("#replace-limit-price", "321");
@@ -256,8 +470,29 @@ async function main() {
       throw new Error("Zero-DTE preview-only UI must never request the scan endpoint.");
     }
 
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
     await page.setViewportSize({ width: 760, height: 1000 });
     await page.waitForFunction(() => document.getElementById("submit-order")?.disabled === true);
+    await openExecutionDrawer(page, "ticket");
+    if ((await page.locator("#execution-drawer").getAttribute("data-mobile-readonly")) !== "true") {
+      throw new Error("760px execution drawer must expose its read-only posture.");
+    }
+    for (const formId of ["order-ticket-form", "replace-order-form", "journal-entry-form"]) {
+      const form = page.locator(`#${formId}`);
+      const posture = await form.evaluate((node) => ({
+        inert: node.inert === true && node.hasAttribute("inert"),
+        ariaDisabled: node.getAttribute("aria-disabled"),
+        focusBlocked: (() => {
+          const control = node.querySelector("input, select, textarea, button");
+          control?.focus();
+          return !node.contains(document.activeElement);
+        })(),
+      }));
+      if (!posture.inert || posture.ariaDisabled !== "true" || !posture.focusBlocked) {
+        throw new Error(`Mobile execution form #${formId} must be inert, aria-disabled, and unfocusable.`);
+      }
+    }
     const enabledMobileMutations = await page.locator("[data-broker-mutation='true']:not(:disabled)").count();
     if (enabledMobileMutations !== 0) {
       throw new Error(`Mobile viewport left ${enabledMobileMutations} broker mutation control(s) enabled.`);
@@ -265,21 +500,37 @@ async function main() {
     if (!(await page.locator("#desktop-trading-notice").isVisible())) {
       throw new Error("Mobile viewport must show the desktop-required trading notice.");
     }
-    await page.setViewportSize({ width: 1600, height: 2200 });
+    await selectExecutionTab(page, "detail");
+    await expectText(page.locator("#selected-order-card"), "MOCK.US");
+    if (!(await page.locator("#replace-order-form").evaluate((node) => node.inert === true))) {
+      throw new Error("Mobile Order Detail must keep the replacement form inert.");
+    }
+    await selectExecutionTab(page, "journal");
+    if (!(await page.locator("#journal-entry-form").evaluate((node) => node.inert === true))) {
+      throw new Error("Mobile Journal view must keep the journal form inert.");
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
+    await page.setViewportSize({ width: 1440, height: 1200 });
     await page.waitForFunction(() => document.getElementById("submit-order")?.disabled === false);
-    await page.locator("[data-view-mode-option='focus']").click();
-    await page.waitForFunction(() => document.body.dataset.viewMode === "focus");
+    await selectWorkspace(page, "research");
+    await page.locator("[data-research-view='table']").click();
+    await page.waitForFunction(
+      () => !document.getElementById("research-table-view")?.hidden && document.getElementById("research-chart-view")?.hidden,
+    );
+    if (!(await page.locator("#research-chart-view").isHidden())) {
+      throw new Error("Screener view must hide the research chart view.");
+    }
 
-    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-    await page.screenshot({ path: screenshotPath, fullPage: true });
+    const screenshots = await captureResponsiveScreenshots(page, screenshotPath);
 
     const summary = await page.evaluate(() => {
       const spreadRow = document.querySelector("#spreads-body tr");
       return {
-        selectedOrderText: document.getElementById("selected-order-card")?.innerText ?? "",
+        selectedOrderText: document.getElementById("selected-order-card")?.textContent ?? "",
         statusBanner: document.getElementById("status-banner")?.textContent ?? "",
-        spreadTable: spreadRow?.innerText ?? "",
-        journalText: document.getElementById("selected-order-journal")?.innerText ?? "",
+        spreadTable: spreadRow?.textContent ?? "",
+        journalText: document.getElementById("selected-order-journal")?.textContent ?? "",
       };
     });
 
@@ -295,6 +546,9 @@ async function main() {
             summary: preOpenRunText,
           },
           spread: {
+            historyRecords: historyIds.length,
+            historyUniqueRecords: new Set(historyIds).size,
+            historyScreenshots: bullPutScreenshots,
             monitorTriggered:
               summary.statusBanner.includes("canceled") || summary.spreadTable.toLowerCase().includes("closed"),
             tableRow: summary.spreadTable,
@@ -332,12 +586,23 @@ async function main() {
           mobile: {
             brokerActionsDisabled: true,
             desktopNoticeRendered: true,
+            drawerReadonly: true,
+            executionFormsInert: true,
+          },
+          research: {
+            filteredSelectionSynchronized: true,
+            resetRestoredRows: true,
+          },
+          responsive: {
+            sidebar1024Width: 64,
+            bottomNavigation760SpansViewport: true,
           },
           journal: {
             rendered: journalPanelText.includes("Browser regression review"),
             latestPanel: journalPanelText,
           },
-          screenshot: screenshotPath,
+          screenshot: screenshots["1440"],
+          screenshots,
         },
         null,
         2,
@@ -348,25 +613,159 @@ async function main() {
   }
 }
 
-async function expectText(locator, text, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  let content = "";
-  while (Date.now() < deadline) {
-    try {
-      content = await locator.innerText();
-      if (content.includes(text)) {
-        return;
-      }
-    } catch {
-      // ignore and retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+async function selectWorkspace(page, workspace) {
+  await page.locator(`[data-workspace-option='${workspace}']`).click();
+  await page.waitForFunction(
+    (value) => document.body.dataset.workspace === value,
+    workspace,
+  );
+  const panel = page.locator(`[data-workspace-panel='${workspace}']`);
+  if (!(await panel.isVisible())) {
+    throw new Error(`Workspace '${workspace}' did not reveal its panel.`);
   }
-  throw new Error(`Expected text '${text}' to appear in locator content. Current content: ${content}`);
+  if ((await page.locator("[data-workspace-panel]:visible").count()) !== 1) {
+    throw new Error(`Workspace '${workspace}' did not keep the workspace panels mutually exclusive.`);
+  }
+}
+
+async function selectStrategyTab(page, tab) {
+  await page.locator(`button[data-strategy-tab='${tab}']`).click();
+  if ((await page.locator(`button[data-strategy-tab='${tab}']`).getAttribute("aria-selected")) !== "true") {
+    throw new Error(`Strategy tab '${tab}' did not become selected.`);
+  }
+}
+
+async function openExecutionDrawer(page, tab = "ticket") {
+  if (!(await page.locator("#execution-drawer").evaluate((node) => node.open))) {
+    await page.click("#open-execution-drawer");
+    await page.waitForSelector("#execution-drawer[open]");
+  }
+  await selectExecutionTab(page, tab);
+  if ((await page.locator("#open-execution-drawer").getAttribute("aria-expanded")) !== "true") {
+    throw new Error("Execution drawer trigger must expose aria-expanded=true while open.");
+  }
+}
+
+async function selectExecutionTab(page, tab) {
+  await page.locator(`button[data-execution-tab='${tab}']`).click();
+  await page.waitForFunction(
+    (value) => document.getElementById("execution-drawer")?.dataset.executionTab === value,
+    tab,
+  );
+  if ((await page.locator(`button[data-execution-tab='${tab}']`).getAttribute("aria-selected")) !== "true") {
+    throw new Error(`Execution tab '${tab}' did not become selected.`);
+  }
+}
+
+async function readTicketDefaults(page) {
+  return {
+    side: await page.locator("#order-side").inputValue(),
+    quantity: await page.locator("#order-quantity").inputValue(),
+    type: await page.locator("#order-type").inputValue(),
+    limitPrice: await page.locator("#order-limit-price").inputValue(),
+    stopPrice: await page.locator("#order-stop-price").inputValue(),
+  };
+}
+
+async function assertTicketDefaultsUnchanged(page, before) {
+  const after = await readTicketDefaults(page);
+  if (JSON.stringify(after) !== JSON.stringify(before)) {
+    throw new Error(`Research order preparation changed fields beyond symbol: ${JSON.stringify({ before, after })}`);
+  }
+}
+
+async function captureResponsiveScreenshots(page, screenshotPath) {
+  fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
+  const extension = path.extname(screenshotPath) || ".png";
+  const base = screenshotPath.slice(0, screenshotPath.length - extension.length);
+  const targets = [
+    { label: "1440", width: 1440, height: 1200, output: screenshotPath },
+    { label: "1024", width: 1024, height: 1000, output: `${base}-1024${extension}` },
+    { label: "760", width: 760, height: 1000, output: `${base}-760${extension}` },
+  ];
+  const outputs = {};
+  await page.evaluate(() => {
+    document.documentElement.style.scrollBehavior = "auto";
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  });
+  await page.waitForFunction(() => window.scrollY === 0);
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  for (const target of targets) {
+    await page.setViewportSize({ width: target.width, height: target.height });
+    await page.evaluate(() => {
+      document.documentElement.style.scrollBehavior = "auto";
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    });
+    await page.waitForFunction(() => window.scrollY === 0);
+    await assertResponsiveShell(page, target.label);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.screenshot({ path: target.output, fullPage: true });
+    outputs[target.label] = target.output;
+  }
+  return outputs;
+}
+
+async function assertResponsiveShell(page, label) {
+  if (label === "1024") {
+    await page.waitForFunction(
+      () => Math.abs((document.getElementById("workspace-sidebar")?.getBoundingClientRect().width || 0) - 64) <= 1,
+    );
+    await page.waitForFunction(
+      () => Math.abs(parseFloat(getComputedStyle(document.getElementById("workspace-sidebar")).width) - 64) < 0.01,
+    );
+    const sidebar = await page.locator("#workspace-sidebar").evaluate((node) => ({
+      computedWidth: getComputedStyle(node).width,
+      renderedWidth: node.getBoundingClientRect().width,
+    }));
+    if (sidebar.computedWidth !== "64px" || Math.abs(sidebar.renderedWidth - 64) > 1) {
+      throw new Error(`1024px layout must render a 64px sidebar: ${JSON.stringify(sidebar)}`);
+    }
+  }
+  if (label === "760") {
+    await page.waitForFunction(() => window.scrollY === 0);
+    await page.waitForFunction(() => {
+      const sidebar = document.getElementById("workspace-sidebar")?.getBoundingClientRect();
+      const nav = document.getElementById("workspace-nav")?.getBoundingClientRect();
+      return sidebar && nav &&
+        Math.abs(sidebar.left) <= 1 && Math.abs(sidebar.right - window.innerWidth) <= 1 &&
+        Math.abs(nav.left) <= 1 && Math.abs(nav.right - window.innerWidth) <= 1;
+    });
+    const geometry = await page.evaluate(() => {
+      const viewportWidth = window.innerWidth;
+      const rectFor = (selector) => {
+        const rect = document.querySelector(selector)?.getBoundingClientRect();
+        return rect ? { left: rect.left, right: rect.right, width: rect.width } : null;
+      };
+      return {
+        viewportWidth,
+        sidebar: rectFor("#workspace-sidebar"),
+        nav: rectFor("#workspace-nav"),
+      };
+    });
+    for (const [name, rect] of [["sidebar", geometry.sidebar], ["navigation", geometry.nav]]) {
+      if (
+        !rect ||
+        Math.abs(rect.left) > 1 ||
+        Math.abs(rect.right - geometry.viewportWidth) > 1 ||
+        Math.abs(rect.width - geometry.viewportWidth) > 1
+      ) {
+        throw new Error(`760px bottom ${name} must span the viewport: ${JSON.stringify(geometry)}`);
+      }
+    }
+    const warningGeometry = await page.evaluate(() => {
+      const header = document.querySelector(".workspace-topbar")?.getBoundingClientRect();
+      const warning = document.getElementById("desktop-trading-notice")?.getBoundingClientRect();
+      return { headerBottom: header?.bottom ?? null, warningTop: warning?.top ?? null, warningVisible: Boolean(warning && warning.height > 0) };
+    });
+    if (warningGeometry.warningVisible && warningGeometry.warningTop + 1 < warningGeometry.headerBottom) {
+      throw new Error(`760px trading warning must clear the actual topbar: ${JSON.stringify(warningGeometry)}`);
+    }
+  }
 }
 
 async function runPostureScenarioAssertions(page, scenario) {
   if (scenario === "unknown-intent") {
+    await openExecutionDrawer(page, "ticket");
     await page.fill("#order-symbol", "MOCK.US");
     await page.fill("#order-quantity", "1");
     await page.selectOption("#order-type", "limit");
@@ -383,6 +782,8 @@ async function runPostureScenarioAssertions(page, scenario) {
     if (pendingKeys.length !== 1) {
       throw new Error(`Unknown outcome must retain exactly one retry key; found ${pendingKeys.length}.`);
     }
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
     await page.click("#refresh-dashboard");
     await expectText(page.locator("#status-banner"), "unresolved trading intent");
     if ((await page.locator("[data-broker-mutation='true']:not(:disabled)").count()) !== 0) {
@@ -392,6 +793,7 @@ async function runPostureScenarioAssertions(page, scenario) {
   }
 
   if (scenario === "auxiliary-data-failure") {
+    await selectWorkspace(page, "macro");
     const before = await page.locator("#market-events-card").innerText();
     await page.click("#refresh-dashboard");
     await expectText(page.locator("#status-banner"), "Auxiliary panels unavailable: Market events");
@@ -409,9 +811,13 @@ async function runPostureScenarioAssertions(page, scenario) {
   }
 
   if (scenario === "core-data-failure") {
+    await openExecutionDrawer(page, "orders");
     const before = await page.locator("#orders-body").innerText();
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("#execution-drawer", { state: "hidden" });
     await page.click("#refresh-dashboard");
     await expectText(page.locator("#status-banner"), "Core account data is stale: Orders");
+    await openExecutionDrawer(page, "orders");
     const after = await page.locator("#orders-body").innerText();
     if (before !== after) {
       throw new Error("Required-data refresh failure must preserve prior Orders data.");
@@ -429,6 +835,8 @@ async function runPostureScenarioAssertions(page, scenario) {
   }
 
   if (scenario === "covered-call-data-failure") {
+    await selectWorkspace(page, "strategy");
+    await selectStrategyTab(page, "covered-call");
     const before = await page.locator("#covered-call-activity-card").innerText();
     await page.click("#refresh-dashboard");
     await expectText(page.locator("#status-banner"), "Core account data is stale: Covered Call activity");
@@ -446,6 +854,7 @@ async function runPostureScenarioAssertions(page, scenario) {
   }
 
   if (scenario === "accounts-data-failure") {
+    await selectWorkspace(page, "operations");
     await page.click("#refresh-dashboard");
     await expectText(page.locator("#status-banner"), "Mock broker accounts failure");
     if ((await page.locator("[data-broker-mutation='true']:not(:disabled)").count()) !== 0) {
@@ -474,27 +883,36 @@ async function runPostureScenarioAssertions(page, scenario) {
   if (!expectedText) {
     throw new Error(`No DOM assertion is defined for mock posture scenario '${scenario}'.`);
   }
-  const postureLocator = scenario === "paused-mandate" ? page.locator("#reconciliation-strip") : page.locator("body");
+  const location = {
+    "degraded-broker": ["operations"],
+    "paused-mandate": ["operations"],
+    "advisor-pending-record": ["strategy", "experiments"],
+    "manual-action-required": ["strategy", "bull-put"],
+    "scheduler-backoff": ["operations"],
+    "recover-eligible": ["strategy", "bull-put"],
+    "recover-rejected": ["strategy", "bull-put"],
+    "recover-already-working": ["strategy", "bull-put"],
+    "ledger-mismatch": ["operations"],
+    "repair-available": ["operations"],
+    "quote-cache-fallback": ["operations"],
+    "scheduler-lease-active": ["operations"],
+  }[scenario];
+  await selectWorkspace(page, location[0]);
+  if (location[1]) {
+    await selectStrategyTab(page, location[1]);
+  }
+  if (scenario.startsWith("recover-")) {
+    const eligibility = page.waitForResponse((response) =>
+      response.request().method() === "GET" && response.url().includes("/recover-close/eligibility"),
+    );
+    await page.locator("#spreads-body details[data-recovery-details] > summary").first().click();
+    await eligibility;
+  }
+  const postureLocator = location[0] === "operations"
+    ? page.locator("#account-section")
+    : page.locator("#strategy-section");
   await expectTextInsensitive(postureLocator, expectedText);
   return { expectedText, matched: true };
-}
-
-async function expectTextInsensitive(locator, text, timeoutMs = 10000) {
-  const deadline = Date.now() + timeoutMs;
-  const expected = text.toLowerCase();
-  let content = "";
-  while (Date.now() < deadline) {
-    try {
-      content = await locator.innerText();
-      if (content.toLowerCase().includes(expected)) {
-        return;
-      }
-    } catch {
-      // ignore and retry
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Expected text '${text}' to appear in locator content. Current content: ${content}`);
 }
 
 async function confirmTradeDialog(page, titleText, detailText) {
@@ -505,15 +923,6 @@ async function confirmTradeDialog(page, titleText, detailText) {
   }
   await page.click("#trade-confirm-accept");
   await page.waitForSelector("#trade-confirm-dialog", { state: "hidden" });
-}
-
-function isBrokerMutationPath(pathname, search) {
-  if (pathname === "/orders/submit") return true;
-  if (pathname === "/strategies/bull-put/execute") return true;
-  if (/^\/orders\/[^/]+\/(replace|cancel)$/.test(pathname)) return true;
-  if (/^\/strategies\/bull-put\/spreads\/[^/]+\/(monitor|recover-close)$/.test(pathname)) return true;
-  if (pathname.includes("/strategies/bull-put/runtime/") && pathname.endsWith("/scan") && search.includes("force=true")) return true;
-  return /^\/strategies\/covered-call\/proposals\/[^/]+\/(execute|monitor|close|roll-execute|roll-continue)$/.test(pathname);
 }
 
 function countMutationRequests(requests, pathPrefix) {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -34,6 +34,7 @@ from stocks_tool.domain.models import (
     MarketDataModeRuntime,
     MarketDataOperationRuntime,
     MarketDataRuntimeSnapshot,
+    SdkTimeoutQuarantineStatus,
     OptionChainEntry,
     OptionMarketSnapshot,
     PositionSnapshot,
@@ -104,6 +105,7 @@ class LongbridgeOrderNotAcceptedError(LongbridgeIntegrationError):
 
 class LongbridgeBrokerAdapter(BrokerAdapter):
     _QUOTE_CACHE_TTL_SECONDS = 60
+    _HISTORY_ORDERS_PAGE_LIMIT = 1000
     _BROKER_WALL_CLOCK_TIMEZONE = ZoneInfo("Asia/Hong_Kong")
 
     def __init__(self, settings: Settings) -> None:
@@ -115,6 +117,9 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         self._circuit_lock = threading.Lock()
         self._circuit_open_until_by_key: dict[str, float] = {}
         self._circuit_reason_by_key: dict[str, str] = {}
+        self._sdk_quarantine_lock = threading.Lock()
+        self._sdk_quarantined_futures: set[Future[Any]] = set()
+        self._sdk_quarantine_started_at_by_future: dict[Future[Any], datetime] = {}
         self._quote_cache_lock = threading.Lock()
         self._quote_cache: dict[tuple[str, str], tuple[float, SecurityQuoteSnapshot]] = {}
         self._market_sessions_lock = threading.Lock()
@@ -211,6 +216,37 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
 
     def get_market_data_runtime_status(self) -> MarketDataRuntimeSnapshot:
         """Return local metrics without opening a broker connection or reading credentials."""
+        now = datetime.now(timezone.utc)
+        with self._sdk_quarantine_lock:
+            completed = {
+                future
+                for future in self._sdk_quarantined_futures
+                if future.done()
+            }
+            self._sdk_quarantined_futures.difference_update(completed)
+            for future in completed:
+                self._sdk_quarantine_started_at_by_future.pop(future, None)
+            quarantine_started_at = [
+                started_at
+                for future, started_at in self._sdk_quarantine_started_at_by_future.items()
+                if future in self._sdk_quarantined_futures
+            ]
+        oldest_started_at = min(quarantine_started_at) if quarantine_started_at else None
+        sdk_quarantine = SdkTimeoutQuarantineStatus(
+            pending_count=len(quarantine_started_at),
+            oldest_started_at=oldest_started_at,
+            oldest_duration_seconds=(
+                max(0, int((now - oldest_started_at).total_seconds()))
+                if oldest_started_at is not None
+                else None
+            ),
+            next_action=(
+                "Wait for the timed-out SDK call to finish. Keep broker writes paused "
+                "and reconcile any unknown mutation before retrying."
+                if oldest_started_at is not None
+                else None
+            ),
+        )
         with self._market_sessions_lock:
             closed = self._closed
             sessions = list(self._market_sessions.values())
@@ -233,7 +269,12 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                         operations=operations,
                     )
                 )
-        return MarketDataRuntimeSnapshot(closed=closed, sessions=snapshots)
+        return MarketDataRuntimeSnapshot(
+            generated_at=now,
+            closed=closed,
+            sessions=snapshots,
+            sdk_quarantine=sdk_quarantine,
+        )
 
     def get_us_market_calendar(
         self,
@@ -594,6 +635,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return self._run_sdk_action(
             f"submit order for '{request.symbol}'",
             _submit_order,
+            mutation=True,
         )
 
     def cancel_order(
@@ -621,6 +663,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return self._run_sdk_action(
             f"cancel order '{external_order_id}'",
             _cancel_order,
+            mutation=True,
         )
 
     def replace_order(
@@ -659,6 +702,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         return self._run_sdk_action(
             f"replace order '{external_order_id}'",
             _replace_order,
+            mutation=True,
         )
 
     def get_order(
@@ -715,6 +759,17 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 start_at=start_at,
                 end_at=end_at,
             )
+            # The official response sets ``has_more`` when this 1000-row page
+            # limit is reached, but the Python SDK exposes only the list. Treat
+            # a saturated page as incomplete so reconciliation cannot infer a
+            # safe zero-match result from a truncated response.
+            if len(orders) >= self._HISTORY_ORDERS_PAGE_LIMIT:
+                raise LongbridgeIntegrationError(
+                    "Longbridge history order coverage is incomplete: the Python SDK "
+                    f"returned {len(orders)} records, saturating the "
+                    f"{self._HISTORY_ORDERS_PAGE_LIMIT}-record page limit without exposing "
+                    "has_more."
+                )
             return [self._map_order_snapshot(detail=order, mode=mode) for order in orders]
 
         return self._run_sdk_action(
@@ -859,7 +914,7 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
         cache_key: tuple[Any, ...] | None = None,
         cache_ttl_seconds: int = 0,
     ) -> T:
-        circuit_key = "market-data"
+        circuit_key = f"market-data:{mode.value}"
         session = self._get_market_session(mode)
         started_at = time.perf_counter()
         with session.metrics_lock:
@@ -975,25 +1030,40 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
                 )
             raise LongbridgeIntegrationError(f"Longbridge failed to {action}: {exc}") from exc
 
-    def _run_sdk_action(self, action: str, func):
+    def _run_sdk_action(
+        self,
+        action: str,
+        func: Callable[[], T],
+        *,
+        mutation: bool = False,
+    ) -> T:
         circuit_key = self._circuit_key_for_action(action)
         self._raise_if_circuit_open(action, circuit_key=circuit_key)
+        self._raise_if_sdk_action_quarantined(action)
         future = self._executor.submit(func)
         try:
             return future.result(timeout=max(1, self.settings.longbridge_request_timeout_seconds))
         except FuturesTimeoutError as exc:
-            future.cancel()
-            self._open_circuit(
-                circuit_key=circuit_key,
-                reason=(
-                    f"Longbridge timed out while trying to {action} after "
-                    f"{self.settings.longbridge_request_timeout_seconds}s."
-                )
-            )
-            raise LongbridgeIntegrationError(
+            canceled = future.cancel()
+            if not canceled:
+                # The synchronous SDK exposes no cancellation or context shutdown
+                # operation. Future.cancel() cannot stop a running SDK call, so
+                # quarantine it until the worker reports completion instead of
+                # starting an overlapping call or replacing executors forever.
+                self._quarantine_sdk_future(future)
+            timeout_reason = (
                 f"Longbridge timed out while trying to {action} after "
                 f"{self.settings.longbridge_request_timeout_seconds}s."
-            ) from exc
+            )
+            self._open_circuit(
+                circuit_key=circuit_key,
+                reason=timeout_reason,
+            )
+            if mutation and not canceled:
+                raise LongbridgeMutationOutcomeUnknownError(
+                    f"{timeout_reason} The mutation outcome is unknown; reconcile before retrying."
+                ) from exc
+            raise LongbridgeIntegrationError(timeout_reason) from exc
         except LongbridgeIntegrationError:
             raise
         except Exception as exc:
@@ -1005,6 +1075,32 @@ class LongbridgeBrokerAdapter(BrokerAdapter):
             raise LongbridgeIntegrationError(
                 f"Longbridge failed to {action}: {exc}"
             ) from exc
+
+    def _raise_if_sdk_action_quarantined(self, action: str) -> None:
+        with self._sdk_quarantine_lock:
+            completed = {future for future in self._sdk_quarantined_futures if future.done()}
+            self._sdk_quarantined_futures.difference_update(completed)
+            for future in completed:
+                self._sdk_quarantine_started_at_by_future.pop(future, None)
+            if not self._sdk_quarantined_futures:
+                return
+        raise LongbridgeIntegrationError(
+            f"Longbridge cannot start {action} while a timed-out SDK action is still running; "
+            "its outcome remains unknown."
+        )
+
+    def _quarantine_sdk_future(self, future: Future[Any]) -> None:
+        with self._sdk_quarantine_lock:
+            if future.done():
+                return
+            self._sdk_quarantined_futures.add(future)
+            self._sdk_quarantine_started_at_by_future[future] = datetime.now(timezone.utc)
+        future.add_done_callback(self._release_quarantined_sdk_future)
+
+    def _release_quarantined_sdk_future(self, future: Future[Any]) -> None:
+        with self._sdk_quarantine_lock:
+            self._sdk_quarantined_futures.discard(future)
+            self._sdk_quarantine_started_at_by_future.pop(future, None)
 
     def _raise_if_circuit_open(self, action: str, *, circuit_key: str) -> None:
         with self._circuit_lock:

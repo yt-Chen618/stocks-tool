@@ -1,7 +1,9 @@
+from collections.abc import Collection
+from datetime import datetime
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import exists, select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
 from stocks_tool.db.models import BrokerAccountRecord, OrderRecord
@@ -16,6 +18,12 @@ from stocks_tool.domain.enums import (
     TimeInForce,
 )
 from stocks_tool.domain.models import OptionContractRef, Order
+from stocks_tool.domain.pagination import (
+    CursorPage,
+    decode_cursor,
+    encode_cursor,
+    normalize_page_limit,
+)
 from stocks_tool.ports.repository import OrderRepository
 
 
@@ -72,17 +80,177 @@ class SQLAlchemyOrderRepository(OrderRepository):
         self,
         external_account_id: str | None = None,
         status: OrderStatus | None = None,
+        *,
+        broker: BrokerName | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        statuses: Collection[OrderStatus] | None = None,
+        order_ids: Collection[str] | None = None,
+        order_intent_ids: Collection[str] | None = None,
     ) -> list[Order]:
-        query = select(OrderRecord).order_by(OrderRecord.created_at.desc())
+        query = select(OrderRecord).order_by(OrderRecord.created_at.desc(), OrderRecord.id.desc())
         query = query.options(selectinload(OrderRecord.broker_account))
         if external_account_id is not None:
-            query = query.join(BrokerAccountRecord).where(
+            account_ids = select(BrokerAccountRecord.id).where(
                 BrokerAccountRecord.external_account_id == external_account_id
             )
+            query = query.where(OrderRecord.broker_account_id.in_(account_ids))
+        if broker is not None:
+            query = query.where(OrderRecord.broker == broker.value)
+        if mode is not None:
+            query = query.where(OrderRecord.execution_mode == mode.value)
         if status is not None:
             query = query.where(OrderRecord.status == status.value)
+        if statuses is not None:
+            normalized_statuses = [item.value for item in statuses]
+            if not normalized_statuses:
+                return []
+            query = query.where(OrderRecord.status.in_(normalized_statuses))
+        if symbol is not None:
+            query = query.where(OrderRecord.symbol == symbol.strip().upper())
+        if symbols is not None:
+            normalized_symbols = [item.strip().upper() for item in symbols if item.strip()]
+            if not normalized_symbols:
+                return []
+            query = query.where(OrderRecord.symbol.in_(normalized_symbols))
+        if order_ids is not None:
+            normalized_ids = [str(item) for item in order_ids if str(item)]
+            if not normalized_ids:
+                return []
+            query = query.where(OrderRecord.id.in_(normalized_ids))
+        if order_intent_ids is not None:
+            normalized_intent_ids = [str(item) for item in order_intent_ids if str(item)]
+            if not normalized_intent_ids:
+                return []
+            query = query.where(OrderRecord.order_intent_id.in_(normalized_intent_ids))
         records = self.session.execute(query).scalars().all()
         return [self._to_domain(record) for record in records]
+
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        query = select(OrderRecord).order_by(OrderRecord.created_at.desc(), OrderRecord.id.desc())
+        query = query.options(selectinload(OrderRecord.broker_account))
+        if external_account_id is not None:
+            account_ids = select(BrokerAccountRecord.id).where(
+                BrokerAccountRecord.external_account_id == external_account_id
+            )
+            query = query.where(OrderRecord.broker_account_id.in_(account_ids))
+        if mode is not None:
+            query = query.where(OrderRecord.execution_mode == mode.value)
+        result = self.session.execute(
+            query.execution_options(stream_results=True, yield_per=200)
+        ).scalars()
+        for record in result:
+            yield self._to_domain(record)
+
+    def list_orders_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Order]:
+        page_limit = normalize_page_limit(limit)
+        normalized_symbol = symbol.strip().upper() if symbol is not None else None
+        scope = {
+            "external_account_id": external_account_id,
+            "status": status.value if status is not None else None,
+            "mode": mode.value if mode is not None else None,
+            "symbol": normalized_symbol,
+        }
+        cursor_position: dict[str, object] | None = None
+        if cursor is not None:
+            cursor_position = decode_cursor(cursor, resource="orders", scope=scope)
+        account_ids: list[str] | None = None
+        if external_account_id is not None:
+            account_ids = list(
+                self.session.execute(
+                    select(BrokerAccountRecord.id).where(
+                        BrokerAccountRecord.external_account_id == external_account_id
+                    )
+                ).scalars()
+            )
+            if not account_ids:
+                return CursorPage(items=[], next_cursor=None, has_more=False, limit=page_limit)
+        query = select(OrderRecord.id).order_by(OrderRecord.created_at.desc(), OrderRecord.id.desc())
+        if account_ids is not None:
+            query = query.where(OrderRecord.broker_account_id.in_(account_ids))
+        if status is not None:
+            query = query.where(OrderRecord.status == status.value)
+        if mode is not None:
+            query = query.where(OrderRecord.execution_mode == mode.value)
+        if normalized_symbol is not None:
+            query = query.where(OrderRecord.symbol == normalized_symbol)
+        if cursor_position is not None:
+            try:
+                created_at = datetime.fromisoformat(str(cursor_position["created_at"]))
+                order_id = str(cursor_position["id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("Invalid pagination cursor position.") from exc
+            query = query.where(tuple_(OrderRecord.created_at, OrderRecord.id) < (created_at, order_id))
+        record_ids = self.session.execute(query.limit(page_limit + 1)).scalars().all()
+        has_more = len(record_ids) > page_limit
+        record_ids = record_ids[:page_limit]
+        if record_ids:
+            record_by_id = {
+                record.id: record
+                for record in self.session.execute(
+                    select(OrderRecord)
+                    .options(selectinload(OrderRecord.broker_account))
+                    .where(OrderRecord.id.in_(record_ids))
+                ).scalars().all()
+            }
+            records = [record_by_id[record_id] for record_id in record_ids]
+        else:
+            records = []
+        items = [self._to_domain(record) for record in records]
+        next_cursor = None
+        if has_more and records:
+            last = records[-1]
+            next_cursor = encode_cursor(
+                resource="orders",
+                scope=scope,
+                position={"created_at": last.created_at.isoformat(), "id": last.id},
+            )
+        return CursorPage(
+            items=items,
+            next_cursor=next_cursor,
+            has_more=has_more,
+            limit=page_limit,
+        )
+
+    def has_working_orders(
+        self,
+        external_account_id: str,
+        *,
+        broker: BrokerName,
+        mode: ExecutionMode,
+        statuses: Collection[OrderStatus],
+    ) -> bool:
+        """Check for a matching order without materializing the order history."""
+        matching_orders = (
+            select(OrderRecord.id)
+            .join(BrokerAccountRecord, OrderRecord.broker_account_id == BrokerAccountRecord.id)
+            .where(BrokerAccountRecord.external_account_id == external_account_id)
+        )
+        matching_orders = matching_orders.where(
+            BrokerAccountRecord.broker == broker.value,
+            OrderRecord.execution_mode == mode.value,
+        )
+        status_values = [value.value for value in statuses]
+        if not status_values:
+            return False
+        matching_orders = matching_orders.where(OrderRecord.status.in_(status_values))
+        query = select(exists(matching_orders))
+        return bool(self.session.execute(query).scalar_one())
 
     def update_order(self, order: Order) -> Order:
         record = self.session.get(OrderRecord, order.id)

@@ -1,4 +1,4 @@
-.venv/
+.venv*/
 __pycache__/
 .pytest_cache/
 .mypy_cache/
@@ -15,3 +15,5 @@ artifacts/
 output/*.log
 output/playwright/
 .playwright-cli/
+node_modules/
+.playwright-browsers/

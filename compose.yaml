@@ -1,6 +1,9 @@
 services:
   db:
-    image: postgres:16
+    # PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1), digest captured from the
+    # verified local image on 2026-10-02. Keep the digest when refreshing the
+    # image so CI and local temporary-PostgreSQL gates run the same server.
+    image: postgres:16.14@sha256:bffa6baeb307a531d731bf3ef9835dc396afaeddf81944337b8f990b2109ffca
     container_name: stocks-tool-postgres
     restart: unless-stopped
     environment:
@@ -19,4 +22,3 @@ services:
 
 volumes:
   postgres_data:
-

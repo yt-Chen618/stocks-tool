@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
 import httpx
-from regression_common import build_report, emit_report
+from browser_runtime import browser_environment, resolve_node, resolve_playwright_core
+from regression_common import build_report, emit_report, run_bounded_process
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -52,7 +50,20 @@ def parse_args() -> argparse.Namespace:
         default=7000,
         help="Target upper bound for the full overlay-settled timing.",
     )
+    parser.add_argument(
+        "--research-target-ms",
+        type=int,
+        default=3000,
+        help="Target upper bound for warm research-table readiness without waiting for technicals.",
+    )
+    parser.add_argument(
+        "--chart-target-ms",
+        type=int,
+        default=2000,
+        help="Target upper bound for a warm cached selected-symbol chart.",
+    )
     parser.add_argument("--json-output", help="Optional file path for the JSON regression report.")
+    parser.add_argument("--browser-timeout-seconds", type=float, default=300.0, help="Finite timeout for the browser flow.")
     return parser.parse_args()
 
 
@@ -71,42 +82,18 @@ def require_ok(response: httpx.Response) -> Any:
     raise RegressionError(detail)
 
 
-def resolve_playwright_core() -> str:
-    npm_command = shutil.which("npm.cmd") or shutil.which("npm")
-    if npm_command is None:
-        raise RegressionError("Could not find npm. Install Node.js/npm before running browser regression.")
-    npm_root = subprocess.run(
-        [npm_command, "root", "-g"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    candidates = [
-        Path(npm_root) / "@playwright" / "cli" / "node_modules" / "playwright-core",
-        Path(npm_root) / "playwright-core",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
-    raise RegressionError(
-        "Could not locate a global playwright-core install. Install @playwright/cli and browsers first."
-    )
-
-
 def run_browser_flow(
     *,
     base_url: str,
     iterations: int,
     settle_timeout_seconds: float,
     pause_milliseconds: int,
+    browser_timeout_seconds: float,
 ) -> dict[str, Any]:
     screenshot_path = ROOT / "output" / "playwright" / "real-local-dashboard-refresh.png"
     playwright_core_path = resolve_playwright_core()
-    node_command = shutil.which("node.exe") or shutil.which("node")
-    if node_command is None:
-        raise RegressionError("Could not find node. Install Node.js before running browser regression.")
-    completed = subprocess.run(
+    node_command = resolve_node()
+    completed = run_bounded_process(
         [
             node_command,
             str(ROOT / "scripts" / "real_local_dashboard_refresh_flow.js"),
@@ -118,16 +105,15 @@ def run_browser_flow(
             str(pause_milliseconds),
         ],
         cwd=ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env={**os.environ},
+        env=browser_environment(),
+        timeout_seconds=browser_timeout_seconds,
     )
-    if completed.returncode != 0:
+    if completed.status != "completed" or completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip() or "Unknown browser regression failure."
-        raise RegressionError(detail)
+        error = RegressionError(f"Real dashboard browser flow {completed.status}: {detail}")
+        error.process_status = completed.status
+        error.process_cleanup = completed.cleanup
+        raise error
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
@@ -139,12 +125,20 @@ def summarize_runs(
     *,
     dashboard_target_ms: int,
     overlay_target_ms: int,
+    research_target_ms: int,
+    chart_target_ms: int,
 ) -> dict[str, Any]:
     if not runs:
         raise RegressionError("Browser refresh regression returned no runs.")
 
     dashboard_timings = [int(run["dashboard_ready_ms"]) for run in runs]
+    research_timings = [int(run["research_table_ready_ms"]) for run in runs]
+    chart_timings = [int(run["selected_chart_ready_ms"]) for run in runs]
     overlay_timings = [int(run["overlays_settled_ms"]) for run in runs]
+    warm_dashboard_timings = dashboard_timings[1:] or dashboard_timings
+    warm_research_timings = research_timings[1:] or research_timings
+    warm_chart_timings = chart_timings[1:] or chart_timings
+    warm_overlay_timings = overlay_timings[1:] or overlay_timings
     dashboard_paths = [
         resource
         for run in runs
@@ -172,7 +166,9 @@ def summarize_runs(
         prefix: summary
         for prefix in (
             "/account-snapshots/latest",
-            "/brokers/longbridge/quote",
+            "/research/universe",
+            "/research/technicals",
+            "/research/symbols/",
             "/strategies/pre-open-risk",
             "/orders",
             "/strategies/bull-put/spreads",
@@ -189,17 +185,31 @@ def summarize_runs(
         "iterations": len(runs),
         "dashboard_target_ms": dashboard_target_ms,
         "overlay_target_ms": overlay_target_ms,
+        "research_target_ms": research_target_ms,
+        "chart_target_ms": chart_target_ms,
         "dashboard_ready": {
             "min_ms": min(dashboard_timings),
             "max_ms": max(dashboard_timings),
             "avg_ms": round(sum(dashboard_timings) / len(dashboard_timings), 1),
-            "within_target": all(value <= dashboard_target_ms for value in dashboard_timings),
+            "warm_within_target": all(value <= dashboard_target_ms for value in warm_dashboard_timings),
         },
         "overlay_settled": {
             "min_ms": min(overlay_timings),
             "max_ms": max(overlay_timings),
             "avg_ms": round(sum(overlay_timings) / len(overlay_timings), 1),
-            "within_target": all(value <= overlay_target_ms for value in overlay_timings),
+            "warm_within_target": all(value <= overlay_target_ms for value in warm_overlay_timings),
+        },
+        "research_table_ready": {
+            "min_ms": min(research_timings),
+            "max_ms": max(research_timings),
+            "avg_ms": round(sum(research_timings) / len(research_timings), 1),
+            "warm_within_target": all(value <= research_target_ms for value in warm_research_timings),
+        },
+        "selected_chart_ready": {
+            "min_ms": min(chart_timings),
+            "max_ms": max(chart_timings),
+            "avg_ms": round(sum(chart_timings) / len(chart_timings), 1),
+            "warm_within_target": all(value <= chart_target_ms for value in warm_chart_timings),
         },
         "resource_summary_ms": resource_summary,
     }
@@ -207,10 +217,14 @@ def summarize_runs(
 
 def build_summary_line(summary: dict[str, Any]) -> str:
     dashboard = summary["dashboard_ready"]
+    research = summary["research_table_ready"]
+    chart = summary["selected_chart_ready"]
     overlay = summary["overlay_settled"]
     return (
         "Real local dashboard refresh regression passed. "
         f"Dashboard ready {dashboard['min_ms']}-{dashboard['max_ms']}ms, "
+        f"research table {research['min_ms']}-{research['max_ms']}ms, "
+        f"selected chart {chart['min_ms']}-{chart['max_ms']}ms, "
         f"overlays settled {overlay['min_ms']}-{overlay['max_ms']}ms across {summary['iterations']} loads."
     )
 
@@ -232,16 +246,25 @@ def main() -> None:
                 iterations=args.iterations,
                 settle_timeout_seconds=args.settle_timeout_seconds,
                 pause_milliseconds=args.pause_milliseconds,
+                browser_timeout_seconds=args.browser_timeout_seconds,
             )
             summary = summarize_runs(
                 browser["runs"],
                 dashboard_target_ms=args.dashboard_target_ms,
                 overlay_target_ms=args.overlay_target_ms,
+                research_target_ms=args.research_target_ms,
+                chart_target_ms=args.chart_target_ms,
             )
-            if not summary["dashboard_ready"]["within_target"] or not summary["overlay_settled"]["within_target"]:
+            if (
+                not summary["dashboard_ready"]["warm_within_target"]
+                or not summary["overlay_settled"]["warm_within_target"]
+                or not summary["research_table_ready"]["warm_within_target"]
+                or not summary["selected_chart_ready"]["warm_within_target"]
+            ):
                 raise RegressionError(
                     "Dashboard refresh timings exceeded the configured target. "
-                    f"dashboard={summary['dashboard_ready']} overlay={summary['overlay_settled']}"
+                    f"dashboard={summary['dashboard_ready']} research={summary['research_table_ready']} "
+                    f"chart={summary['selected_chart_ready']} overlay={summary['overlay_settled']}"
                 )
 
             emit_report(
@@ -266,7 +289,7 @@ def main() -> None:
                 build_report(
                     script="run_real_local_dashboard_refresh_regression.py",
                     workflow="real-local-dashboard-refresh-regression",
-                    status="failed",
+                    status=getattr(error, "process_status", "failed"),
                     mode="real-local",
                     target=base_url,
                     summary="Real local dashboard refresh regression failed.",

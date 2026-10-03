@@ -1,8 +1,8 @@
 import hashlib
 import json
 import logging
-from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Collection
+from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -16,6 +16,7 @@ from stocks_tool.domain.enums import (
     AssetType,
     BrokerName,
     ExecutionMode,
+    OptionRight,
     OrderStatus,
     ReconciliationStatus,
     TradingIntentState,
@@ -29,6 +30,7 @@ from stocks_tool.domain.models import (
     Execution,
     Order,
     OrderSyncResult,
+    OptionContractRef,
     PreparedBrokerOrderIntent,
     PreparedTradeActionIntent,
     ReplaceOrderRequest,
@@ -37,6 +39,8 @@ from stocks_tool.domain.models import (
     TradingIntentReconciliationResult,
     TradingActionContext,
 )
+from stocks_tool.domain.option_symbols import parse_us_option_symbol
+from stocks_tool.domain.pagination import CursorPage
 from stocks_tool.ports.repository import (
     BrokerAccountRepository,
     ExecutionRepository,
@@ -99,8 +103,55 @@ class OrderService:
     def list_orders(
         self,
         external_account_id: str | None = None,
+        *,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        symbols: Collection[str] | None = None,
+        statuses: Collection[OrderStatus] | None = None,
+        order_ids: Collection[str] | None = None,
+        order_intent_ids: Collection[str] | None = None,
     ) -> list[Order]:
-        return self.orders.list_orders(external_account_id=external_account_id)
+        return self.orders.list_orders(
+            external_account_id=external_account_id,
+            status=status,
+            mode=mode,
+            symbol=symbol,
+            symbols=symbols,
+            statuses=statuses,
+            order_ids=order_ids,
+            order_intent_ids=order_intent_ids,
+        )
+
+    def list_orders_page(
+        self,
+        *,
+        external_account_id: str | None = None,
+        status: OrderStatus | None = None,
+        mode: ExecutionMode | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> CursorPage[Order]:
+        return self.orders.list_orders_page(
+            external_account_id=external_account_id,
+            status=status,
+            mode=mode,
+            symbol=symbol,
+            limit=limit,
+            cursor=cursor,
+        )
+
+    def iter_orders(
+        self,
+        *,
+        external_account_id: str | None = None,
+        mode: ExecutionMode | None = None,
+    ):
+        return self.orders.iter_orders(
+            external_account_id=external_account_id,
+            mode=mode,
+        )
 
     def get_order(self, order_id: str) -> Order | None:
         return self.orders.get_order(order_id)
@@ -111,7 +162,10 @@ class OrderService:
         external_account_id: str | None = None,
         mode: ExecutionMode | None = None,
         state: TradingIntentState | None = None,
-        limit: int = 100,
+        states: Collection[TradingIntentState] | None = None,
+        operation: TradingOperation | None = None,
+        operations: Collection[TradingOperation] | None = None,
+        limit: int | None = 100,
     ) -> list[BrokerOrderIntent]:
         if self.intent_ledger is None:
             return []
@@ -119,6 +173,9 @@ class OrderService:
             external_account_id=external_account_id,
             mode=mode,
             state=state,
+            states=states,
+            operation=operation,
+            operations=operations,
             limit=limit,
         )
 
@@ -277,19 +334,57 @@ class OrderService:
             )
 
         now = datetime.now(timezone.utc)
+        history_start_at = min(
+            self._as_utc(intent.created_at)
+            for intent in intents
+        )
+        exact_lookup_failures: dict[str, str] = {}
+        exact_lookup_successes: set[str] = set()
+        exact_remote_orders: dict[str, BrokerOrderSnapshot] = {}
+        for intent in intents:
+            if intent.operation not in {
+                TradingOperation.CANCEL,
+                TradingOperation.REPLACE,
+            }:
+                continue
+            expected_external_id = self._known_external_order_id(intent)
+            if expected_external_id is None:
+                exact_lookup_failures[intent.id] = (
+                    "cancel/replace intent has no known external order id"
+                )
+                continue
+            try:
+                exact_snapshot = self.longbridge_adapter.get_order(
+                    expected_external_id,
+                    mode,
+                )
+                if exact_snapshot is None or exact_snapshot.external_order_id != expected_external_id:
+                    raise ValueError(
+                        "broker returned no matching order detail"
+                    )
+                exact_lookup_successes.add(intent.id)
+                exact_remote_orders[expected_external_id] = exact_snapshot
+            except Exception as exc:
+                exact_lookup_failures[intent.id] = (
+                    f"exact broker order lookup failed for '{expected_external_id}': {exc}"
+                )
         try:
             remote_orders = self.longbridge_adapter.list_today_orders(mode=mode)
             remote_orders.extend(
                 self.longbridge_adapter.list_history_orders(
                     mode=mode,
-                    start_at=now - timedelta(days=7),
+                    start_at=history_start_at,
                     end_at=now,
                 )
             )
         except Exception as exc:
             warning = f"Trading intent reconciliation could not load complete broker order history: {exc}"
             for intent in intents:
-                self.intent_ledger.record_reconciliation_attempt(intent.id, warning)
+                self.intent_ledger.record_reconciliation_attempt(
+                    intent.id,
+                    warning,
+                    zero_match=False,
+                )
             return TradingIntentReconciliationResult(
                 external_account_id=external_account_id,
                 mode=mode,
@@ -304,6 +399,7 @@ class OrderService:
             for snapshot in remote_orders
             if snapshot.external_order_id
         }
+        unique_remote_orders.update(exact_remote_orders)
         resolved_ids: list[str] = []
         warnings: list[str] = []
         for intent in intents:
@@ -317,10 +413,51 @@ class OrderService:
                     f"Intent {intent.id} matched {len(matches)} broker orders; "
                     "it remains unknown and no broker mutation was retried."
                 )
+                fingerprint_conflict = (
+                    len(matches) == 0
+                    and intent.operation == TradingOperation.SUBMIT
+                    and any(
+                        self._snapshot_has_broker_marker(intent, snapshot)
+                        or (
+                            bool(intent.external_order_id)
+                            and snapshot.external_order_id == intent.external_order_id
+                        )
+                        for snapshot in unique_remote_orders.values()
+                    )
+                )
+                exact_lookup_failed = intent.id in exact_lookup_failures
+                exact_target_unconfirmed = (
+                    len(matches) == 0
+                    and intent.id in exact_lookup_successes
+                )
+                zero_match = (
+                    len(matches) == 0
+                    and not fingerprint_conflict
+                    and not exact_lookup_failed
+                    and not exact_target_unconfirmed
+                )
+                if fingerprint_conflict:
+                    warning += (
+                        " A broker order reused the intent marker or external id "
+                        "but failed its fingerprint."
+                    )
+                if exact_lookup_failed:
+                    warning += f" {exact_lookup_failures[intent.id]}"
+                if exact_target_unconfirmed:
+                    warning += (
+                        " Exact broker order detail exists, but the requested "
+                        "cancel/replace result was not confirmed."
+                    )
                 self.intent_ledger.record_reconciliation_attempt(
                     intent.id,
                     warning,
-                    zero_match=len(matches) == 0,
+                    zero_match=zero_match,
+                    reconciliation_coverage_start_at=(
+                        history_start_at if zero_match else None
+                    ),
+                    reconciliation_coverage_end_at=(
+                        now if zero_match else None
+                    ),
                 )
                 warnings.append(warning)
                 continue
@@ -875,7 +1012,7 @@ class OrderService:
         snapshot: BrokerOrderSnapshot,
     ) -> bool:
         if intent.operation == TradingOperation.CANCEL:
-            expected_external_id = intent.request_payload.get("external_order_id")
+            expected_external_id = OrderService._known_external_order_id(intent)
             return bool(
                 expected_external_id
                 and snapshot.external_order_id == expected_external_id
@@ -884,13 +1021,10 @@ class OrderService:
             )
         payload = intent.request_payload
         if intent.operation == TradingOperation.REPLACE:
-            expected_external_id = payload.get("external_order_id")
+            expected_external_id = OrderService._known_external_order_id(intent)
             if not expected_external_id or snapshot.external_order_id != expected_external_id:
                 return False
-            remark = snapshot.remark
-            if not remark and snapshot.raw_payload:
-                raw_remark = snapshot.raw_payload.get("remark")
-                remark = str(raw_remark) if raw_remark is not None else None
+            remark = OrderService._snapshot_remark(snapshot)
             if not remark or intent.broker_marker not in remark:
                 return False
             if int(payload.get("quantity") or 0) != snapshot.quantity:
@@ -906,22 +1040,19 @@ class OrderService:
                 elif actual is None or Decimal(str(expected)) != actual:
                     return False
             return True
-        if (
-            intent.operation == TradingOperation.SUBMIT
-            and intent.external_order_id
-            and snapshot.external_order_id == intent.external_order_id
-        ):
-            return True
-        remark = snapshot.remark
-        if not remark and snapshot.raw_payload:
-            raw_remark = snapshot.raw_payload.get("remark")
-            remark = str(raw_remark) if raw_remark is not None else None
+        remark = OrderService._snapshot_remark(snapshot)
         if not remark or intent.broker_marker not in remark:
             return False
         if payload.get("symbol") and payload["symbol"] != snapshot.symbol:
             return False
         expected_side = payload.get("side")
         if expected_side and expected_side != snapshot.side.value:
+            return False
+        expected_order_type = payload.get("order_type")
+        if expected_order_type and expected_order_type != snapshot.order_type.value:
+            return False
+        expected_time_in_force = payload.get("time_in_force")
+        if expected_time_in_force and expected_time_in_force != snapshot.time_in_force.value:
             return False
         expected_quantity = payload.get("quantity")
         if expected_quantity is not None and int(expected_quantity) != snapshot.quantity:
@@ -934,6 +1065,34 @@ class OrderService:
             if expected is not None and (actual is None or Decimal(str(expected)) != actual):
                 return False
         return True
+
+    @staticmethod
+    def _known_external_order_id(intent: BrokerOrderIntent) -> str | None:
+        if intent.external_order_id:
+            return intent.external_order_id
+        payload = intent.request_payload if isinstance(intent.request_payload, dict) else {}
+        value = payload.get("external_order_id")
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @staticmethod
+    def _snapshot_remark(snapshot: BrokerOrderSnapshot) -> str | None:
+        if snapshot.remark:
+            return snapshot.remark
+        if snapshot.raw_payload:
+            raw_remark = snapshot.raw_payload.get("remark")
+            return str(raw_remark) if raw_remark is not None else None
+        return None
+
+    @staticmethod
+    def _snapshot_has_broker_marker(
+        intent: BrokerOrderIntent,
+        snapshot: BrokerOrderSnapshot,
+    ) -> bool:
+        remark = OrderService._snapshot_remark(snapshot)
+        return bool(remark and intent.broker_marker in remark)
 
     def _persist_reconciled_intent(
         self,
@@ -1006,6 +1165,7 @@ class OrderService:
         raw_payload = dict(local_order.raw_payload or {})
         raw_payload["remote_order"] = remote_snapshot.raw_payload
         raw_payload["refreshed_at"] = datetime.now(timezone.utc).isoformat()
+        option_contract = OrderService._option_contract_from_symbol(remote_snapshot.symbol)
         return local_order.model_copy(
             update={
                 "external_order_id": remote_snapshot.external_order_id,
@@ -1019,6 +1179,16 @@ class OrderService:
                 "executed_price": remote_snapshot.executed_price,
                 "limit_price": remote_snapshot.limit_price,
                 "stop_price": remote_snapshot.stop_price,
+                "asset_type": (
+                    AssetType.OPTION
+                    if option_contract is not None
+                    else local_order.asset_type
+                ),
+                "option_contract": (
+                    option_contract
+                    if option_contract is not None
+                    else local_order.option_contract
+                ),
                 "submitted_at": remote_snapshot.submitted_at,
                 "raw_payload": raw_payload,
                 "updated_at": datetime.now(timezone.utc),
@@ -1033,6 +1203,7 @@ class OrderService:
         mode: ExecutionMode,
     ) -> Order:
         now = datetime.now(timezone.utc)
+        option_contract = self._option_contract_from_symbol(remote_snapshot.symbol)
         return Order(
             id=str(uuid4()),
             broker=BrokerName.LONGBRIDGE,
@@ -1041,7 +1212,7 @@ class OrderService:
             external_order_id=remote_snapshot.external_order_id,
             client_order_id=f"import-{remote_snapshot.external_order_id}",
             symbol=remote_snapshot.symbol,
-            asset_type=AssetType.STOCK,
+            asset_type=AssetType.OPTION if option_contract is not None else AssetType.STOCK,
             side=remote_snapshot.side,
             quantity=remote_snapshot.quantity,
             order_type=remote_snapshot.order_type,
@@ -1050,7 +1221,7 @@ class OrderService:
             status=remote_snapshot.status,
             limit_price=remote_snapshot.limit_price,
             stop_price=remote_snapshot.stop_price,
-            option_contract=None,
+            option_contract=option_contract,
             raw_payload={
                 "remote_order": remote_snapshot.raw_payload,
                 "imported": True,
@@ -1059,6 +1230,28 @@ class OrderService:
             created_at=remote_snapshot.submitted_at or now,
             updated_at=now,
         )
+
+    @staticmethod
+    def _option_contract_from_symbol(symbol: str) -> OptionContractRef | None:
+        parsed = parse_us_option_symbol(symbol)
+        if parsed is None:
+            return None
+        return OptionContractRef(
+            underlying_symbol=parsed.underlying_symbol,
+            expiration_date=parsed.expiration_date,
+            strike=parsed.strike,
+            right=(
+                OptionRight.CALL
+                if parsed.right == "C"
+                else OptionRight.PUT
+            ),
+        )
+
+    @staticmethod
+    def _as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _sync_execution_from_snapshot(
         self,
